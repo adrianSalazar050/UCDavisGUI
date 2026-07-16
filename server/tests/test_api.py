@@ -43,6 +43,23 @@ def test_frame_served_with_headers(tmp_path):
     assert r.headers["cache-control"] == "no-store"
 
 
+def test_frame_404_when_file_vanishes_after_discovery(tmp_path, monkeypatch):
+    make_frame(tmp_path, layer=3)
+    import server.main as main_mod
+    real = main_mod.runs.newest_frame
+
+    def vanishing(runs_dir):
+        info = real(runs_dir)
+        if info:
+            info["path"].unlink()  # file disappears right after discovery
+        return info
+
+    monkeypatch.setattr(main_mod.runs, "newest_frame", vanishing)
+    r = client(tmp_path).get("/api/frame/latest")
+    assert r.status_code == 404
+    assert r.json() == {"error": "no active run"}
+
+
 def test_ws_sends_summary_immediately(tmp_path):
     with client(tmp_path).websocket_connect("/ws") as ws:
         msg = ws.receive_json()

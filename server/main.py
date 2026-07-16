@@ -8,7 +8,7 @@ import pathlib
 import time
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import runs
@@ -34,22 +34,33 @@ def create_app(service, runs_dir: pathlib.Path,
         info = runs.newest_frame(runs_dir)
         if info is None:
             return JSONResponse({"error": "no active run"}, status_code=404)
-        return FileResponse(
-            info["path"], media_type="image/jpeg",
+        try:
+            # Read in-handler (FastAPI runs sync routes in a threadpool) so a
+            # frame vanishing between discovery and send stays a clean 404
+            # instead of FileResponse's late FileNotFoundError -> 500.
+            # capture.py writes non-atomically, so a rare truncated JPEG is
+            # possible and accepted; the frontend re-polls within 2 s.
+            data = info["path"].read_bytes()
+        except OSError:
+            return JSONResponse({"error": "no active run"}, status_code=404)
+        return Response(
+            content=data, media_type="image/jpeg",
             headers={"X-Frame-Layer": str(info["layer"]),
                      "X-Frame-Run": info["run"],
                      "Cache-Control": "no-store"})
 
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
-        await sock.accept()
-        payload = service.summary()
-        await sock.send_text(json.dumps(payload))
-        last_sent, last_time = payload, time.monotonic()
         try:
+            await sock.accept()
+            payload = service.summary()
+            await sock.send_text(json.dumps(payload))
+            last_sent, last_time = payload, time.monotonic()
             while True:
                 await asyncio.sleep(WS_POLL_S)
                 now = time.monotonic()
+                # summary() must stay non-blocking: it runs on the event loop
+                # and a stall here would freeze every connected client.
                 payload = service.summary()
                 # report_age_s ticks every sample; ignore it when deciding
                 # whether the state meaningfully changed.
