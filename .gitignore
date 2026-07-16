@@ -11,8 +11,10 @@ frontend/dist/
 
 runs/
 runs-mock/
-# holds LAN access codes in plaintext — must never be committed
-printers.json
+# holds LAN access codes in plaintext — must never be committed; the
+# trailing * also covers save()'s temp file (printers.json<random>.tmp) so
+# an interrupted write can't leak the access code past this rule
+printers.json*
 *.pt
 
 # Large dataset files

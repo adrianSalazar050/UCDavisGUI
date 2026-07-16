@@ -41,9 +41,30 @@ class PrinterConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "PrinterConfig":
-        return cls(
-            serial=d["serial"], host=d["host"], access_code=d["access_code"],
-            name=d.get("name", ""), capture=bool(d.get("capture", False)))
+        # Validate before __post_init__ strips: (x or "").strip() tolerates
+        # None/0/False by coercing them to "", so a falsy wrong-typed serial
+        # would otherwise be silently *accepted* as "" instead of rejected --
+        # and the registry keys on serial, so several such entries would
+        # collapse onto one printer. Reject non-string required fields
+        # outright instead of letting __post_init__ explode or coerce.
+        for k in ("serial", "host", "access_code"):
+            if not isinstance(d[k], str):  # KeyError if absent, TypeError if
+                raise TypeError(            # `d` itself isn't a dict
+                    f"{k} must be a string, got {type(d[k]).__name__}")
+        name = d.get("name", "")
+        if not isinstance(name, str):
+            name = ""  # cosmetic field: wrong type -> treat as absent
+        capture = d.get("capture", False)
+        if not isinstance(capture, bool):
+            # bool(...) would turn the string "false" into True. capture
+            # gates single-occupancy webcam access, so a bad value must
+            # default to the safe direction (False), not to whatever
+            # truthiness the wrong type happens to have.
+            log.warning("capture must be true/false, got %r; defaulting to "
+                        "False", capture)
+            capture = False
+        return cls(serial=d["serial"], host=d["host"],
+                   access_code=d["access_code"], name=name, capture=capture)
 
 
 class PrinterStore:
@@ -66,11 +87,10 @@ class PrinterStore:
         except FileNotFoundError:
             return []
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-            # UnicodeDecodeError is a ValueError subclass, NOT an OSError, so
-            # it does not get caught by `except OSError` above -- easy to
-            # miss, and exactly why this bug existed. Hand-editing
-            # printers.json from a PowerShell prompt (Out-File/Set-Content
-            # default to UTF-16 LE with a BOM) is enough to trigger it.
+            # UnicodeDecodeError is a ValueError subclass, not an OSError, so
+            # it needs naming here explicitly. Hand-editing printers.json
+            # from a PowerShell prompt (Out-File/Set-Content default to
+            # UTF-16 LE with a BOM) is enough to trigger it.
             log.warning("%s is unreadable (%s); starting with no printers",
                         self.path, e)
             return []
@@ -82,26 +102,47 @@ class PrinterStore:
         for entry in raw:
             try:
                 out.append(PrinterConfig.from_dict(entry))
-            except (KeyError, TypeError, AttributeError) as e:
-                # KeyError: a required key is absent. TypeError: `entry` isn't
-                # a dict at all. AttributeError: a required key is present but
-                # holds a non-string value, so __post_init__'s .strip() call
-                # blows up -- a wrong-typed field is just another shape of
-                # malformed entry, and gets the same treatment: skip it and
-                # log, rather than str()-coercing it into a subtly wrong
-                # config that goes on to reach the MQTT layer.
+            except (KeyError, TypeError) as e:
+                # KeyError: a required key is absent. TypeError: `entry`
+                # isn't a dict, or a required field isn't a string --
+                # from_dict validates and raises explicitly rather than
+                # relying on __post_init__ to explode (or, worse, silently
+                # coerce a falsy wrong-typed value like None/0/False into
+                # ""). AttributeError is deliberately NOT caught here: it
+                # would now indicate a genuine bug elsewhere in from_dict/
+                # __post_init__, and swallowing it would silently drop every
+                # printer in the file instead of surfacing the bug.
                 log.warning("skipping malformed entry in %s: %s", self.path, e)
         return out
 
     def save(self, configs: list[PrinterConfig]) -> None:
-        """Atomic: a crash mid-write must not leave a truncated file that
-        bricks the next startup."""
+        """Atomic and durable: os.replace() makes the swap atomic (a process
+        crash mid-write can't leave a truncated printers.json), and the
+        flush()+fsync() below make sure the data is actually on disk before
+        that swap lands (a power-loss right after replace can't leave a
+        zero-length one either). Either failure mode would otherwise read
+        back as "every printer silently vanished", since load() is
+        deliberately tolerant of a bad file."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data = json.dumps([c.to_dict() for c in configs], indent=2)
-        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+        # prefix=self.path.name (not the default "tmp") is load-bearing: it
+        # is what makes this temp file start with "printers.json" and fall
+        # under .gitignore's "printers.json*" rule by construction, so an
+        # interrupted write here (Ctrl-C, power loss, task kill) can never
+        # leak the access code past .gitignore the way a generic
+        # tmpXXXXXX.tmp would.
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent),
+                                   prefix=self.path.name, suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            try:
+                f = os.fdopen(fd, "w", encoding="utf-8")
+            except BaseException:
+                os.close(fd)  # fdopen failed -- the fd is still ours to
+                raise         # close, or it leaks and later masks this error
+            with f:
                 f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.path)
         except BaseException:
             pathlib.Path(tmp).unlink(missing_ok=True)
