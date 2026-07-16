@@ -5,7 +5,9 @@ export default function NavGroup({ label, items, activeKey, onSelect }) {
       {items.map(({ key, title }) => (
         <button
           key={key}
+          type="button"
           className={`ui-navgroup__item${key === activeKey ? " ui-navgroup__item--active" : ""}`}
+          aria-current={key === activeKey ? "page" : undefined}
           onClick={() => onSelect(key)}
         >
           {title}
