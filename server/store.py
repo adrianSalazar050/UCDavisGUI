@@ -55,7 +55,14 @@ class PrinterStore:
 
     def load(self) -> list[PrinterConfig]:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            # utf-8-sig, not utf-8: Windows editors (Notepad and friends) add
+            # a BOM on save, and a BOM'd file is otherwise-good JSON that
+            # would silently read as "no printers" under plain utf-8.
+            # utf-8-sig strips the BOM when present and is byte-for-byte
+            # identical to utf-8 when absent -- a real UTF-16 file still
+            # fails to decode and still returns [] with a warning, which is
+            # correct since it genuinely isn't UTF-8.
+            raw = json.loads(self.path.read_text(encoding="utf-8-sig"))
         except FileNotFoundError:
             return []
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:

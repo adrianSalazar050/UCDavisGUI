@@ -60,6 +60,18 @@ def test_invalid_utf8_bytes_load_empty(tmp_path):
     assert PrinterStore(p).load() == []
 
 
+def test_utf8_bom_file_still_loads(tmp_path):
+    # Notepad and friends prepend a UTF-8 BOM on save. The JSON is fine; only
+    # the three leading bytes aren't. Reading with utf-8 would make every
+    # configured printer silently vanish.
+    p = tmp_path / "printers.json"
+    p.write_bytes(b"\xef\xbb\xbf" + json.dumps(
+        [{"serial": "S1", "host": "1.2.3.4", "access_code": "c"}]
+    ).encode("utf-8"))
+    got = PrinterStore(p).load()
+    assert [c.serial for c in got] == ["S1"]
+
+
 def test_entry_missing_required_field_is_skipped(tmp_path):
     p = tmp_path / "printers.json"
     p.write_text(json.dumps([
