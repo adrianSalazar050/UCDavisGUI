@@ -182,7 +182,38 @@ def test_memory_store_load_returns_a_copy():
     store.save([cfg()])
     store.load().clear()
     assert len(store.load()) == 1
+
+
+def test_invalid_utf8_bytes_load_empty(tmp_path):
+    # PowerShell's Out-File/Set-Content default to UTF-16 LE with a BOM, so a
+    # hand-edit from a PS prompt lands 0xFF 0xFE here. UnicodeDecodeError
+    # subclasses ValueError, not OSError -- it must be caught explicitly or it
+    # escapes load() and kills the boot path.
+    p = tmp_path / "printers.json"
+    p.write_bytes(b"\xff\xfe[{\"serial\": \"x\"}]")
+    assert PrinterStore(p).load() == []
+
+
+def test_utf8_bom_file_still_loads(tmp_path):
+    # Notepad and friends prepend a UTF-8 BOM on save. The JSON is fine; only
+    # the three leading bytes aren't. Reading with utf-8 would make every
+    # configured printer silently vanish.
+    p = tmp_path / "printers.json"
+    p.write_bytes(b"\xef\xbb\xbf" + json.dumps(
+        [{"serial": "S1", "host": "1.2.3.4", "access_code": "c"}]
+    ).encode("utf-8"))
+    got = PrinterStore(p).load()
+    assert [c.serial for c in got] == ["S1"]
 ```
+
+**Note on `load()`'s "never raises" contract:** it is load-bearing, and the
+obvious tests do not cover it. `printers.json` is hand-editable by design and
+`load()` runs on the boot path, so anything that escapes here kills the server
+and leaves no UI to fix the file with. Task 1's review found three separate
+defects against this contract. When you touch this function, re-run a hostile
+sweep (UTF-16 and UTF-8 BOMs, raw binary, empty file, bare JSON scalars, nested
+lists, wrong-typed and falsy field values, a directory in place of the file) and
+confirm zero raises.
 
 - [ ] **Step 3: Run tests to verify they fail**
 
@@ -249,10 +280,20 @@ class PrinterStore:
 
     def load(self) -> list[PrinterConfig]:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            # utf-8-sig, not utf-8: Windows editors (Notepad, some VS Code
+            # configs) prepend a BOM on save. A BOM'd file is perfectly good
+            # JSON, but utf-8 would fail it -- and this function's failure mode
+            # is "no printers", so the user's whole list would silently vanish
+            # after they opened the file to check an IP. utf-8-sig is identical
+            # to utf-8 when no BOM is present, so this is free.
+            raw = json.loads(self.path.read_text(encoding="utf-8-sig"))
         except FileNotFoundError:
             return []
-        except (OSError, json.JSONDecodeError) as e:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            # UnicodeDecodeError subclasses ValueError, NOT OSError, so it must
+            # be named explicitly or it escapes and kills the boot path.
+            # PowerShell's Out-File/Set-Content default to UTF-16 LE, so a
+            # hand-edit from a PS prompt lands exactly here.
             log.warning("%s is unreadable (%s); starting with no printers",
                         self.path, e)
             return []
@@ -307,7 +348,7 @@ class MemoryStore:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `pytest server/tests/test_store.py -v`
-Expected: 13 passed
+Expected: 15 passed
 
 - [ ] **Step 6: Commit**
 
@@ -1801,7 +1842,7 @@ Expected: 18 passed
 - [ ] **Step 5: Run the whole suite**
 
 Run: `pytest server/tests -v`
-Expected: 91 passed — 6 runs + 13 store + 16 sdcard + 7 summary + 18 services + 13 registry + 18 api. Zero failures is the bar; if the total differs because you added a case, that is fine, but a *failure* is not.
+Expected: 93 passed — 6 runs + 15 store + 16 sdcard + 7 summary + 18 services + 13 registry + 18 api. Zero failures is the bar; if the total differs because you added a case, that is fine, but a *failure* is not.
 
 - [ ] **Step 6: Commit**
 
