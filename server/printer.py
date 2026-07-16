@@ -81,11 +81,16 @@ class PrinterService:
         self.link = BambuLink(host, serial, access_code,
                               on_state=self._on_state)
         self._last_report: float | None = None
+        self._snapshot: dict = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._connect_loop,
                                         daemon=True)
 
     def _on_state(self, state: dict, patch: dict) -> None:
+        # `state` is the deep-copied snapshot BambuLink built under its lock;
+        # keeping it (instead of re-reading link.state later) means summary()
+        # never races the MQTT thread's deep_merge writes.
+        self._snapshot = state
         self._last_report = time.time()
 
     def start(self) -> None:
@@ -94,22 +99,33 @@ class PrinterService:
     def stop(self) -> None:
         self._stop.set()
         self.link.disconnect()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2)
 
     def _connect_loop(self) -> None:
-        ever_connected = False
+        # BambuLink.connect() raising means paho's network loop never
+        # started -> retrying is ours to do. connect() returning False means
+        # loop_start() ran and paho now retries forever on its own;
+        # re-driving connect() from this thread would race paho's thread on
+        # the same socket, so we log and hand off.
         while not self._stop.is_set():
-            if not ever_connected and not self.link.connected.is_set():
-                try:
-                    ever_connected = self.link.connect(timeout=5)
-                except OSError as e:
-                    log.warning("MQTT connect to %s failed: %s (retry in %ss)",
-                                self.host, e, RETRY_S)
+            try:
+                if self.link.connect(timeout=5):
+                    return
+                log.warning(
+                    "MQTT reached %s but no CONNACK within 5s (wrong access "
+                    "code, or Developer Mode off?). paho keeps retrying in "
+                    "the background.", self.host)
+                return
+            except Exception as e:
+                log.warning("MQTT connect to %s failed: %s (retry in %ss)",
+                            self.host, e, RETRY_S)
             self._stop.wait(RETRY_S)
 
     def summary(self) -> dict:
         age = (None if self._last_report is None
                else time.time() - self._last_report)
-        return build_summary(self.link.state, age,
+        return build_summary(self._snapshot, age,
                              self.link.connected.is_set(), self.host)
 
 
@@ -139,6 +155,8 @@ class MockPrinter:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2)
 
     def summary(self) -> dict:
         age = (None if self._last_report is None
