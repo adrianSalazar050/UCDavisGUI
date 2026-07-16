@@ -1,4 +1,5 @@
 import os
+import pathlib
 import time
 
 from server.runs import ACTIVE_WINDOW_S, find_active_run, newest_frame
@@ -51,3 +52,18 @@ def test_ignores_non_frame_files(tmp_path):
     junk.write_bytes(b"junk")
     info = newest_frame(tmp_path)
     assert info["layer"] == 1
+
+
+def test_survives_file_vanishing_mid_scan(tmp_path, monkeypatch):
+    make_frame(tmp_path, "20260716T120000_a", 1, age_s=1)
+    real_stat = pathlib.Path.stat
+
+    def flaky_stat(self, **kwargs):
+        if self.name == "layer_0001.jpg":
+            raise FileNotFoundError(self)
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "stat", flaky_stat)
+    # The vanished file is skipped -> no active run, and no exception.
+    assert find_active_run(tmp_path) is None
+    assert newest_frame(tmp_path) is None

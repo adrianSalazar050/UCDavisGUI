@@ -30,7 +30,10 @@ def find_active_run(runs_dir: pathlib.Path,
         for f in frames.iterdir():
             if not FRAME_RE.match(f.name):
                 continue
-            mtime = f.stat().st_mtime
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue  # vanished or locked mid-scan (OneDrive sync); skip
             if mtime > best_mtime:
                 best_dir, best_mtime = run, mtime
     if best_dir is None or now - best_mtime > ACTIVE_WINDOW_S:
@@ -45,7 +48,11 @@ def newest_frame(runs_dir: pathlib.Path, now: float | None = None) -> dict | Non
     if run is None:
         return None
     best: tuple[int, pathlib.Path] | None = None
-    for f in (run / "frames").iterdir():
+    try:
+        entries = list((run / "frames").iterdir())
+    except OSError:
+        return None  # run dir vanished between discovery and read
+    for f in entries:
         m = FRAME_RE.match(f.name)
         if not m:
             continue
