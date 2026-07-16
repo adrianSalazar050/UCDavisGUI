@@ -58,7 +58,12 @@ class PrinterStore:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return []
-        except (OSError, json.JSONDecodeError) as e:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            # UnicodeDecodeError is a ValueError subclass, NOT an OSError, so
+            # it does not get caught by `except OSError` above -- easy to
+            # miss, and exactly why this bug existed. Hand-editing
+            # printers.json from a PowerShell prompt (Out-File/Set-Content
+            # default to UTF-16 LE with a BOM) is enough to trigger it.
             log.warning("%s is unreadable (%s); starting with no printers",
                         self.path, e)
             return []

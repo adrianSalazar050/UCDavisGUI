@@ -50,6 +50,16 @@ def test_non_list_json_loads_empty(tmp_path):
     assert PrinterStore(p).load() == []
 
 
+def test_invalid_utf8_bytes_load_empty(tmp_path):
+    # PowerShell's Out-File/Set-Content default to UTF-16 LE with a BOM, so a
+    # hand-edit from a PS prompt lands 0xFF 0xFE here. UnicodeDecodeError
+    # subclasses ValueError, not OSError -- it must be caught explicitly or it
+    # escapes load() and kills the boot path.
+    p = tmp_path / "printers.json"
+    p.write_bytes(b"\xff\xfe[{\"serial\": \"x\"}]")
+    assert PrinterStore(p).load() == []
+
+
 def test_entry_missing_required_field_is_skipped(tmp_path):
     p = tmp_path / "printers.json"
     p.write_text(json.dumps([
