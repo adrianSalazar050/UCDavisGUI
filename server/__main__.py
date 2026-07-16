@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import logging
 import pathlib
+import signal
 
 import uvicorn
 
@@ -44,11 +45,16 @@ def main() -> int:
         service = PrinterService(a.host, a.serial, a.access_code)
 
     runs_dir.mkdir(parents=True, exist_ok=True)
-    service.start()
 
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
     app = create_app(service, runs_dir, dist)
+    # uvicorn re-raises the signal it caught using whatever handler was
+    # installed beforehand. SIGBREAK's OS default kills the process outright
+    # (skipping `finally`), so map it to KeyboardInterrupt like SIGINT gets.
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)
     try:
+        service.start()
         uvicorn.run(app, host="127.0.0.1", port=a.port)
     finally:
         service.stop()
