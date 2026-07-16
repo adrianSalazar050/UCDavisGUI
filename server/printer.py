@@ -66,3 +66,129 @@ def build_summary(state: dict, report_age: float | None,
     out["report_age_s"] = None if report_age is None else round(report_age, 1)
     out["printer"] = printer
     return out
+
+
+class PrinterService:
+    """Real printer: owns a BambuLink, retries MQTT in the background.
+
+    Startup must not die if the printer is off — we start disconnected and
+    keep retrying every RETRY_S. Once paho has connected ONCE, its network
+    loop auto-reconnects on drops, so we only drive the initial connect.
+    """
+
+    def __init__(self, host: str, serial: str, access_code: str):
+        self.host = host
+        self.link = BambuLink(host, serial, access_code,
+                              on_state=self._on_state)
+        self._last_report: float | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._connect_loop,
+                                        daemon=True)
+
+    def _on_state(self, state: dict, patch: dict) -> None:
+        self._last_report = time.time()
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.link.disconnect()
+
+    def _connect_loop(self) -> None:
+        ever_connected = False
+        while not self._stop.is_set():
+            if not ever_connected and not self.link.connected.is_set():
+                try:
+                    ever_connected = self.link.connect(timeout=5)
+                except OSError as e:
+                    log.warning("MQTT connect to %s failed: %s (retry in %ss)",
+                                self.host, e, RETRY_S)
+            self._stop.wait(RETRY_S)
+
+    def summary(self) -> dict:
+        age = (None if self._last_report is None
+               else time.time() - self._last_report)
+        return build_summary(self.link.state, age,
+                             self.link.connected.is_set(), self.host)
+
+
+class MockPrinter:
+    """Endless fake print for developing the GUI with no hardware.
+
+    Lifecycle per cycle: RUNNING (one layer every LAYER_PERIOD_S, temps
+    wander, an HMS code appears during HMS_LAYERS) -> FINISH -> IDLE_S of
+    idle -> new run. Frames are written as real JPEGs into a real run
+    directory so the /api/frame/latest path is exercised too.
+    """
+
+    LAYERS = 30
+    LAYER_PERIOD_S = 2.0
+    IDLE_S = 10.0
+    HMS_LAYERS = range(12, 17)
+
+    def __init__(self, runs_dir: pathlib.Path):
+        self.runs_dir = runs_dir
+        self.state: dict = {"gcode_state": "IDLE"}
+        self._last_report: float | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def summary(self) -> dict:
+        age = (None if self._last_report is None
+               else time.time() - self._last_report)
+        return build_summary(self.state, age, True, "MOCK")
+
+    def _touch(self, patch: dict) -> None:
+        self.state.update(patch)
+        self._last_report = time.time()
+
+    def _frame(self, layer: int) -> np.ndarray:
+        # Same idea as capture.py's MockCamera: a synthetic print that grows.
+        img = np.full((480, 640, 3), 40, np.uint8)
+        cv2.rectangle(img, (180, 380), (460, 400), (90, 90, 95), -1)
+        ph = min(layer * 8, 300)
+        if ph:
+            cv2.rectangle(img, (270, 380 - ph), (370, 380), (30, 110, 200), -1)
+        img = cv2.add(img, np.random.randint(0, 12, img.shape, dtype=np.uint8))
+        cv2.putText(img, f"layer {layer}", (12, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (220, 220, 220), 2)
+        return img
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+            frames = self.runs_dir / f"{ts}_mock_benchy" / "frames"
+            frames.mkdir(parents=True, exist_ok=True)
+            self._touch({
+                "gcode_state": "RUNNING", "subtask_name": "mock_benchy",
+                "gcode_file": "mock.gcode",
+                "total_layer_num": self.LAYERS,
+                "nozzle_target_temper": 220.0, "bed_target_temper": 60.0,
+                "spd_lvl": 2, "spd_mag": 100, "print_error": 0, "hms": [],
+            })
+            for n in range(1, self.LAYERS + 1):
+                if self._stop.wait(self.LAYER_PERIOD_S):
+                    return
+                mins_left = int((self.LAYERS - n) * self.LAYER_PERIOD_S / 60) + 1
+                self._touch({
+                    "layer_num": n,
+                    "mc_percent": int(100 * n / self.LAYERS),
+                    "mc_remaining_time": mins_left,
+                    "nozzle_temper": 220.0 + float(np.random.randn()),
+                    "bed_temper": 60.0 + float(np.random.randn()) * 0.3,
+                    "hms": ([{"attr": 0x03000100, "code": 0x00010007}]
+                            if n in self.HMS_LAYERS else []),
+                })
+                cv2.imwrite(str(frames / f"layer_{n:04d}.jpg"), self._frame(n))
+            self._touch({"gcode_state": "FINISH", "hms": []})
+            if self._stop.wait(self.IDLE_S):
+                return
+            self._touch({"gcode_state": "IDLE", "layer_num": 0,
+                         "mc_percent": 0})
