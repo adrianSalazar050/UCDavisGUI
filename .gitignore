@@ -11,6 +11,8 @@ frontend/dist/
 
 runs/
 runs-mock/
+# holds LAN access codes in plaintext — must never be committed
+printers.json
 *.pt
 
 # Large dataset files
