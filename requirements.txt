@@ -1,0 +1,10 @@
+# runtime
+paho-mqtt>=2.0
+opencv-python>=4.9
+numpy>=1.26
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+# tests
+pytest>=8.0
+httpx>=0.27

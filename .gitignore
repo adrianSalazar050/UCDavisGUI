@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+node_modules/
+frontend/dist/
+
+runs/
+runs-mock/
+
+# Large dataset files
+3d-printing-failure-detection.v1i.yolov8/
+*.zip
