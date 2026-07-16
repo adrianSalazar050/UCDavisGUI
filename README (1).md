@@ -95,3 +95,28 @@ the part.**
 Detection is done at **print-level FPR < 1% over ≥30 successful prints** and
 **time-to-detection < 5 min over ≥20 induced failures across ≥3 induction
 methods**. Then stop. Anything past that is polishing a commodity.
+
+## 4. `server/` + `frontend/` — the dashboard
+
+Live monitoring GUI (state, temps, layer, HMS, newest captured frame).
+It never opens the webcam — it serves the newest frame `capture.py` wrote —
+so it is always safe to run alongside a capture.
+
+```bash
+pip install -r requirements.txt
+
+# once, or after frontend changes:
+cd frontend; npm install; npm run build; cd ..
+
+# with the printer:
+python -m server --host 192.168.1.42 --serial 0309xxxxxxxx --access-code 12345678
+
+# without any hardware (endless fake print into runs-mock/):
+python -m server --mock
+```
+
+Then open http://127.0.0.1:8000. Frontend dev loop: `npm run dev` in
+`frontend/` (Vite on :5173, proxies to :8000).
+
+Design/spec: `docs/superpowers/specs/2026-07-16-bambu-dashboard-design.md`.
+Look & feel follows `FRONTEND-STACK-GUIDE.md` (Slate Daylight tokens).
