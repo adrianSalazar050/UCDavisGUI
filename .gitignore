@@ -11,7 +11,10 @@ frontend/dist/
 
 runs/
 runs-mock/
+*.pt
 
 # Large dataset files
 3d-printing-failure-detection.v1i.yolov8/
 *.zip
+.gstack/
+.superpowers/
