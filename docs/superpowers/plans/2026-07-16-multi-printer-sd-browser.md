@@ -1795,6 +1795,15 @@ WS_HEARTBEAT_S = 5.0  # push even when unchanged, keeps report_age_s fresh
 
 
 class AddPrinter(BaseModel):
+    """Pydantic rejects non-strings at the body-parse layer -> 422.
+
+    That matters: PrinterConfig's type validation lives in from_dict(), NOT in
+    its constructor, so `PrinterConfig(serial=None, ...)` still coerces to "".
+    The registry keys on serial, so a None reaching it would collapse printers
+    onto one entry. This model is what keeps a request body off that path --
+    do not bypass it by building a PrinterConfig straight from raw request data.
+    """
+
     host: str
     serial: str
     access_code: str
