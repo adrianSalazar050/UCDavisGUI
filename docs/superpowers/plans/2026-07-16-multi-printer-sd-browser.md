@@ -144,6 +144,20 @@ def test_entry_missing_required_field_is_skipped(tmp_path):
     assert [c.serial for c in got] == ["good"]
 
 
+def test_entry_with_wrong_typed_field_is_skipped(tmp_path):
+    # Structurally valid, all keys present, but serial is a number ->
+    # __post_init__'s .strip() would raise AttributeError. printers.json is
+    # hand-editable and this is the boot path: raising here kills the server
+    # and leaves no UI to fix the file with.
+    p = tmp_path / "printers.json"
+    p.write_text(json.dumps([
+        {"serial": 12345, "host": "1.2.3.4", "access_code": "abc"},
+        {"serial": "good", "host": "1.2.3.4", "access_code": "code"},
+    ]), encoding="utf-8")
+    got = PrinterStore(p).load()
+    assert [c.serial for c in got] == ["good"]
+
+
 def test_save_leaves_no_temp_files(tmp_path):
     store = PrinterStore(tmp_path / "printers.json")
     store.save([cfg()])
@@ -250,7 +264,14 @@ class PrinterStore:
         for entry in raw:
             try:
                 out.append(PrinterConfig.from_dict(entry))
-            except (KeyError, TypeError) as e:
+            except (KeyError, TypeError, AttributeError) as e:
+                # AttributeError covers a wrong-typed field: __post_init__
+                # calls .strip(), so {"serial": 12345, ...} is structurally
+                # valid JSON that still explodes. A wrong type is just another
+                # shape of malformed entry -- skip it and keep the rest of the
+                # file usable. Do NOT coerce with str(): that would silently
+                # turn serial 12345 into "12345" and hand a subtly wrong config
+                # to the MQTT layer.
                 log.warning("skipping malformed entry in %s: %s", self.path, e)
         return out
 
@@ -286,7 +307,7 @@ class MemoryStore:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `pytest server/tests/test_store.py -v`
-Expected: 12 passed
+Expected: 13 passed
 
 - [ ] **Step 6: Commit**
 
@@ -1780,7 +1801,7 @@ Expected: 18 passed
 - [ ] **Step 5: Run the whole suite**
 
 Run: `pytest server/tests -v`
-Expected: 90 passed — 6 runs + 12 store + 16 sdcard + 7 summary + 18 services + 13 registry + 18 api. Zero failures is the bar; if the total differs because you added a case, that is fine, but a *failure* is not.
+Expected: 91 passed — 6 runs + 13 store + 16 sdcard + 7 summary + 18 services + 13 registry + 18 api. Zero failures is the bar; if the total differs because you added a case, that is fine, but a *failure* is not.
 
 - [ ] **Step 6: Commit**
 
