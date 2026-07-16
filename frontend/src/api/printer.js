@@ -9,17 +9,16 @@ export async function fetchStatus() {
 // Returns { url, layer, run } (url is an object URL the caller must revoke)
 // or null when there is no active run (HTTP 404) or on network error.
 export async function fetchLatestFrame() {
-  let res;
   try {
-    res = await fetch(`/api/frame/latest?t=${Date.now()}`, { cache: "no-store" });
+    const res = await fetch(`/api/frame/latest?t=${Date.now()}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return {
+      url: URL.createObjectURL(blob),
+      layer: res.headers.get("X-Frame-Layer"),
+      run: res.headers.get("X-Frame-Run"),
+    };
   } catch {
-    return null;
+    return null; // network error or body stream failure — same as "no frame"
   }
-  if (!res.ok) return null;
-  const blob = await res.blob();
-  return {
-    url: URL.createObjectURL(blob),
-    layer: res.headers.get("X-Frame-Layer"),
-    run: res.headers.get("X-Frame-Run"),
-  };
 }

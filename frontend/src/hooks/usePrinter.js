@@ -24,11 +24,13 @@ export function usePrinter() {
       };
       ws.onmessage = (e) => setSummary(JSON.parse(e.data));
       ws.onclose = () => {
+        // A torn-down effect's socket (StrictMode double-mount) must not
+        // touch state owned by the effect that replaced it. Dev consoles
+        // log "closed before the connection is established" here — expected.
+        if (!alive) return;
         setWsUp(false);
-        if (alive) {
-          timer = setTimeout(connect, delay);
-          delay = Math.min(delay * 2, MAX_BACKOFF_MS);
-        }
+        timer = setTimeout(connect, delay);
+        delay = Math.min(delay * 2, MAX_BACKOFF_MS);
       };
     };
 
