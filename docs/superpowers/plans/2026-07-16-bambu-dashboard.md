@@ -1158,7 +1158,7 @@ a { color: var(--primary); }
 .ui-btn--secondary:hover { background: var(--surface-2); }
 .ui-btn--ghost { background: transparent; color: var(--primary); }
 .ui-btn--ghost:hover { background: var(--primary-soft); }
-.ui-btn--danger { background: var(--danger-text); color: #ffffff; }
+.ui-btn--danger { background: var(--danger-text); color: var(--on-primary); }
 .ui-btn:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
 .ui-btn:disabled { opacity: 0.55; cursor: default; }
 
