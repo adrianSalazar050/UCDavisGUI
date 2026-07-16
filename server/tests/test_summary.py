@@ -32,3 +32,16 @@ def test_stale_when_report_old_or_absent():
 
 def test_hms_none_is_empty_list():
     assert build_summary({"hms": None}, 0.1, True, "x")["hms"] == []
+
+
+def test_malformed_hms_entries_are_skipped():
+    st = {"hms": ["not-a-dict", {"attr": "bogus", "code": 0}, None,
+                  {"attr": 0x03000100, "code": 0x00010007}]}
+    s = build_summary(st, 0.1, True, "x")
+    assert s["hms"] == ["0300_0100_0001_0007"]
+
+
+def test_summary_never_leaks_unknown_state_fields():
+    s = build_summary({"wifi_password": "secret", "layer_num": 1}, 0.1, True, "x")
+    assert "wifi_password" not in s
+    assert s["layer_num"] == 1

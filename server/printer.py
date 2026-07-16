@@ -44,8 +44,18 @@ def build_summary(state: dict, report_age: float | None,
     updates, so early in a session most fields are unknown.
     """
     out = {k: state.get(k) for k in SUMMARY_FIELDS}
-    out["hms"] = [decode_hms(h.get("attr", 0), h.get("code", 0))
-                  for h in state.get("hms") or []]
+    hms_codes = []
+    for h in state.get("hms") or []:
+        # hms comes from printer-controlled MQTT JSON; one malformed entry
+        # must not take down every future summary() call.
+        if not isinstance(h, dict):
+            continue
+        try:
+            hms_codes.append(decode_hms(int(h.get("attr", 0)),
+                                        int(h.get("code", 0))))
+        except (TypeError, ValueError):
+            continue
+    out["hms"] = hms_codes
     if not connected:
         conn = "disconnected"
     elif report_age is None or report_age > STALE_S:
