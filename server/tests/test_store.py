@@ -60,6 +60,16 @@ def test_entry_missing_required_field_is_skipped(tmp_path):
     assert [c.serial for c in got] == ["good"]
 
 
+def test_entry_with_wrong_typed_field_is_skipped(tmp_path):
+    p = tmp_path / "printers.json"
+    p.write_text(json.dumps([
+        {"serial": 12345, "host": "1.2.3.4", "access_code": "abc"},
+        {"serial": "good", "host": "1.2.3.4", "access_code": "code"},
+    ]), encoding="utf-8")
+    got = PrinterStore(p).load()
+    assert [c.serial for c in got] == ["good"]
+
+
 def test_save_leaves_no_temp_files(tmp_path):
     store = PrinterStore(tmp_path / "printers.json")
     store.save([cfg()])

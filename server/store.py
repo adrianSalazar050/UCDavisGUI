@@ -70,7 +70,14 @@ class PrinterStore:
         for entry in raw:
             try:
                 out.append(PrinterConfig.from_dict(entry))
-            except (KeyError, TypeError) as e:
+            except (KeyError, TypeError, AttributeError) as e:
+                # KeyError: a required key is absent. TypeError: `entry` isn't
+                # a dict at all. AttributeError: a required key is present but
+                # holds a non-string value, so __post_init__'s .strip() call
+                # blows up -- a wrong-typed field is just another shape of
+                # malformed entry, and gets the same treatment: skip it and
+                # log, rather than str()-coercing it into a subtly wrong
+                # config that goes on to reach the MQTT layer.
                 log.warning("skipping malformed entry in %s: %s", self.path, e)
         return out
 
