@@ -8,6 +8,17 @@
 
 **Tech Stack:** Python 3.11+, FastAPI, uvicorn, paho-mqtt, `ftplib`/`ssl` (stdlib — no new deps), pytest; React 19, Vite 6, plain JSX, one `styles.css`.
 
+**Read this before trusting a code block below.** The code in this plan is a
+starting point, not a verified reference implementation. Task 1's two-stage
+review found **six** real defects in ~120 lines that this plan had specified —
+including a `.gitignore` rule that failed to cover the temp file `save()`
+writes the plaintext access code into, and a coercion bug that silently
+collapsed several printers onto one registry key at boot. Task 1's blocks have
+since been corrected; **the later tasks' blocks have not had that scrutiny.**
+Treat every block as a proposal to review, and every test list as a floor.
+Where a code block and a stated requirement disagree, the requirement wins —
+say so rather than implementing the block.
+
 **Environment notes for the engineer:**
 - Windows machine, PowerShell. Do NOT chain commands with `&&` (PowerShell 5.1 rejects it); run commands one at a time.
 - Repo root is `c:\Users\adria\OneDrive\Escritorio\GUI_UCDavis`. Run all `pytest` commands from the repo root.
@@ -73,9 +84,17 @@ Pure file I/O, split from the registry so it is testable against `tmp_path` with
 Add these two lines to `.gitignore` immediately after the `runs-mock/` line:
 
 ```gitignore
-# holds LAN access codes in plaintext — must never be committed
-printers.json
+# holds LAN access codes in plaintext — must never be committed.
+# The wildcard is load-bearing: save() writes a temp file alongside the real
+# one, containing the same plaintext, and an interrupted save orphans it.
+printers.json*
 ```
+
+The `*` is not cosmetic. `save()` builds its temp file with
+`prefix=self.path.name`, so it is named `printers.json<random>.tmp` and this
+one pattern covers both. gitignore globs anchor at the start of the filename,
+so a temp file named `tmp<random>.tmp` (mkstemp's default prefix) would NOT be
+matched — the prefix, not the suffix, is what makes this work.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -266,9 +285,30 @@ class PrinterConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "PrinterConfig":
+        # Validate types BEFORE __post_init__ strips. The (x or "") idiom above
+        # tolerates None/0/False, so a falsy wrong-typed serial would coerce to
+        # "" and be accepted -- and the registry keys on serial, so several such
+        # entries collapse onto one printer and silently overwrite each other.
+        # Reject, don't coerce.
+        for k in ("serial", "host", "access_code"):
+            # KeyError if absent; TypeError if `d` isn't a dict at all.
+            if not isinstance(d[k], str):
+                raise TypeError(
+                    f"{k} must be a string, got {type(d[k]).__name__}")
+        # The two optional fields stay tolerant -- they're cosmetic, and a bad
+        # one shouldn't cost the user a whole printer.
+        name = d.get("name")
+        capture = d.get("capture", False)
+        if not isinstance(capture, bool):
+            # NOT bool(capture): that turns the string "false" into True, and
+            # capture is single-occupancy, so it would steal the webcam from
+            # another printer. Default to the safe direction.
+            log.warning("capture must be true/false, got %r; treating as false",
+                        capture)
+            capture = False
         return cls(
             serial=d["serial"], host=d["host"], access_code=d["access_code"],
-            name=d.get("name", ""), capture=bool(d.get("capture", False)))
+            name=name if isinstance(name, str) else "", capture=capture)
 
 
 class PrinterStore:
@@ -305,28 +345,53 @@ class PrinterStore:
         for entry in raw:
             try:
                 out.append(PrinterConfig.from_dict(entry))
-            except (KeyError, TypeError, AttributeError) as e:
-                # AttributeError covers a wrong-typed field: __post_init__
-                # calls .strip(), so {"serial": 12345, ...} is structurally
-                # valid JSON that still explodes. A wrong type is just another
-                # shape of malformed entry -- skip it and keep the rest of the
-                # file usable. Do NOT coerce with str(): that would silently
-                # turn serial 12345 into "12345" and hand a subtly wrong config
-                # to the MQTT layer.
+            except (KeyError, TypeError) as e:
+                # KeyError: a required key is absent. TypeError: `entry` isn't a
+                # dict, or a required field isn't a string (from_dict checks).
+                # Do NOT add AttributeError here: with explicit validation it is
+                # unreachable, and catching it would swallow a genuine bug
+                # introduced later inside from_dict/__post_init__ -- silently
+                # skipping EVERY printer in the file with only a warning.
                 log.warning("skipping malformed entry in %s: %s", self.path, e)
         return out
 
     def save(self, configs: list[PrinterConfig]) -> None:
-        """Atomic: a crash mid-write must not leave a truncated file that
-        bricks the next startup."""
+        """Atomic and durable: an interrupted write must not leave a truncated
+        file, and must not lose the printers that were already saved.
+
+        The temp file holds the SAME plaintext access codes as the real one, so
+        it is named with prefix=self.path.name to fall under .gitignore's
+        `printers.json*`. Do not "tidy" that prefix away: mkstemp's default
+        prefix is "tmp", gitignore globs anchor at the start of the filename,
+        and an orphaned tmp*.tmp at the repo root is a committable password.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data = json.dumps([c.to_dict() for c in configs], indent=2)
-        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+        # dir=self.path.parent also guarantees same-filesystem, so os.replace
+        # is a true atomic rename rather than a copy.
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent),
+                                   prefix=self.path.name, suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            try:
+                f = os.fdopen(fd, "w", encoding="utf-8")
+            except BaseException:
+                # fdopen failed -> nothing owns the fd. Closing it here stops
+                # the cleanup unlink below from hitting a Windows sharing
+                # violation and masking the real exception.
+                os.close(fd)
+                raise
+            with f:
                 f.write(data)
+                # flush+fsync BEFORE the rename: without them a system crash can
+                # order the rename ahead of the data and leave a zero-length
+                # file. load() tolerates that, so the symptom isn't a crash --
+                # it's every printer silently vanishing and the user re-typing
+                # every access code.
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.path)
         except BaseException:
+            # BaseException, not Exception: cleanup must also run on Ctrl-C.
             pathlib.Path(tmp).unlink(missing_ok=True)
             raise
 
@@ -348,7 +413,15 @@ class MemoryStore:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `pytest server/tests/test_store.py -v`
-Expected: 15 passed
+Expected: 22 passed. The test list above is a FLOOR, not a ceiling — Task 1's
+review found six defects that none of the originally-specified tests could
+catch. Beyond them, also pin: the save() temp filename matches `printers.json*`
+(spy on `tempfile.mkstemp`, compare with `fnmatch`); a save failure leaves no
+leftover temp file (patch `os.replace` to raise); saving OVER an existing file;
+falsy wrong-typed fields are skipped rather than coerced; `"capture": "false"`
+does not enable capture; and a corrupt file actually logs a warning (`caplog`) —
+the difference between a silent `[]` and a warned `[]` is whether the user can
+diagnose their vanished printers.
 
 - [ ] **Step 6: Commit**
 
@@ -1842,7 +1915,7 @@ Expected: 18 passed
 - [ ] **Step 5: Run the whole suite**
 
 Run: `pytest server/tests -v`
-Expected: 93 passed — 6 runs + 15 store + 16 sdcard + 7 summary + 18 services + 13 registry + 18 api. Zero failures is the bar; if the total differs because you added a case, that is fine, but a *failure* is not.
+Expected: ~100 passed — 6 runs + 22 store + 16 sdcard + 7 summary + 18 services + 13 registry + 18 api. Zero failures is the bar; if the total differs because you added a case, that is fine, but a *failure* is not.
 
 - [ ] **Step 6: Commit**
 
