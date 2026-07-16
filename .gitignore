@@ -9,6 +9,7 @@ frontend/dist/
 
 runs/
 runs-mock/
+runs-mock-gui/
 
 # Large dataset files
 3d-printing-failure-detection.v1i.yolov8/
