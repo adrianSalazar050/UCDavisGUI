@@ -280,3 +280,22 @@ def test_unknown_armed_class_is_dropped(tmp_path):
     ]), encoding="utf-8")
     got = PrinterStore(p).load()
     assert got[0].armed_classes == ["spaghetti"]
+
+
+def test_camera_source_defaults_to_a1():
+    assert PrinterConfig(serial="S", host="h", access_code="c").camera_source == "a1"
+
+
+def test_camera_source_round_trip(tmp_path):
+    p = tmp_path / "printers.json"
+    PrinterStore(p).save([PrinterConfig(serial="S", host="h", access_code="c",
+                                        camera_source="webcam")])
+    assert PrinterStore(p).load()[0].camera_source == "webcam"
+
+
+def test_camera_source_invalid_defaults_to_a1(tmp_path):
+    p = tmp_path / "printers.json"
+    p.write_text(json.dumps([
+        {"serial": "S", "host": "h", "access_code": "c", "camera_source": "usb"},
+    ]), encoding="utf-8")
+    assert PrinterStore(p).load()[0].camera_source == "a1"

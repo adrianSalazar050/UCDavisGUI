@@ -24,6 +24,10 @@ log = logging.getLogger("server.store")
 DETECTION_CLASSES = ("blobs", "cracks", "over_extrusion", "spaghetti",
                      "stringing", "under_extrusion")
 
+# Valid values for PrinterConfig.camera_source: the printer's built-in
+# camera, or a USB webcam. Anything else is dropped back to the default.
+CAMERA_SOURCES = ("a1", "webcam")
+
 
 @dataclasses.dataclass
 class PrinterConfig:
@@ -34,6 +38,7 @@ class PrinterConfig:
     access_code: str
     name: str = ""
     capture: bool = False
+    camera_source: str = "a1"
     camera_index: int = 0
     conf: float = 0.25
     armed_classes: list = dataclasses.field(
@@ -88,10 +93,14 @@ class PrinterConfig:
             raw_classes = ["spaghetti"]
         armed_classes = [c for c in raw_classes if c in DETECTION_CLASSES] \
             or ["spaghetti"]
+        camera_source = d.get("camera_source", "a1")
+        if camera_source not in CAMERA_SOURCES:
+            camera_source = "a1"
         return cls(serial=d["serial"], host=d["host"],
                    access_code=d["access_code"], name=name, capture=capture,
-                   camera_index=camera_index, conf=conf,
-                   armed_classes=armed_classes, detect_enabled=detect_enabled)
+                   camera_source=camera_source, camera_index=camera_index,
+                   conf=conf, armed_classes=armed_classes,
+                   detect_enabled=detect_enabled)
 
 
 class PrinterStore:
