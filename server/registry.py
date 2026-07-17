@@ -46,7 +46,7 @@ import logging
 import threading
 from typing import Any, Callable
 
-from .store import DETECTION_CLASSES, PrinterConfig
+from .store import CAMERA_SOURCES, DETECTION_CLASSES, PrinterConfig
 
 log = logging.getLogger("server.registry")
 
@@ -218,7 +218,8 @@ class PrinterRegistry:
             cfg = self._configs.get(serial)
             if cfg is None:
                 return None
-            return {"camera_index": cfg.camera_index, "conf": cfg.conf,
+            return {"camera_source": cfg.camera_source,
+                    "camera_index": cfg.camera_index, "conf": cfg.conf,
                     "armed_classes": list(cfg.armed_classes),
                     "detect_enabled": cfg.detect_enabled}
 
@@ -226,16 +227,19 @@ class PrinterRegistry:
         with self._lock:
             for serial, cfg in self._configs.items():
                 if cfg.capture and cfg.detect_enabled:
-                    return {"serial": serial, "camera_index": cfg.camera_index,
-                            "conf": cfg.conf}
+                    return {"serial": serial, "camera_source": cfg.camera_source,
+                            "camera_index": cfg.camera_index, "conf": cfg.conf,
+                            "host": cfg.host, "access_code": cfg.access_code}
         return None
 
-    def update_detection(self, serial, *, camera_index=None, conf=None,
-                         armed_classes=None, detect_enabled=None) -> bool:
+    def update_detection(self, serial, *, camera_source=None, camera_index=None,
+                         conf=None, armed_classes=None, detect_enabled=None) -> bool:
         with self._lock:
             cfg = self._configs.get(serial)
             if cfg is None:
                 return False
+            if camera_source in CAMERA_SOURCES:
+                cfg.camera_source = camera_source
             if camera_index is not None:
                 cfg.camera_index = max(0, int(camera_index))
             if conf is not None:

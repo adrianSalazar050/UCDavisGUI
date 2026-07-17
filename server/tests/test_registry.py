@@ -310,8 +310,9 @@ def test_detection_target_requires_detect_enabled():
     r.add(host="1.1.1.1", serial="B", access_code="c", capture=True)
     assert r.detection_target() is None
     r.update_detection("B", detect_enabled=True)
-    assert r.detection_target() == {"serial": "B", "camera_index": 0,
-                                    "conf": 0.25}
+    assert r.detection_target() == {"serial": "B", "camera_source": "a1",
+                                    "camera_index": 0, "conf": 0.25,
+                                    "host": "1.1.1.1", "access_code": "c"}
 
 
 def test_update_detection_persists_and_clamps():
@@ -328,3 +329,32 @@ def test_update_detection_unknown_serial_false():
     r = reg()
     r.add(host="1.1.1.1", serial="A", access_code="c")
     assert r.update_detection("ZZ", conf=0.9) is False
+
+
+# ---------------------------------------------------------------------------
+# camera_source / host / access_code on the detection accessors (Task 4)
+# ---------------------------------------------------------------------------
+
+
+def test_detection_target_includes_source_host_and_code():
+    r = reg()
+    r.add(host="1.2.3.4", serial="B", access_code="SEKRET", capture=True)
+    r.update_detection("B", detect_enabled=True)
+    t = r.detection_target()
+    assert t["camera_source"] == "a1"
+    assert t["host"] == "1.2.3.4"
+    assert t["access_code"] == "SEKRET"
+
+
+def test_update_detection_sets_camera_source():
+    r = reg()
+    r.add(host="1.1.1.1", serial="B", access_code="c", capture=True)
+    assert r.update_detection("B", camera_source="webcam") is True
+    assert r.detection_config("B")["camera_source"] == "webcam"
+
+
+def test_update_detection_ignores_bad_camera_source():
+    r = reg()
+    r.add(host="1.1.1.1", serial="B", access_code="c", capture=True)
+    r.update_detection("B", camera_source="usb")
+    assert r.detection_config("B")["camera_source"] == "a1"
