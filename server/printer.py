@@ -37,11 +37,17 @@ SUMMARY_FIELDS = (
 
 
 def build_summary(state: dict, report_age: float | None,
-                  connected: bool, printer: str) -> dict:
+                  connected: bool, printer: str, *,
+                  serial: str = "", name: str = "", capture: bool = False,
+                  last_error: str | None = None) -> dict:
     """Curate the merged printer state into the payload the UI consumes.
 
     Fields the printer hasn't reported yet are null — it sends partial
     updates, so early in a session most fields are unknown.
+
+    Identity is keyword-only so the v1 positional call signature still reads
+    the same. `access_code` is deliberately NOT a parameter: nothing about the
+    password should be able to reach a payload by accident.
     """
     out = {k: state.get(k) for k in SUMMARY_FIELDS}
     hms_codes = []
@@ -65,6 +71,10 @@ def build_summary(state: dict, report_age: float | None,
     out["connection"] = conn
     out["report_age_s"] = None if report_age is None else round(report_age, 1)
     out["printer"] = printer
+    out["serial"] = serial
+    out["name"] = name
+    out["capture"] = capture
+    out["last_error"] = last_error
     return out
 
 
