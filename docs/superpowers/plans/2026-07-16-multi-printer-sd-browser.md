@@ -2623,11 +2623,51 @@ git commit -m "feat(frontend): multi-printer data layer, shell, and page registr
 ### Task 10: Overview page — printer grid + add form
 
 **Files:**
+- Modify: `frontend/src/styles.css` (append the card-overlay rules in Step 1)
 - Create: `frontend/src/components/printers/PrinterCard.jsx`
 - Create: `frontend/src/components/printers/AddPrinterForm.jsx`
 - Modify: `frontend/src/pages/Overview.jsx` (replace the stub entirely)
 
-- [ ] **Step 1: Create `frontend/src/components/printers/PrinterCard.jsx`**
+- [ ] **Step 1: Append the card-overlay rules to `frontend/src/styles.css`**
+
+The card cannot be a `<button>`: it contains the Remove `<button>`, and nesting
+one interactive element inside another is invalid HTML — it breaks Tab order and
+screen readers collapse or hide the inner control. Instead the card is a plain
+`<div>` and the *name* is a real button whose `::after` overlays the whole card.
+That yields valid HTML, exactly two tab stops (select, Remove), and a card that
+is still clickable anywhere.
+
+```css
+/* The card is a <div>, not a <button> — it contains the Remove button, and
+   nested interactive elements are invalid HTML. The name button's ::after
+   overlays the whole card instead: one tab stop to select, one to remove. */
+.printer-card { position: relative; }
+.printer-card__select {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.printer-card__select::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-card);
+}
+.printer-card__select:focus-visible { outline: none; }
+.printer-card__select:focus-visible::after {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+/* Remove must sit above the overlay or the overlay swallows its clicks.
+   Button.jsx does not merge a caller's className, so this is reached by
+   descendant selector rather than a modifier class. */
+.printer-card__foot .ui-btn { position: relative; z-index: 1; }
+```
+
+- [ ] **Step 2: Create `frontend/src/components/printers/PrinterCard.jsx`**
 
 ```jsx
 import { useState } from "react";
@@ -2647,8 +2687,7 @@ export default function PrinterCard({ printer, selected, onSelect }) {
   const [err, setErr] = useState(null);
   const { status, label } = pill(printer);
 
-  const remove = async (e) => {
-    e.stopPropagation(); // the whole card is a select button
+  const remove = async () => {
     if (!window.confirm(`Remove ${printer.name}? It will stop being monitored.`))
       return;
     setBusy(true);
@@ -2668,11 +2707,15 @@ export default function PrinterCard({ printer, selected, onSelect }) {
     : "—";
 
   return (
-    <button type="button"
-            className={`printer-card${selected ? " printer-card--selected" : ""}`}
-            aria-pressed={selected}
-            onClick={() => onSelect(printer.serial)}>
-      <div className="printer-card__name">{printer.name}</div>
+    <div className={`printer-card${selected ? " printer-card--selected" : ""}`}>
+      {/* The ::after on this button covers the card, so clicking anywhere
+          selects — without nesting Remove inside another button. */}
+      <button type="button"
+              className="printer-card__name printer-card__select"
+              aria-pressed={selected}
+              onClick={() => onSelect(printer.serial)}>
+        {printer.name}
+      </button>
       <div className="printer-card__meta">{printer.printer}</div>
       <StatusPill status={status}>{label}</StatusPill>
       <div className="printer-card__meta">{progress}</div>
@@ -2686,12 +2729,16 @@ export default function PrinterCard({ printer, selected, onSelect }) {
           Remove
         </Button>
       </div>
-    </button>
+    </div>
   );
 }
 ```
 
-- [ ] **Step 2: Create `frontend/src/components/printers/AddPrinterForm.jsx`**
+Note `remove` no longer needs `e.stopPropagation()`: the card is not a button,
+so there is no ancestor click handler to stop. The z-index rule is what keeps
+the overlay from swallowing the click.
+
+- [ ] **Step 3: Create `frontend/src/components/printers/AddPrinterForm.jsx`**
 
 ```jsx
 import { useState } from "react";
@@ -2769,7 +2816,7 @@ export default function AddPrinterForm() {
 }
 ```
 
-- [ ] **Step 3: Replace `frontend/src/pages/Overview.jsx` entirely**
+- [ ] **Step 4: Replace `frontend/src/pages/Overview.jsx` entirely**
 
 ```jsx
 import AddPrinterForm from "../components/printers/AddPrinterForm.jsx";
@@ -2808,7 +2855,7 @@ export default function Overview({ printers, selected, onSelect }) {
 }
 ```
 
-- [ ] **Step 4: Verify against the mock**
+- [ ] **Step 5: Verify against the mock**
 
 With `python -m server --mock` and `npm run dev` running, open `http://localhost:5173`. Expected:
 1. Three cards: `mock-bench` green with a climbing layer count and a "camera" marker; `mock-window` amber "Stale"; `mock-spare` red "Offline" with the "Unreachable — check the IP…" message.
@@ -2819,7 +2866,7 @@ With `python -m server --mock` and `npm run dev` running, open `http://localhost
 6. Remove the bogus printer → confirm dialog → the card disappears.
 7. With `Connect` disabled until all three required fields have content.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add frontend/src
