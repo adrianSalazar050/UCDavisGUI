@@ -46,7 +46,7 @@ import logging
 import threading
 from typing import Any, Callable
 
-from .store import PrinterConfig
+from .store import DETECTION_CLASSES, PrinterConfig
 
 log = logging.getLogger("server.registry")
 
@@ -203,6 +203,50 @@ class PrinterRegistry:
         with self._lock:
             services = list(self._services.values())
         return [svc.summary() for svc in services]
+
+    # ---------------- detection accessors ----------------
+
+    def capture_serial(self):
+        with self._lock:
+            for serial, cfg in self._configs.items():
+                if cfg.capture:
+                    return serial
+        return None
+
+    def detection_config(self, serial):
+        with self._lock:
+            cfg = self._configs.get(serial)
+            if cfg is None:
+                return None
+            return {"camera_index": cfg.camera_index, "conf": cfg.conf,
+                    "armed_classes": list(cfg.armed_classes),
+                    "detect_enabled": cfg.detect_enabled}
+
+    def detection_target(self):
+        with self._lock:
+            for serial, cfg in self._configs.items():
+                if cfg.capture and cfg.detect_enabled:
+                    return {"serial": serial, "camera_index": cfg.camera_index,
+                            "conf": cfg.conf}
+        return None
+
+    def update_detection(self, serial, *, camera_index=None, conf=None,
+                         armed_classes=None, detect_enabled=None) -> bool:
+        with self._lock:
+            cfg = self._configs.get(serial)
+            if cfg is None:
+                return False
+            if camera_index is not None:
+                cfg.camera_index = max(0, int(camera_index))
+            if conf is not None:
+                cfg.conf = min(1.0, max(0.0, float(conf)))
+            if armed_classes is not None:
+                cfg.armed_classes = [c for c in armed_classes
+                                     if c in DETECTION_CLASSES] or ["spaghetti"]
+            if detect_enabled is not None:
+                cfg.detect_enabled = bool(detect_enabled)
+        self._persist()
+        return True
 
     # ---------------- internals ----------------
 

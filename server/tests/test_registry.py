@@ -285,3 +285,46 @@ def test_persist_survives_concurrent_add_without_losing_a_printer():
     t2.join()
 
     assert {c.serial for c in store.load()} == {"S1", "S2"}
+
+
+# ---------------------------------------------------------------------------
+# Detection accessors (Task 9)
+# ---------------------------------------------------------------------------
+
+
+def test_capture_serial_returns_the_capture_printer():
+    r = reg()
+    r.add(host="1.1.1.1", serial="A", access_code="c")
+    r.add(host="2.2.2.2", serial="B", access_code="c", capture=True)
+    assert r.capture_serial() == "B"
+
+
+def test_capture_serial_none_when_no_capture():
+    r = reg()
+    r.add(host="1.1.1.1", serial="A", access_code="c")
+    assert r.capture_serial() is None
+
+
+def test_detection_target_requires_detect_enabled():
+    r = reg()
+    r.add(host="1.1.1.1", serial="B", access_code="c", capture=True)
+    assert r.detection_target() is None
+    r.update_detection("B", detect_enabled=True)
+    assert r.detection_target() == {"serial": "B", "camera_index": 0,
+                                    "conf": 0.25}
+
+
+def test_update_detection_persists_and_clamps():
+    r = reg()
+    r.add(host="1.1.1.1", serial="B", access_code="c", capture=True)
+    assert r.update_detection("B", camera_index=2, conf=0.6,
+                              armed_classes=["spaghetti", "cracks"]) is True
+    cfg = r.detection_config("B")
+    assert cfg["camera_index"] == 2 and cfg["conf"] == 0.6
+    assert cfg["armed_classes"] == ["spaghetti", "cracks"]
+
+
+def test_update_detection_unknown_serial_false():
+    r = reg()
+    r.add(host="1.1.1.1", serial="A", access_code="c")
+    assert r.update_detection("ZZ", conf=0.9) is False
