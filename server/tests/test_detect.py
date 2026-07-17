@@ -50,3 +50,40 @@ def test_detections_from_result_parses_boxes():
 
 def test_detections_from_result_empty_when_no_boxes():
     assert detect.detections_from_result(_Result(None), {}) == []
+
+
+def test_detection_loop_writes_status_and_frame(tmp_path):
+    frames = [np.zeros((16, 16, 3), np.uint8) for _ in range(3)]
+    grabbed = iter(frames)
+    stop = detect.threading.Event()
+    calls = {"n": 0}
+
+    def grab():
+        return next(grabbed, None)
+
+    def infer(frame):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            stop.set()   # end after two frames
+        return ([{"cls": "spaghetti", "conf": 0.9, "box": [1, 1, 2, 2]}], frame)
+
+    detect.detection_loop(grab, infer, tmp_path, camera=0, conf=0.25,
+                          fps=0, stop_event=stop)
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["detections"][0]["cls"] == "spaghetti"
+    assert status["error"] is None
+    assert (tmp_path / "latest.jpg").exists()
+
+
+def test_detection_loop_records_camera_read_failure(tmp_path):
+    stop = detect.threading.Event()
+
+    def grab():          # a dead camera returns None
+        stop.set()
+        return None
+
+    detect.detection_loop(grab, lambda f: ([], f), tmp_path, camera=3,
+                          conf=0.25, fps=0, stop_event=stop)
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["error"] is not None
+    assert status["detections"] == []
