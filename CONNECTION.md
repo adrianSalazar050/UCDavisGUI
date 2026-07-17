@@ -89,25 +89,49 @@ doesn't use it.
 
 ## Plugging these values into GUI_UCDavis
 
-The dashboard backend (`server/__main__.py`) takes the same three values as
-CLI flags:
+The dashboard no longer takes the printer on the command line. Start it:
 
 ```
-python -m server --host 192.168.137.2 --serial 0300CA633005010 --access-code 31661007
+python -m server
 ```
+
+Then open http://localhost:8000, go to **Overview → Add printer**, and type:
+
+| Field | Value |
+|---|---|
+| IP address | `192.168.137.2` |
+| Serial | `0300CA633005010` |
+| LAN access code | `31661007` |
+| Name (optional) | anything, e.g. `A1-bench` |
+| Camera checkbox | tick it if the webcam points at this printer |
+
+The printer is saved to `printers.json` (gitignored — it holds the access code
+in plaintext) and reconnects automatically on every restart. Add up to a
+handful of printers this way; the Overview page shows all of them at once.
+
+If a printer sits on red **Offline**, the card tells you which failure it is:
+"Unreachable" means the IP is wrong or LAN-only Mode is off; "No response"
+means the TLS handshake worked but the access code is likely wrong, or
+Developer Mode is off. That maps to the troubleshooting list below.
+
+**microSD files** are read over FTPS (port 990), not MQTT — MQTT exposes no
+file listing at all. Same `bblp` + access-code credentials. The SD Files page
+is read-only.
 
 Add `--port 8000` to change the port, `--runs-dir runs/` to change where
-capture frames are read from. Without hardware, `python -m server --mock`
-runs a fake print feed instead so the UI can be exercised without the
-printer.
+capture frames are read from, `--printers-file` to move the printer list.
+Without hardware, `python -m server --mock` seeds three fake printers
+(running / stale / offline) so the whole UI can be exercised.
 
 Then, for frontend dev, run `npm run dev` inside `GUI_UCDavis/frontend`
 (port 5173, proxies `/api` and `/ws` to the backend on port 8000). For a
-normal/prod run, `npm run build` once and the single `python -m server ...`
+normal/prod run, `npm run build` once and the single `python -m server`
 process serves everything on `http://localhost:8000`.
 
 See `GUI_UCDavis/docs/superpowers/specs/2026-07-16-bambu-dashboard-design.md`
-for the full dashboard design this connection feeds into.
+for the v1 dashboard design, and
+`docs/superpowers/specs/2026-07-16-multi-printer-sd-browser-design.md` for the
+multi-printer + SD browser design this connection feeds into.
 
 ## Troubleshooting (from `testing.py`'s own diagnostics)
 

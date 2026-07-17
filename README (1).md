@@ -108,12 +108,18 @@ pip install -r requirements.txt
 # once, or after frontend changes:
 cd frontend; npm install; npm run build; cd ..
 
-# with the printer:
-python -m server --host 192.168.1.42 --serial 0309xxxxxxxx --access-code 12345678
+# with printers (add them in the browser: Overview → Add printer):
+python -m server
 
-# without any hardware (endless fake print into runs-mock/):
+# without any hardware (three fake printers into runs-mock/):
 python -m server --mock
 ```
+
+Printers are added in the GUI by typing their IP, serial, and LAN access code —
+there are no `--host/--serial/--access-code` flags any more. They persist to
+`printers.json` (gitignored; it holds access codes in plaintext) and reconnect
+on restart. The Overview page shows every printer's live status; the SD Files
+page lists each printer's microSD read-only over FTPS.
 
 Then open http://127.0.0.1:8000. Frontend dev loop: `npm run dev` in
 `frontend/` (Vite on :5173, proxies to :8000).
