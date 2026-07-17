@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import runs, sdcard
+from .detection import CLASSES  # the 6 valid armed classes
 from .registry import DuplicateSerial
 from .sdcard import SdError
 
@@ -39,6 +40,17 @@ class AddPrinter(BaseModel):
     capture: bool = False
 
 
+class DetectionUpdate(BaseModel):
+    camera_index: int | None = None
+    conf: float | None = None
+    armed_classes: list[str] | None = None
+    detect_enabled: bool | None = None
+
+
+class ArmBody(BaseModel):
+    armed: bool
+
+
 def _comparable(printers: list[dict]) -> list[dict]:
     """report_age_s ticks every sample; ignore it when deciding whether the
     state meaningfully changed."""
@@ -46,15 +58,26 @@ def _comparable(printers: list[dict]) -> list[dict]:
             for p in printers]
 
 
+def _with_detection(printers: list[dict], detection) -> list[dict]:
+    """Attach a `detection` object to each summary (None unless it's the
+    capture printer). Detection state lives in detection.py, not the service."""
+    if detection is None:
+        return printers
+    for p in printers:
+        p["detection"] = detection.snapshot(p.get("serial"))
+    return printers
+
+
 def create_app(registry, runs_dir: pathlib.Path,
-               frontend_dist: pathlib.Path | None = None) -> FastAPI:
+               frontend_dist: pathlib.Path | None = None,
+               detection=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake)."""
     app = FastAPI(title="bambu-monitor")
 
     @app.get("/api/printers")
     def list_printers():
-        return {"printers": registry.summaries()}
+        return {"printers": _with_detection(registry.summaries(), detection)}
 
     @app.post("/api/printers", status_code=201)
     def add_printer(body: AddPrinter):
@@ -110,11 +133,60 @@ def create_app(registry, runs_dir: pathlib.Path,
                      "X-Frame-Run": info["run"],
                      "Cache-Control": "no-store"})
 
+    def _require_detection_snapshot(serial):
+        if detection is None:
+            raise HTTPException(404, "detection not enabled on this server")
+        snap = detection.snapshot(serial)
+        if snap is None:
+            raise HTTPException(404, "not the capture printer")
+        return snap
+
+    @app.get("/api/printers/{serial}/detection")
+    def get_detection(serial: str):
+        return _require_detection_snapshot(serial)
+
+    @app.put("/api/printers/{serial}/detection")
+    def put_detection(serial: str, body: DetectionUpdate):
+        if detection is None:
+            raise HTTPException(404, "detection not enabled on this server")
+        if body.armed_classes is not None:
+            bad = [c for c in body.armed_classes if c not in CLASSES]
+            if bad:
+                raise HTTPException(400, f"unknown class(es): {', '.join(bad)}")
+        fields = {k: v for k, v in body.model_dump().items() if v is not None}
+        if not registry.update_detection(serial, **fields):
+            raise HTTPException(404, "unknown printer")
+        # Config can be set on any printer, but a snapshot only exists for the
+        # capture printer -- return it when present, else just confirm the save
+        # (avoids a confusing 404 after a successful update).
+        snap = detection.snapshot(serial)
+        return snap if snap is not None else {"updated": True}
+
+    @app.post("/api/printers/{serial}/detection/arm")
+    def arm_detection(serial: str, body: ArmBody):
+        snap = _require_detection_snapshot(serial)  # 404s if not capture
+        detection.arm(serial, body.armed)
+        return detection.snapshot(serial) or snap
+
+    @app.get("/api/printers/{serial}/detection/frame")
+    def detection_frame(serial: str):
+        if detection is None:
+            raise HTTPException(404, "detection not enabled on this server")
+        path = detection.frame_path()
+        if path is None:
+            return JSONResponse({"error": "no detector frame"}, status_code=404)
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return JSONResponse({"error": "no detector frame"}, status_code=404)
+        return Response(content=data, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
         try:
             await sock.accept()
-            printers = registry.summaries()
+            printers = _with_detection(registry.summaries(), detection)
             await sock.send_text(json.dumps({"printers": printers}))
             last_sent, last_time = printers, time.monotonic()
             while True:
@@ -122,7 +194,7 @@ def create_app(registry, runs_dir: pathlib.Path,
                 now = time.monotonic()
                 # summaries() must stay non-blocking: it runs on the event loop
                 # and a stall here would freeze every connected client.
-                printers = registry.summaries()
+                printers = _with_detection(registry.summaries(), detection)
                 changed = _comparable(printers) != _comparable(last_sent)
                 if changed or now - last_time >= WS_HEARTBEAT_S:
                     await sock.send_text(json.dumps({"printers": printers}))

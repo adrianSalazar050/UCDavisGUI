@@ -247,3 +247,109 @@ def test_root_hint_when_no_dist(tmp_path):
     r = client(tmp_path).get("/")
     assert r.status_code == 200
     assert "npm run build" in r.text
+
+
+# ---------- detection routes + WS merge (Task 11) ----------
+
+class FakeDetection:
+    def __init__(self, capture="S1"):
+        self.capture = capture
+        self.armed = {}
+        self.updated = []
+        self._frame = None
+    def snapshot(self, serial):
+        if serial != self.capture:
+            return None
+        return {"running": True, "fps": 4.0, "camera_index": 0, "conf": 0.25,
+                "detect_enabled": True, "armed": self.armed.get(serial, False),
+                "armed_classes": ["spaghetti"], "detections": [],
+                "stopped_by_monitor": False, "seconds_to_stop": None,
+                "error": None}
+    def arm(self, serial, value): self.armed[serial] = value
+    def frame_path(self): return self._frame
+    def start(self): pass
+    def stop(self): pass
+
+
+class DetRegistry(FakeRegistry):
+    def detection_config(self, serial):
+        return {"camera_index": 0, "conf": 0.25,
+                "armed_classes": ["spaghetti"], "detect_enabled": True}
+    def update_detection(self, serial, **kw):
+        if serial not in self._services:
+            return False
+        self.updated = getattr(self, "updated", [])
+        self.updated.append(kw)
+        return True
+
+
+def det_client(tmp_path, detection, registry=None):
+    from server.main import create_app
+    reg = registry or DetRegistry([FakeService("S1")])
+    return TestClient(create_app(reg, tmp_path, detection=detection)), reg
+
+
+def test_get_detection_returns_snapshot(tmp_path):
+    c, _ = det_client(tmp_path, FakeDetection())
+    r = c.get("/api/printers/S1/detection")
+    assert r.status_code == 200
+    assert r.json()["armed_classes"] == ["spaghetti"]
+
+
+def test_get_detection_404_for_non_capture(tmp_path):
+    c, _ = det_client(tmp_path, FakeDetection(capture="OTHER"))
+    assert c.get("/api/printers/S1/detection").status_code == 404
+
+
+def test_put_detection_updates_and_returns_snapshot(tmp_path):
+    det = FakeDetection()
+    c, reg = det_client(tmp_path, det)
+    r = c.put("/api/printers/S1/detection",
+              json={"camera_index": 2, "conf": 0.4,
+                    "armed_classes": ["spaghetti", "cracks"], "detect_enabled": True})
+    assert r.status_code == 200
+    assert reg.updated[-1]["camera_index"] == 2
+
+
+def test_put_detection_rejects_unknown_class_400(tmp_path):
+    c, _ = det_client(tmp_path, FakeDetection())
+    r = c.put("/api/printers/S1/detection", json={"armed_classes": ["banana"]})
+    assert r.status_code == 400
+
+
+def test_arm_toggles_and_returns_snapshot(tmp_path):
+    det = FakeDetection()
+    c, _ = det_client(tmp_path, det)
+    r = c.post("/api/printers/S1/detection/arm", json={"armed": True})
+    assert r.status_code == 200
+    assert det.armed["S1"] is True
+
+
+def test_detection_frame_404_when_none(tmp_path):
+    c, _ = det_client(tmp_path, FakeDetection())
+    assert c.get("/api/printers/S1/detection/frame").status_code == 404
+
+
+def test_detection_frame_served(tmp_path):
+    det = FakeDetection()
+    frame = tmp_path / "latest.jpg"
+    frame.write_bytes(b"\xff\xd8\xff\xe0jpeg")
+    det._frame = frame
+    c, _ = det_client(tmp_path, det)
+    r = c.get("/api/printers/S1/detection/frame")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+
+
+def test_ws_merges_detection_into_capture_summary(tmp_path):
+    c, _ = det_client(tmp_path, FakeDetection())
+    with c.websocket_connect("/ws") as ws:
+        msg = ws.receive_json()
+        p = next(p for p in msg["printers"] if p["serial"] == "S1")
+        assert p["detection"]["running"] is True
+
+
+def test_detection_routes_404_when_detection_disabled(tmp_path):
+    # create_app(..., detection=None) -> the whole feature is inert.
+    r = client(tmp_path).get("/api/printers/S1/detection")
+    assert r.status_code == 404
