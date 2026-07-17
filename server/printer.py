@@ -5,7 +5,10 @@ reconnects in the background. MockPrinter fakes the same interface with an
 endless synthetic print and writes real frame JPEGs so the whole dashboard
 works with no hardware.
 
-Both expose: start(), stop(), summary() -> dict.
+Both are duck-typed to the same interface, which is what lets registry.py
+(Task 5) hold a `{serial: service}` map without caring which kind of service
+a given entry is: start(), stop(), summary() -> dict, list_files(path) ->
+list[dict], plus the identity attributes serial, host, name, capture.
 """
 from __future__ import annotations
 
@@ -23,6 +26,9 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from bambu_link import BambuLink, decode_hms  # noqa: E402
 
+from . import sdcard  # noqa: E402
+from .sdcard import SdError  # noqa: E402
+
 log = logging.getLogger("server.printer")
 
 STALE_S = 15.0   # connected but no report for this long -> "stale"
@@ -34,6 +40,31 @@ SUMMARY_FIELDS = (
     "bed_temper", "bed_target_temper", "spd_lvl", "spd_mag",
     "print_error", "fail_reason", "subtask_name", "gcode_file",
 )
+
+ERR_UNREACHABLE = ("Unreachable — check the IP, and that LAN-only Mode is on")
+ERR_NO_CONNACK = ("No response — the access code may be wrong (it rotates on "
+                  "firmware updates), or Developer Mode is off")
+
+# What --mock pretends is on the card. Mirrors the real layout: model files at
+# the root, timelapse/ and cache/ subdirectories.
+MOCK_TREE: dict[str, list[dict]] = {
+    "/": [
+        {"name": "timelapse", "is_dir": True, "size": None, "mtime": None},
+        {"name": "cache", "is_dir": True, "size": None, "mtime": None},
+        {"name": "Benchy.3mf", "is_dir": False, "size": 1048576,
+         "mtime": "2026-07-16T13:05:00"},
+        {"name": "calibration_cube.gcode.3mf", "is_dir": False, "size": 204800,
+         "mtime": "2026-07-15T09:12:00"},
+    ],
+    "/timelapse": [
+        {"name": "video_2026-07-16.mp4", "is_dir": False, "size": 8388608,
+         "mtime": "2026-07-16T14:00:00"},
+    ],
+    "/cache": [
+        {"name": "Benchy.gcode.3mf", "is_dir": False, "size": 1048576,
+         "mtime": "2026-07-16T13:04:00"},
+    ],
+}
 
 
 def build_summary(state: dict, report_age: float | None,
@@ -86,11 +117,17 @@ class PrinterService:
     loop auto-reconnects on drops, so we only drive the initial connect.
     """
 
-    def __init__(self, host: str, serial: str, access_code: str):
+    def __init__(self, host: str, serial: str, access_code: str,
+                 name: str = "", capture: bool = False):
         self.host = host
+        self.serial = serial
+        self.access_code = access_code
+        self.name = name or host
+        self.capture = capture
         self.link = BambuLink(host, serial, access_code,
                               on_state=self._on_state)
         self._last_report: float | None = None
+        self._last_error: str | None = None
         self._snapshot: dict = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._connect_loop,
@@ -118,34 +155,54 @@ class PrinterService:
         # loop_start() ran and paho now retries forever on its own;
         # re-driving connect() from this thread would race paho's thread on
         # the same socket, so we log and hand off.
+        #
+        # Which of those two happened is the ONLY signal distinguishing a bad
+        # access code from an unplugged printer, so it is recorded rather than
+        # only logged.
         while not self._stop.is_set():
             try:
                 if self.link.connect(timeout=5):
+                    self._last_error = None
                     return
+                self._last_error = ERR_NO_CONNACK
                 log.warning(
                     "MQTT reached %s but no CONNACK within 5s (wrong access "
                     "code, or Developer Mode off?). paho keeps retrying in "
                     "the background.", self.host)
                 return
             except Exception as e:
+                self._last_error = ERR_UNREACHABLE
                 log.warning("MQTT connect to %s failed: %s (retry in %ss)",
                             self.host, e, RETRY_S)
             self._stop.wait(RETRY_S)
 
+    def list_files(self, path: str = "/") -> list[dict]:
+        """Blocking FTPS call. MUST NOT be called from the event loop — the
+        route that uses it is a sync def, so FastAPI runs it on a threadpool."""
+        return sdcard.list_dir(self.host, self.access_code, path)
+
     def summary(self) -> dict:
         age = (None if self._last_report is None
                else time.time() - self._last_report)
-        return build_summary(self._snapshot, age,
-                             self.link.connected.is_set(), self.host)
+        connected = self.link.connected.is_set()
+        return build_summary(
+            self._snapshot, age, connected, self.host,
+            serial=self.serial, name=self.name, capture=self.capture,
+            last_error=None if connected else self._last_error)
 
 
 class MockPrinter:
     """Endless fake print for developing the GUI with no hardware.
 
-    Lifecycle per cycle: RUNNING (one layer every LAYER_PERIOD_S, temps
-    wander, an HMS code appears during HMS_LAYERS) -> FINISH -> IDLE_S of
-    idle -> new run. Frames are written as real JPEGs into a real run
-    directory so the /api/frame/latest path is exercised too.
+    mode="running": RUNNING (one layer every LAYER_PERIOD_S, temps wander, an
+    HMS code appears during HMS_LAYERS) -> FINISH -> IDLE_S -> new run. Frames
+    are written as real JPEGs into a real run directory so /api/frame/latest is
+    exercised too.
+    mode="stale":   reports once, long ago, then never again -> "stale".
+    mode="offline": never connects -> "disconnected" + last_error.
+
+    The three modes exist so --mock can seed an Overview grid that actually
+    shows all three states.
     """
 
     LAYERS = 30
@@ -153,15 +210,30 @@ class MockPrinter:
     IDLE_S = 10.0
     HMS_LAYERS = range(12, 17)
 
-    def __init__(self, runs_dir: pathlib.Path):
+    def __init__(self, runs_dir: pathlib.Path, serial: str = "MOCK0000000000",
+                 host: str = "MOCK", name: str = "", capture: bool = False,
+                 mode: str = "running"):
         self.runs_dir = runs_dir
+        self.serial = serial
+        self.host = host
+        self.name = name or host
+        self.capture = capture
+        self.mode = mode
         self.state: dict = {"gcode_state": "IDLE"}
         self._last_report: float | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
     def start(self) -> None:
-        self._thread.start()
+        if self.mode == "running":
+            self._thread.start()
+        elif self.mode == "stale":
+            self._touch({"gcode_state": "RUNNING", "subtask_name": "stalled",
+                         "layer_num": 7, "total_layer_num": 30,
+                         "mc_percent": 23})
+            # Backdate the report so it reads as stale immediately.
+            self._last_report = time.time() - (STALE_S + 5)
+        # "offline": never connects, nothing to start.
 
     def stop(self) -> None:
         self._stop.set()
@@ -171,7 +243,24 @@ class MockPrinter:
     def summary(self) -> dict:
         age = (None if self._last_report is None
                else time.time() - self._last_report)
-        return build_summary(self.state, age, True, "MOCK")
+        connected = self.mode != "offline"
+        return build_summary(
+            self.state, age, connected, self.host,
+            serial=self.serial, name=self.name, capture=self.capture,
+            last_error=None if connected else ERR_UNREACHABLE)
+
+    def list_files(self, path: str = "/") -> list[dict]:
+        target = sdcard.normalize_path(path)  # raises SdError on traversal
+        try:
+            entries = MOCK_TREE[target]
+        except KeyError:
+            raise SdError(f"Could not list {target} on {self.host}: "
+                          "no such directory") from None
+        # Copy each entry, not just the outer list: MOCK_TREE is a shared
+        # module-level constant, and a caller mutating a returned dict must
+        # not corrupt it for every other printer/instance for the rest of the
+        # process's life.
+        return sdcard.sort_entries([dict(e) for e in entries])
 
     def _touch(self, patch: dict) -> None:
         self.state.update(patch)

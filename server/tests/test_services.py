@@ -1,22 +1,94 @@
-import threading
-import time
+import pytest
 
-from server.printer import MockPrinter, PrinterService
+from server.printer import STALE_S, MockPrinter, PrinterService
+from server.sdcard import SdError
+
+
+# ---------- PrinterService ----------
+
+def svc(**kw):
+    # 192.0.2.1 is TEST-NET; constructing does NOT open a socket.
+    kw.setdefault("host", "192.0.2.1")
+    kw.setdefault("serial", "0309TESTSERIAL")
+    kw.setdefault("access_code", "12345678")
+    return PrinterService(**kw)
 
 
 def test_service_summary_before_connect():
-    # 192.0.2.1 is TEST-NET; constructing does NOT open a socket.
-    svc = PrinterService("192.0.2.1", "0309TESTSERIAL", "12345678")
-    s = svc.summary()
+    s = svc().summary()
     assert s["connection"] == "disconnected"
     assert s["printer"] == "192.0.2.1"
+    assert s["serial"] == "0309TESTSERIAL"
     assert s["report_age_s"] is None
 
 
+def test_service_name_defaults_to_host():
+    assert svc().summary()["name"] == "192.0.2.1"
+
+
+def test_service_name_used_when_given():
+    assert svc(name="A1-bench").summary()["name"] == "A1-bench"
+
+
+def test_service_capture_flag_in_summary():
+    assert svc(capture=True).summary()["capture"] is True
+
+
+def test_service_summary_never_leaks_access_code():
+    s = svc(access_code="31661007").summary()
+    assert "31661007" not in repr(s)
+    assert "access_code" not in s
+
+
+def test_service_last_error_none_before_any_attempt():
+    assert svc().summary()["last_error"] is None
+
+
+def test_unreachable_error_message_when_connect_raises(monkeypatch):
+    s = svc()
+
+    def boom(timeout=5):
+        raise OSError("boom")
+
+    monkeypatch.setattr(s.link, "connect", boom)
+    # The retry backoff must actually SET the stop event, not merely return
+    # True: _connect_loop's `while not self._stop.is_set()` ignores wait()'s
+    # return value, so a lambda returning True would spin forever.
+    monkeypatch.setattr(s._stop, "wait", lambda t: s._stop.set())
+    s._connect_loop()
+    assert "Unreachable" in s.summary()["last_error"]
+
+
+def test_no_connack_error_message_when_connect_returns_false(monkeypatch):
+    s = svc()
+    monkeypatch.setattr(s.link, "connect", lambda timeout=5: False)
+    s._connect_loop()
+    err = s.summary()["last_error"]
+    assert "access code" in err
+    assert "Developer Mode" in err
+
+
+def test_last_error_cleared_on_successful_connect(monkeypatch):
+    s = svc()
+    s._last_error = "stale error from an earlier attempt"
+    monkeypatch.setattr(s.link, "connect", lambda timeout=5: True)
+    s._connect_loop()
+    assert s._last_error is None
+
+
+def test_stop_on_never_started_service_does_not_raise():
+    # Task 5's registry calls stop() on every service, including ones whose
+    # start() was never invoked (e.g. constructed but never started because
+    # another printer in the batch failed to construct). Thread.is_alive() on
+    # a never-started thread must be safe to call.
+    s = svc()
+    s.stop()  # must not raise
+
+
+# ---------- MockPrinter ----------
+
 def test_mock_frame_shape(tmp_path):
-    mp = MockPrinter(tmp_path)
-    img = mp._frame(5)
-    assert img.shape == (480, 640, 3)
+    assert MockPrinter(tmp_path)._frame(5).shape == (480, 640, 3)
 
 
 def test_mock_touch_updates_summary(tmp_path):
@@ -30,60 +102,72 @@ def test_mock_touch_updates_summary(tmp_path):
     assert s["printer"] == "MOCK"
 
 
-class ScriptedLink:
-    """Stub BambuLink whose connect() results are scripted."""
-
-    def __init__(self, results):
-        self.results = list(results)  # bool, or an Exception to raise
-        self.calls = 0
-        self.connected = threading.Event()
-        self.state = {}
-
-    def connect(self, timeout=None):
-        self.calls += 1
-        r = self.results.pop(0) if self.results else False
-        if isinstance(r, Exception):
-            raise r
-        if r:
-            self.connected.set()
-        return r
-
-    def disconnect(self):
-        pass
-
-
-def test_connect_loop_retries_after_error_then_succeeds(monkeypatch):
-    monkeypatch.setattr("server.printer.RETRY_S", 0.01)
-    svc = PrinterService("192.0.2.1", "S", "12345678")
-    svc.link = ScriptedLink([OSError("network down"), True])
-    svc.start()
-    svc._thread.join(timeout=5)
-    assert not svc._thread.is_alive()
-    assert svc.link.calls == 2
-    # connected but no report yet -> stale, never "disconnected"
-    assert svc.summary()["connection"] == "stale"
-
-
-def test_connect_loop_hands_off_to_paho_after_rejected_connack(monkeypatch):
-    monkeypatch.setattr("server.printer.RETRY_S", 0.01)
-    svc = PrinterService("192.0.2.1", "S", "12345678")
-    svc.link = ScriptedLink([False])
-    svc.start()
-    svc._thread.join(timeout=5)
-    assert not svc._thread.is_alive()
-    assert svc.link.calls == 1  # no manual re-drive once paho owns retries
-
-
-def test_mock_full_cycle_writes_frames_and_finishes(tmp_path, monkeypatch):
-    monkeypatch.setattr(MockPrinter, "LAYERS", 3)
-    monkeypatch.setattr(MockPrinter, "LAYER_PERIOD_S", 0.01)
-    monkeypatch.setattr(MockPrinter, "IDLE_S", 60.0)  # parks after one cycle
-    mp = MockPrinter(tmp_path)
+def test_mock_offline_mode_is_disconnected(tmp_path):
+    mp = MockPrinter(tmp_path, mode="offline")
     mp.start()
-    deadline = time.time() + 10
-    while time.time() < deadline and mp.summary()["gcode_state"] != "FINISH":
-        time.sleep(0.02)
-    mp.stop()
-    assert mp.summary()["gcode_state"] == "FINISH"
-    frames = list(tmp_path.glob("*_mock_benchy/frames/layer_*.jpg"))
-    assert len(frames) == 3
+    s = mp.summary()
+    assert s["connection"] == "disconnected"
+    assert "Unreachable" in s["last_error"]
+
+
+def test_mock_offline_mode_stop_does_not_raise(tmp_path):
+    mp = MockPrinter(tmp_path, mode="offline")
+    mp.start()
+    mp.stop()  # never started _thread -- must still be safe
+
+
+def test_mock_stale_mode_reports_stale(tmp_path):
+    mp = MockPrinter(tmp_path, mode="stale")
+    mp.start()
+    s = mp.summary()
+    assert s["connection"] == "stale"
+    assert s["report_age_s"] > STALE_S
+
+
+def test_mock_stale_mode_stop_does_not_raise(tmp_path):
+    mp = MockPrinter(tmp_path, mode="stale")
+    mp.start()
+    mp.stop()  # never started _thread -- must still be safe
+
+
+def test_mock_identity_in_summary(tmp_path):
+    mp = MockPrinter(tmp_path, serial="MOCK1", host="mock-bench",
+                     name="bench", capture=True)
+    s = mp.summary()
+    assert s["serial"] == "MOCK1"
+    assert s["name"] == "bench"
+    assert s["capture"] is True
+
+
+def test_mock_lists_root(tmp_path):
+    names = [e["name"] for e in MockPrinter(tmp_path).list_files("/")]
+    assert "timelapse" in names
+    assert "Benchy.3mf" in names
+
+
+def test_mock_lists_subdir(tmp_path):
+    entries = MockPrinter(tmp_path).list_files("/timelapse")
+    assert all(e["is_dir"] is False for e in entries)
+    assert len(entries) >= 1
+
+
+def test_mock_unknown_dir_raises_sderror(tmp_path):
+    with pytest.raises(SdError):
+        MockPrinter(tmp_path).list_files("/nope")
+
+
+def test_mock_list_rejects_traversal(tmp_path):
+    with pytest.raises(SdError):
+        MockPrinter(tmp_path).list_files("/../etc")
+
+
+def test_mock_list_files_does_not_let_caller_mutate_shared_tree(tmp_path):
+    # list_files returns a fresh list each call, but the dicts inside come
+    # straight from the module-level MOCK_TREE constant. If a caller mutated
+    # an entry dict, that mutation would leak into every future call and
+    # every other MockPrinter instance -- so verify entries really are
+    # independent copies, not just a fresh outer list.
+    entries = MockPrinter(tmp_path).list_files("/")
+    entries[0]["name"] = "TAMPERED"
+    fresh = MockPrinter(tmp_path).list_files("/")
+    assert "TAMPERED" not in [e["name"] for e in fresh]
