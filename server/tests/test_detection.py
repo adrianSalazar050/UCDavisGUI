@@ -182,7 +182,8 @@ from server.detection import DetectorSupervisor
 
 
 class FakeProc:
-    def __init__(self, argv): self.argv = argv; self._alive = True; self.terminated = False
+    def __init__(self, argv, env=None):
+        self.argv = argv; self.env = env; self._alive = True; self.terminated = False
     def poll(self): return None if self._alive else 1
     def terminate(self): self.terminated = True; self._alive = False
     def die(self): self._alive = False
@@ -190,22 +191,25 @@ class FakeProc:
 
 def supervisor(tmp_path, clock):
     spawned = []
-    def spawn(argv):
-        p = FakeProc(argv); spawned.append(p); return p
+    def spawn(argv, env=None):
+        p = FakeProc(argv, env); spawned.append(p); return p
     sup = DetectorSupervisor(tmp_path, "weights.pt", spawn=spawn,
                              clock=clock, backoff_s=5.0)
     return sup, spawned
 
 
-T1 = {"serial": "S1", "camera_index": 0, "conf": 0.25}
-T2 = {"serial": "S1", "camera_index": 2, "conf": 0.4}
+T1 = {"serial": "S1", "camera_source": "a1", "camera_index": 0, "conf": 0.25,
+      "host": "1.2.3.4", "access_code": "CODE1"}
+T2 = {"serial": "S1", "camera_source": "webcam", "camera_index": 2, "conf": 0.4,
+      "host": "1.2.3.4", "access_code": "CODE1"}
 
 
 def test_spawns_for_a_new_target(tmp_path):
     sup, spawned = supervisor(tmp_path, lambda: 0.0)
     sup.reconcile(T1)
     assert len(spawned) == 1
-    assert "--camera" in spawned[0].argv and "0" in spawned[0].argv
+    assert "--source" in spawned[0].argv and "a1" in spawned[0].argv
+    assert "--host" in spawned[0].argv and "1.2.3.4" in spawned[0].argv
 
 
 def test_argv_never_contains_access_code(tmp_path):
@@ -251,6 +255,30 @@ def test_build_argv_script_defaults_to_absolute_path(tmp_path):
     script = sup.build_argv(T1)[1]
     assert pathlib.Path(script).is_absolute()
     assert script.endswith("detect.py")
+
+
+def test_build_argv_a1_has_source_host_no_code(tmp_path):
+    sup, _ = supervisor(tmp_path, lambda: 0.0)
+    argv = sup.build_argv(T1)
+    assert "--source" in argv and "a1" in argv
+    assert "--host" in argv and "1.2.3.4" in argv
+    assert "--camera" not in argv
+    assert not any("CODE1" in str(a) for a in argv)   # secret never in argv
+
+
+def test_build_argv_webcam_has_camera(tmp_path):
+    sup, _ = supervisor(tmp_path, lambda: 0.0)
+    argv = sup.build_argv(T2)
+    assert "--source" in argv and "webcam" in argv
+    assert "--camera" in argv and "2" in argv
+    assert "--host" not in argv
+
+
+def test_build_env_carries_code_for_a1_only(tmp_path):
+    sup, _ = supervisor(tmp_path, lambda: 0.0)
+    a1_env = sup.build_env(T1)
+    assert a1_env["BAMBU_ACCESS_CODE"] == "CODE1"
+    assert sup.build_env(T2) is None    # webcam inherits the parent env
 
 
 from server.detection import DetectionCoordinator

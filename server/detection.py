@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import subprocess
 import sys
@@ -171,16 +172,28 @@ class DetectorSupervisor:
         self._last_spawn = 0.0
 
     def build_argv(self, target) -> list:
-        # NB: no access code -- detect.py never talks MQTT.
-        return [self._python, self._script,
-                "--camera", str(target["camera_index"]),
-                "--conf", str(target["conf"]),
-                "--weights", str(self._weights),
-                "--out", str(self._out_dir),
-                "--fps", str(self._fps)]
+        # NB: never the access code -- that goes in build_env for a1.
+        argv = [self._python, self._script, "--source", target["camera_source"],
+                "--conf", str(target["conf"]), "--weights", str(self._weights),
+                "--out", str(self._out_dir), "--fps", str(self._fps)]
+        if target["camera_source"] == "a1":
+            argv += ["--host", target["host"]]
+        else:
+            argv += ["--camera", str(target["camera_index"])]
+        return argv
+
+    def build_env(self, target):
+        """a1 needs the access code to auth to the camera -> pass it in the
+        child's env, never argv. webcam inherits the parent env (None)."""
+        if target["camera_source"] == "a1":
+            env = dict(os.environ)
+            env["BAMBU_ACCESS_CODE"] = target["access_code"]
+            return env
+        return None
 
     def _spawn(self, target) -> None:
-        self._proc = self._spawn_fn(self.build_argv(target))
+        self._proc = self._spawn_fn(self.build_argv(target),
+                                    env=self.build_env(target))
         self._last_spawn = self._clock()
 
     def _stop_proc(self) -> None:
