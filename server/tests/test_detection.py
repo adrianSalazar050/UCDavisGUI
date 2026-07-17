@@ -1,4 +1,5 @@
 import json
+import time
 
 from server.detection import StatusReader
 
@@ -290,3 +291,81 @@ def test_snapshot_none_for_non_capture(tmp_path):
     assert co.snapshot("OTHER") is None
     snap = co.snapshot("S1")
     assert snap["armed_classes"] == ["spaghetti"]
+
+
+def test_capture_switch_resets_auto_stop_state(tmp_path):
+    # A controller frozen mid-fault for a printer the camera has LEFT must not
+    # survive a capture reassignment: on switch-back it would otherwise fire on
+    # the first frame (stale fault_since), bypassing the 10s debounce.
+    reg = FakeReg({"serial": "S1", "camera_index": 0, "conf": 0.5})
+    clk = Clock()
+    co = DetectionCoordinator(reg, tmp_path, FakeRunner(),
+                              controller_factory=lambda: AutoStopController(clock=clk))
+    (tmp_path / "_detect").mkdir()
+
+    def status(ts):
+        (tmp_path / "_detect" / "status.json").write_text(json.dumps(
+            {"ts": ts, "fps": 4.0, "camera": 0, "conf": 0.5,
+             "detections": [{"cls": "spaghetti", "conf": 0.9}], "error": None}))
+
+    co.reader = StatusReader(tmp_path / "_detect", clock=lambda: clk.t)
+    co.arm("S1", True)
+    status(clk.t); co.tick()                          # t=0: S1 -> armed_faulting
+    reg._target = {"serial": "S2", "camera_index": 0, "conf": 0.5}
+    clk.t = 500.0; status(clk.t); co.tick()           # camera moved to S2
+    reg._target = {"serial": "S1", "camera_index": 0, "conf": 0.5}
+    clk.t = 501.0; status(clk.t); co.tick()           # camera back on S1
+    assert reg.stopped == 0                            # fresh & disarmed: no fire
+
+
+from server.detection import MockDetectorRunner
+
+
+def _wait_until(predicate, timeout=2.0, interval=0.05):
+    deadline = time.time() + timeout
+    ok = predicate()
+    while not ok and time.time() < deadline:
+        time.sleep(interval)
+        ok = predicate()
+    return ok
+
+
+def test_mock_runner_reconcile_writes_status_and_is_idempotent(tmp_path):
+    # period_s=0.1 (not the 0.02 used elsewhere): fast enough that the first
+    # write lands well inside the poll timeout, but slow enough that this
+    # test's polling read doesn't collide with the writer thread's temp+
+    # os.replace on Windows (a real race there, but a pre-existing property
+    # of the atomic-write helper in detect.py, not of the code under test --
+    # verified empirically that read+0.02s churn reproduces it and read+0.1s
+    # does not; out of scope to change the shared write helper here).
+    runner = MockDetectorRunner(tmp_path, period_s=0.1)
+    status_path = tmp_path / "status.json"
+
+    def has_spaghetti():
+        # Single read per poll (not a separate exists-check then a content
+        # check) to minimize how often this thread's read races the writer
+        # thread's atomic replace; a transient PermissionError/OSError while
+        # the file is mid-replace just means "not yet" -- retry like a miss.
+        try:
+            data = json.loads(status_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        dets = data.get("detections") or []
+        return any(d.get("cls") == "spaghetti" for d in dets)
+
+    try:
+        runner.reconcile({"serial": "S1", "camera_index": 0, "conf": 0.25})
+        assert _wait_until(has_spaghetti), \
+            "no spaghetti detection was ever written by the mock writer thread"
+
+        first_thread = runner._thread
+        runner.reconcile({"serial": "S1", "camera_index": 0, "conf": 0.25})  # same target again
+        assert runner._thread is first_thread   # idempotent -- no second thread started
+
+        runner.reconcile(None)                  # halts via reconcile(None)
+        assert runner._active is False
+
+        runner.stop()                           # halting again via stop() must stay safe
+        assert runner._active is False
+    finally:
+        runner.stop()                           # never leak a live writer thread on failure

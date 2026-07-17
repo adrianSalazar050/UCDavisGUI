@@ -234,9 +234,22 @@ class DetectionCoordinator:
     def tick(self) -> None:
         self.runner.reconcile(self.registry.detection_target())
         cap = self.registry.capture_serial()
+        with self._lock:
+            # Drop controllers for any printer that is no longer the capture
+            # printer. Arming and the fault timer are meaningful only for the
+            # printer the single camera currently watches; a controller left
+            # frozen mid-fault would otherwise fire on the first frame after the
+            # camera is pointed back at it (a stale fault_since bypassing the
+            # sustain debounce). Coming back disarmed matches "arm is runtime-
+            # only" -- a capture switch is like a restart for that printer.
+            for serial in list(self._controllers):
+                if serial != cap:
+                    del self._controllers[serial]
         if cap is None:
             return
         cfg = self.registry.detection_config(cap)
+        if cfg is None:
+            return
         status = self.reader.read()
         # NEVER act on stale/errored detections -- feed the controller [] so a
         # dead detector can't leave a stale 'spaghetti' ticking toward a stop.
