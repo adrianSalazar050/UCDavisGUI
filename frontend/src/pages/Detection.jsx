@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { updateDetection } from "../api/printer.js";
 import Card from "../components/ui/Card.jsx";
-import Button from "../components/ui/Button.jsx";
 import Columns from "../components/ui/Columns.jsx";
 import Field from "../components/ui/Field.jsx";
 import PageFrame from "../components/ui/PageFrame.jsx";

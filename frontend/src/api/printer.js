@@ -83,7 +83,19 @@ export async function armDetection(serial, armed) {
   return res.json();
 }
 
-// URL for the detector's latest annotated frame. Cache-busted by the caller.
-export function detectionFrameUrl(serial) {
-  return `/api/printers/${encodeURIComponent(serial)}/detection/frame`;
+// Latest annotated detector frame as an object URL (caller must revoke), or
+// null when there's no frame yet: HTTP 404 (detector still starting, or --mock
+// which writes status but no JPEG) or a network error. Same shape as
+// fetchLatestFrame so CameraCard treats both sources uniformly.
+export async function fetchDetectionFrame(serial) {
+  try {
+    const res = await fetch(
+      `/api/printers/${encodeURIComponent(serial)}/detection/frame?t=${Date.now()}`,
+      { cache: "no-store" });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return { url: URL.createObjectURL(blob), live: true };
+  } catch {
+    return null;
+  }
 }
