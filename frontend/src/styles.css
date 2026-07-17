@@ -427,3 +427,32 @@ a { color: var(--primary); }
   gap: var(--sp-3);
 }
 .state-error .ui-btn { margin-left: auto; }
+
+/* ================= printer card overlay (Task 10) =================
+   The card is a <div>, not a <button> — it contains the Remove button, and
+   nested interactive elements are invalid HTML. The name button's ::after
+   overlays the whole card instead: one tab stop to select, one to remove. */
+.printer-card { position: relative; }
+.printer-card__select {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.printer-card__select::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-card);
+}
+.printer-card__select:focus-visible { outline: none; }
+.printer-card__select:focus-visible::after {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+/* Remove must sit above the overlay or the overlay swallows its clicks.
+   Button.jsx does not merge a caller's className, so this is reached by
+   descendant selector rather than a modifier class. */
+.printer-card__foot .ui-btn { position: relative; z-index: 1; }
