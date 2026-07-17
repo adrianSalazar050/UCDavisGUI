@@ -1,8 +1,43 @@
-// Fetch wrappers for the dashboard backend. WebSocket lives in usePrinter.
+// Fetch wrappers for the dashboard backend. WebSocket lives in usePrinters.
 
-export async function fetchStatus() {
-  const res = await fetch("/api/status");
-  if (!res.ok) throw new Error(`status ${res.status}`);
+// FastAPI puts HTTPException messages in {"detail": "..."}.
+async function detail(res) {
+  try {
+    const body = await res.json();
+    return body.detail ?? `HTTP ${res.status}`;
+  } catch {
+    return `HTTP ${res.status}`;
+  }
+}
+
+export async function fetchPrinters() {
+  const res = await fetch("/api/printers");
+  if (!res.ok) throw new Error(await detail(res));
+  return (await res.json()).printers ?? [];
+}
+
+export async function addPrinter({ host, serial, access_code, name, capture }) {
+  const res = await fetch("/api/printers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ host, serial, access_code, name, capture }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function removePrinter(serial) {
+  const res = await fetch(`/api/printers/${encodeURIComponent(serial)}`,
+                          { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+// { path, entries: [{ name, is_dir, size, mtime }] }
+export async function fetchFiles(serial, path = "/") {
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/files` +
+    `?path=${encodeURIComponent(path)}`);
+  if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }
 

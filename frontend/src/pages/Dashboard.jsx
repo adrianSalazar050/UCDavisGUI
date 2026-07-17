@@ -8,8 +8,8 @@ import StatTile from "../components/ui/StatTile.jsx";
 
 const deg = (v) => (v == null ? "—" : `${Number(v).toFixed(0)}°`);
 
-export default function Dashboard({ summary }) {
-  const s = summary ?? {};
+export default function Dashboard({ printers, selected }) {
+  const s = printers.find((p) => p.serial === selected) ?? {};
   return (
     <PageFrame>
       <div className="tile-row">
@@ -30,8 +30,8 @@ export default function Dashboard({ summary }) {
       <Columns template="3fr 2fr">
         <CameraCard />
         <Stack gap={5}>
-          <PrintInfoCard summary={summary} />
-          <HmsCard summary={summary} />
+          <PrintInfoCard summary={s} />
+          <HmsCard summary={s} />
         </Stack>
       </Columns>
     </PageFrame>

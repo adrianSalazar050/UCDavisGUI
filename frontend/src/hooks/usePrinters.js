@@ -2,11 +2,11 @@ import { useEffect, useState } from "react";
 
 const MAX_BACKOFF_MS = 10000;
 
-// Live printer summary over /ws with auto-reconnect.
-// Returns { summary, wsUp }: summary is the last received payload (or null),
-// wsUp is whether the socket is currently open.
-export function usePrinter() {
-  const [summary, setSummary] = useState(null);
+// Live list of every registered printer over /ws with auto-reconnect.
+// Returns { printers, wsUp }: printers is the last received list (empty until
+// the first message), wsUp is whether the socket is currently open.
+export function usePrinters() {
+  const [printers, setPrinters] = useState([]);
   const [wsUp, setWsUp] = useState(false);
 
   useEffect(() => {
@@ -22,7 +22,18 @@ export function usePrinter() {
         setWsUp(true);
         delay = 1000;
       };
-      ws.onmessage = (e) => setSummary(JSON.parse(e.data));
+      ws.onmessage = (e) => {
+        // A malformed frame must not take down the socket or the app — log
+        // and keep the last-known-good printer list instead of throwing out
+        // of the handler (which would otherwise just be an uncaught
+        // exception; it would NOT close the connection or crash React, but
+        // dropping the update silently would be worse than noting it).
+        try {
+          setPrinters(JSON.parse(e.data).printers ?? []);
+        } catch (err) {
+          console.error("usePrinters: malformed WS message", err);
+        }
+      };
       ws.onclose = () => {
         // A torn-down effect's socket (StrictMode double-mount) must not
         // touch state owned by the effect that replaced it. Dev consoles
@@ -42,5 +53,5 @@ export function usePrinter() {
     };
   }, []);
 
-  return { summary, wsUp };
+  return { printers, wsUp };
 }

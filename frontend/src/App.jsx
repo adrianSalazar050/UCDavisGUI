@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { navGroups, pages } from "./app/pageRegistry.jsx";
 import NavGroup from "./components/ui/NavGroup.jsx";
 import StatusPill from "./components/ui/StatusPill.jsx";
-import { usePrinter } from "./hooks/usePrinter.js";
+import { usePrinters } from "./hooks/usePrinters.js";
 
 const CONN = {
   ok: { status: "ok", label: "Connected" },
@@ -10,13 +10,37 @@ const CONN = {
   disconnected: { status: "danger", label: "Printer offline" },
 };
 const SERVER_DOWN = { status: "danger", label: "Server offline" };
+const NO_PRINTERS = { status: "warn", label: "No printers" };
 
 export default function App() {
-  const [active, setActive] = useState("dashboard");
-  const { summary, wsUp } = usePrinter();
+  const [active, setActive] = useState("overview");
+  const [selected, setSelected] = useState(null);
+  const { printers, wsUp } = usePrinters();
+
+  // One printer is the common case — never make the user pick. Also repairs
+  // the selection when the selected printer is removed.
+  useEffect(() => {
+    if (printers.length === 1) setSelected(printers[0].serial);
+    else if (selected && !printers.some((p) => p.serial === selected)) {
+      setSelected(printers[0]?.serial ?? null);
+    }
+  }, [printers, selected]);
+
+  const select = (serial) => {
+    setSelected(serial);
+    setActive("dashboard");
+  };
+
+  const current = printers.find((p) => p.serial === selected) ?? null;
+  const online = printers.filter((p) => p.connection === "ok").length;
+
+  let conn;
+  if (!wsUp) conn = SERVER_DOWN;
+  else if (printers.length === 0) conn = NO_PRINTERS;
+  else if (current) conn = CONN[current.connection] ?? CONN.stale;
+  else conn = { status: "ok", label: `${online} of ${printers.length} online` };
 
   const Page = pages[active].component;
-  const conn = wsUp ? (CONN[summary?.connection] ?? CONN.stale) : SERVER_DOWN;
 
   return (
     <div className="shell">
@@ -30,11 +54,15 @@ export default function App() {
       <div className="main">
         <header className="topbar">
           <span className="topbar__title">{pages[active].title}</span>
-          <span className="topbar__host">{summary?.printer ?? ""}</span>
+          <span className="topbar__host">
+            {printers.length > 0
+              ? `${printers.length} printer${printers.length === 1 ? "" : "s"} · ${online} online`
+              : ""}
+          </span>
           <StatusPill status={conn.status}>{conn.label}</StatusPill>
         </header>
-        <div className={conn.status === "danger" ? "dimmed" : ""}>
-          <Page summary={summary} />
+        <div className={!wsUp ? "dimmed" : ""}>
+          <Page printers={printers} selected={selected} onSelect={select} />
         </div>
       </div>
     </div>
