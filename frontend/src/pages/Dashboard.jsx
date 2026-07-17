@@ -1,3 +1,4 @@
+import AutoStopCard from "../components/dashboard/AutoStopCard.jsx";
 import CameraCard from "../components/dashboard/CameraCard.jsx";
 import HmsCard from "../components/dashboard/HmsCard.jsx";
 import PrintInfoCard from "../components/dashboard/PrintInfoCard.jsx";
@@ -43,7 +44,7 @@ export default function Dashboard({ printers, selected }) {
         {/* There is one webcam. Showing its frames on a printer it isn't
             pointed at would be a lie, so only the capture printer gets it. */}
         {s.capture ? (
-          <CameraCard />
+          <CameraCard serial={s.serial} live={!!s.detection?.running} />
         ) : (
           <Card title="Camera">
             <div className="camera-placeholder">
@@ -53,6 +54,7 @@ export default function Dashboard({ printers, selected }) {
           </Card>
         )}
         <Stack gap={5}>
+          {s.detection && <AutoStopCard serial={s.serial} d={s.detection} />}
           <PrintInfoCard summary={s} />
           <HmsCard summary={s} />
         </Stack>

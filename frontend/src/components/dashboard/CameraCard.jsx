@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { fetchLatestFrame } from "../../api/printer.js";
+import { fetchLatestFrame, detectionFrameUrl } from "../../api/printer.js";
 import Card from "../ui/Card.jsx";
 
 const POLL_MS = 2000;
 
-export default function CameraCard() {
+// When `live` (a detector is running for `serial`), poll the annotated
+// detection frame; otherwise fall back to the capture layer frame.
+export default function CameraCard({ serial = null, live = false }) {
   const [frame, setFrame] = useState(null);
 
   useEffect(() => {
@@ -12,14 +14,20 @@ export default function CameraCard() {
     let currentUrl = null;
 
     const tick = async () => {
-      const f = await fetchLatestFrame();
+      let f = null;
+      if (live && serial) {
+        // Detector frames are plain JPEG at a fixed URL; cache-bust each poll.
+        f = { url: `${detectionFrameUrl(serial)}?t=${Date.now()}`, revoke: false };
+      } else {
+        f = await fetchLatestFrame();          // {url, layer, run} object-URL or null
+      }
       if (!alive) {
-        if (f) URL.revokeObjectURL(f.url);
+        if (f?.revoke) URL.revokeObjectURL(f.url);
         return;
       }
-      if (currentUrl) URL.revokeObjectURL(currentUrl);
+      if (currentUrl && frame?.revoke) URL.revokeObjectURL(currentUrl);
       currentUrl = f ? f.url : null;
-      setFrame(f); // null -> placeholder (no active run)
+      setFrame(f);
     };
 
     tick();
@@ -27,23 +35,25 @@ export default function CameraCard() {
     return () => {
       alive = false;
       clearInterval(id);
-      if (currentUrl) URL.revokeObjectURL(currentUrl);
+      if (currentUrl && frame?.revoke) URL.revokeObjectURL(currentUrl);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serial, live]);
 
   return (
     <Card title="Camera">
       {frame ? (
         <>
           <img className="camera-frame" src={frame.url}
-               alt={`Print at layer ${frame.layer}`} />
+               alt={live ? "Live detection" : `Print at layer ${frame.layer}`} />
           <div className="camera-caption">
-            Layer {frame.layer} — {frame.run}
+            {live ? "Live detection feed" : frame.layer != null
+              ? `Layer ${frame.layer} — ${frame.run}` : ""}
           </div>
         </>
       ) : (
         <div className="camera-placeholder">
-          No active capture run — start capture.py
+          {live ? "Waiting for detector frames…" : "No active capture run — start capture.py"}
         </div>
       )}
     </Card>
