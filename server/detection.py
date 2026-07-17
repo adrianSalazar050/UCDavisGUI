@@ -200,3 +200,137 @@ class DetectorSupervisor:
     def stop(self) -> None:
         self._stop_proc()
         self._target = None
+
+
+DETECT_SUBDIR = "_detect"
+TICK_S = 0.5
+
+
+class DetectionCoordinator:
+    """Background thread: reconcile the detector, read status, run the
+    controller, actuate the stop. Also serves detection snapshots to the API/WS.
+    """
+
+    def __init__(self, registry, runs_dir, runner, *, tick_s: float = TICK_S,
+                 controller_factory=AutoStopController):
+        self.registry = registry
+        self.out_dir = pathlib.Path(runs_dir) / DETECT_SUBDIR
+        self.runner = runner
+        self.reader = StatusReader(self.out_dir)
+        self._factory = controller_factory
+        self._controllers = {}
+        self._tick_s = tick_s
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def _controller_for(self, serial):
+        c = self._controllers.get(serial)
+        if c is None:
+            c = self._factory()
+            self._controllers[serial] = c
+        return c
+
+    def tick(self) -> None:
+        self.runner.reconcile(self.registry.detection_target())
+        cap = self.registry.capture_serial()
+        if cap is None:
+            return
+        cfg = self.registry.detection_config(cap)
+        status = self.reader.read()
+        # NEVER act on stale/errored detections -- feed the controller [] so a
+        # dead detector can't leave a stale 'spaghetti' ticking toward a stop.
+        detections = status["detections"] if status["running"] else []
+        svc = self.registry.get(cap)
+        gstate = svc.summary().get("gcode_state") if svc else None
+        with self._lock:
+            ctrl = self._controller_for(cap)
+            ctrl.configure(cfg["armed_classes"], cfg["conf"])
+            action = ctrl.update(detections, gstate)
+        if action == "fire" and svc is not None:
+            log.warning("auto-stop firing for %s", cap)
+            try:
+                svc.stop_print()
+            except Exception as e:  # noqa: BLE001
+                log.error("stop_print failed for %s: %s", cap, e)
+
+    def snapshot(self, serial):
+        if serial != self.registry.capture_serial():
+            return None
+        cfg = self.registry.detection_config(serial)
+        if cfg is None:
+            return None
+        status = self.reader.read()
+        with self._lock:
+            snap = self._controller_for(serial).snapshot()
+        return {"running": status["running"], "fps": status["fps"],
+                "camera_index": cfg["camera_index"], "conf": cfg["conf"],
+                "detect_enabled": cfg["detect_enabled"],
+                "armed": snap["armed"], "armed_classes": cfg["armed_classes"],
+                "detections": status["detections"] if status["running"] else [],
+                "stopped_by_monitor": snap["stopped_by_monitor"],
+                "seconds_to_stop": snap["seconds_to_stop"],
+                "error": status["error"]}
+
+    def arm(self, serial, value: bool) -> None:
+        with self._lock:
+            self._controller_for(serial).arm(value)
+
+    def frame_path(self):
+        p = self.out_dir / "latest.jpg"
+        return p if p.exists() else None
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._tick_s):
+            try:
+                self.tick()
+            except Exception as e:  # noqa: BLE001 - a bad tick must not kill the loop
+                log.exception("detection tick failed: %s", e)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2)
+        self.runner.stop()
+
+
+class MockDetectorRunner:
+    """--mock stand-in for DetectorSupervisor: instead of spawning detect.py,
+    write a synthetic 'spaghetti' status.json so the arm->10s->stop loop runs
+    with no camera and no weights. Reuses detect.write_status for the same
+    atomic-write contract."""
+
+    def __init__(self, out_dir, *, period_s: float = 0.5):
+        self.out_dir = pathlib.Path(out_dir)
+        self._period = period_s
+        self._active = False
+        self._stop = threading.Event()
+        self._thread = None
+
+    def reconcile(self, target) -> None:
+        if target and not self._active:
+            self._active = True
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        elif not target and self._active:
+            self._halt()
+
+    def _loop(self) -> None:
+        import detect  # root module; lazy so server imports don't need cv2 early
+        while not self._stop.wait(self._period):
+            detect.write_status(self.out_dir, detect.build_status(
+                [{"cls": "spaghetti", "conf": 0.9, "box": [0, 0, 8, 8]}],
+                ts=time.time(), fps=4.0, camera=0, conf=0.25))
+
+    def _halt(self) -> None:
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
+        self._active = False
+
+    def stop(self) -> None:
+        self._halt()

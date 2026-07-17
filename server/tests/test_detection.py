@@ -213,3 +213,80 @@ def test_crash_respawns_after_backoff(tmp_path):
     clk.t = 6.0
     sup.reconcile(T1)                 # backoff elapsed -> respawn
     assert len(spawned) == 2
+
+
+from server.detection import DetectionCoordinator
+
+
+class FakeRunner:
+    def __init__(self): self.targets = []; self.stopped = False
+    def reconcile(self, target): self.targets.append(target)
+    def stop(self): self.stopped = True
+
+
+class FakeReg:
+    def __init__(self, target, gstate="RUNNING"):
+        self._target = target
+        self._gstate = gstate
+        self.stopped = 0
+    def detection_target(self): return self._target
+    def capture_serial(self): return self._target["serial"] if self._target else None
+    def detection_config(self, serial):
+        return {"camera_index": 0, "conf": 0.5,
+                "armed_classes": ["spaghetti"], "detect_enabled": True}
+    def get(self, serial):
+        reg = self
+        class S:
+            def summary(self_): return {"serial": serial, "gcode_state": reg._gstate}
+            def stop_print(self_): reg.stopped += 1; reg._gstate = "FAILED"
+        return S()
+
+
+def test_tick_reconciles_the_runner(tmp_path):
+    reg = FakeReg({"serial": "S1", "camera_index": 0, "conf": 0.5})
+    runner = FakeRunner()
+    co = DetectionCoordinator(reg, tmp_path, runner)
+    co.tick()
+    assert runner.targets[-1]["serial"] == "S1"
+
+
+def test_tick_fires_stop_after_sustained_fault(tmp_path):
+    reg = FakeReg({"serial": "S1", "camera_index": 0, "conf": 0.5})
+    runner = FakeRunner()
+    clk = Clock()
+    co = DetectionCoordinator(reg, tmp_path, runner,
+                              controller_factory=lambda: AutoStopController(clock=clk))
+    (tmp_path / "_detect").mkdir()
+    def status(ts):
+        (tmp_path / "_detect" / "status.json").write_text(json.dumps(
+            {"ts": ts, "fps": 4.0, "camera": 0, "conf": 0.5,
+             "detections": [{"cls": "spaghetti", "conf": 0.9}], "error": None}))
+    co.reader = StatusReader(tmp_path / "_detect", clock=lambda: clk.t)
+    co.arm("S1", True)
+    status(clk.t); co.tick()                 # t=0 fault begins
+    clk.t = 10.0; status(clk.t); co.tick()   # sustained -> fire
+    assert reg.stopped == 1
+
+
+def test_stale_status_does_not_fire(tmp_path):
+    reg = FakeReg({"serial": "S1", "camera_index": 0, "conf": 0.5})
+    clk = Clock()
+    co = DetectionCoordinator(reg, tmp_path, FakeRunner(),
+                              controller_factory=lambda: AutoStopController(clock=clk))
+    (tmp_path / "_detect").mkdir()
+    (tmp_path / "_detect" / "status.json").write_text(json.dumps(
+        {"ts": 0.0, "fps": 4.0, "camera": 0, "conf": 0.5,
+         "detections": [{"cls": "spaghetti", "conf": 0.9}], "error": None}))
+    co.reader = StatusReader(tmp_path / "_detect", stale_after=3.0, clock=lambda: clk.t)
+    co.arm("S1", True)
+    for t in (0, 11, 22, 33):                # status is always stale (ts=0)
+        clk.t = float(t); co.tick()
+    assert reg.stopped == 0                   # never acts on stale detections
+
+
+def test_snapshot_none_for_non_capture(tmp_path):
+    reg = FakeReg({"serial": "S1", "camera_index": 0, "conf": 0.5})
+    co = DetectionCoordinator(reg, tmp_path, FakeRunner())
+    assert co.snapshot("OTHER") is None
+    snap = co.snapshot("S1")
+    assert snap["armed_classes"] == ["spaghetti"]
