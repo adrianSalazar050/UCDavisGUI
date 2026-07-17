@@ -22,19 +22,37 @@ import time
 import cv2
 import numpy as np
 
+REPLACE_RETRIES = 5
+REPLACE_RETRY_S = 0.05
+
 
 def _atomic_write_bytes(path: pathlib.Path, data: bytes) -> None:
     """temp + os.replace in the same dir -> a reader never sees a half file
-    (the store.py pattern). prefix keeps the temp beside the target."""
+    (the store.py pattern). On Windows os.replace raises PermissionError if the
+    destination is momentarily open by a reader (the server's StatusReader) or
+    held by OneDrive sync, so retry the rename a few times before giving up."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name,
                               suffix=".tmp")
     try:
-        with os.fdopen(fd, "wb") as f:
+        try:
+            f = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        last = None
+        for _ in range(REPLACE_RETRIES):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError as e:  # Windows sharing violation, transient
+                last = e
+                time.sleep(REPLACE_RETRY_S)
+        raise last
     except BaseException:
         pathlib.Path(tmp).unlink(missing_ok=True)
         raise
@@ -155,6 +173,11 @@ def main() -> int:
         size = (480, 640, 3)
         grab = lambda: np.full(size, 40, np.uint8)  # noqa: E731
         infer = mock_infer
+        try:
+            detection_loop(grab, infer, a.out, camera=a.camera, conf=a.conf,
+                           fps=a.fps, stop_event=stop)
+        except KeyboardInterrupt:
+            pass
     else:
         if not pathlib.Path(a.weights).exists():
             print(f"weights not found: {a.weights}", file=sys.stderr)
@@ -167,11 +190,13 @@ def main() -> int:
             return frame if ok else None
 
         infer = make_yolo_infer(a.weights, a.conf, a.imgsz, a.device)
-    try:
-        detection_loop(grab, infer, a.out, camera=a.camera, conf=a.conf,
-                       fps=a.fps, stop_event=stop)
-    except KeyboardInterrupt:
-        pass
+        try:
+            detection_loop(grab, infer, a.out, camera=a.camera, conf=a.conf,
+                           fps=a.fps, stop_event=stop)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            cap.release()  # always release the device, even on error/Ctrl-C
     return 0
 
 

@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+import pytest
 
 import detect
 
@@ -12,6 +13,47 @@ def test_write_status_round_trips_and_leaves_no_temp(tmp_path):
     got = json.loads((tmp_path / "status.json").read_text())
     assert got == payload
     assert [p.name for p in tmp_path.iterdir()] == ["status.json"]
+
+
+def test_write_status_retries_os_replace_then_succeeds(tmp_path, monkeypatch):
+    # Windows: os.replace raises PermissionError (WinError 5/32) when the
+    # destination is momentarily open by a reader (server's StatusReader) or
+    # held by OneDrive sync. That's transient -- a short retry loop should
+    # ride it out rather than propagate and kill the writer.
+    real_replace = detect.os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError("simulated transient sharing violation")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(detect.os, "replace", flaky_replace)
+    monkeypatch.setattr(detect.time, "sleep", lambda s: None)
+
+    payload = {"ts": 1.0, "fps": 4.0, "camera": 0, "conf": 0.25,
+               "detections": [], "error": None}
+    detect.write_status(tmp_path, payload)
+
+    got = json.loads((tmp_path / "status.json").read_text())
+    assert got == payload
+    assert [p.name for p in tmp_path.iterdir()] == ["status.json"]
+    assert calls["n"] == 3
+
+
+def test_write_status_gives_up_after_retries(tmp_path, monkeypatch):
+    def always_fail(src, dst):
+        raise PermissionError("simulated permanent sharing violation")
+
+    monkeypatch.setattr(detect.os, "replace", always_fail)
+    monkeypatch.setattr(detect.time, "sleep", lambda s: None)
+
+    payload = {"ts": 1.0, "fps": 4.0, "camera": 0, "conf": 0.25,
+               "detections": [], "error": None}
+    with pytest.raises(PermissionError):
+        detect.write_status(tmp_path, payload)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_write_frame_writes_a_jpeg(tmp_path):

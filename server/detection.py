@@ -37,7 +37,10 @@ class StatusReader:
     def read(self) -> dict:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            # UnicodeDecodeError: a torn write caught mid multi-byte char
+            # (OneDrive sync, a read racing detect.py's os.replace) -- degrade
+            # to "down" like any other bad read (matches store.py's tolerance).
             return self._down()
         if not isinstance(data, dict):
             return self._down()
@@ -90,8 +93,12 @@ class AutoStopController:
             self._fault_since = None
 
     def _qualifying(self, detections) -> bool:
-        return any(d.get("cls") in self._classes
-                   and float(d.get("conf", 0.0)) >= self._threshold
+        def _conf(d):
+            try:
+                return float(d.get("conf", 0.0))
+            except (TypeError, ValueError):
+                return 0.0  # malformed conf (null/non-numeric) -> fail-safe
+        return any(d.get("cls") in self._classes and _conf(d) >= self._threshold
                    for d in detections)
 
     def update(self, detections, gcode_state) -> str | None:
@@ -335,9 +342,14 @@ class MockDetectorRunner:
     def _loop(self) -> None:
         import detect  # root module; lazy so server imports don't need cv2 early
         while not self._stop.wait(self._period):
-            detect.write_status(self.out_dir, detect.build_status(
-                [{"cls": "spaghetti", "conf": 0.9, "box": [0, 0, 8, 8]}],
-                ts=time.time(), fps=4.0, camera=0, conf=0.25))
+            try:
+                detect.write_status(self.out_dir, detect.build_status(
+                    [{"cls": "spaghetti", "conf": 0.9, "box": [0, 0, 8, 8]}],
+                    ts=time.time(), fps=4.0, camera=0, conf=0.25))
+            except Exception as e:  # noqa: BLE001 - no supervisor to respawn
+                # this thread; one bad write (even after H1's retries are
+                # exhausted) must not permanently kill the mock writer.
+                log.warning("mock detector write_status failed: %s", e)
 
     def _halt(self) -> None:
         self._stop.set()

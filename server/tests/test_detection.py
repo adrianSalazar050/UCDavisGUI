@@ -44,6 +44,14 @@ def test_reader_half_written_json_is_not_running(tmp_path):
     assert r["running"] is False
 
 
+def test_reader_invalid_utf8_is_not_running(tmp_path):
+    # e.g. a torn write caught mid multi-byte char (OneDrive sync, a reader
+    # racing detect.py's os.replace). Must degrade to "down", not raise.
+    (tmp_path / "status.json").write_bytes(b"\xff\xfe\x00bad")
+    r = StatusReader(tmp_path, clock=lambda: 100.0).read()
+    assert r["running"] is False
+
+
 from server.detection import AutoStopController
 
 
@@ -93,6 +101,24 @@ def test_below_threshold_never_fires():
     for t in (0, 11, 22):
         clk.t = t
         assert c.update(weak, "RUNNING") is None
+
+
+def test_null_conf_does_not_fire_or_raise():
+    clk = Clock()
+    c = armed_controller(clk)
+    bad = [{"cls": "spaghetti", "conf": None}]
+    for t in (0, 11, 22):
+        clk.t = t
+        assert c.update(bad, "RUNNING") is None
+
+
+def test_non_numeric_conf_does_not_fire_or_raise():
+    clk = Clock()
+    c = armed_controller(clk)
+    bad = [{"cls": "spaghetti", "conf": "high"}]
+    for t in (0, 11, 22):
+        clk.t = t
+        assert c.update(bad, "RUNNING") is None
 
 
 def test_non_armed_class_ignored():
