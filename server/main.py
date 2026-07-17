@@ -1,4 +1,4 @@
-"""FastAPI app: /api/status, /api/frame/latest, /ws, static frontend."""
+"""FastAPI app: /api/printers, /api/frame/latest, /ws, static frontend."""
 from __future__ import annotations
 
 import asyncio
@@ -7,11 +7,14 @@ import logging
 import pathlib
 import time
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-from . import runs
+from . import runs, sdcard
+from .registry import DuplicateSerial
+from .sdcard import SdError
 
 log = logging.getLogger("server.main")
 
@@ -19,15 +22,73 @@ WS_POLL_S = 0.25      # summary sampled at 4 Hz -> at most ~4 pushes/s
 WS_HEARTBEAT_S = 5.0  # push even when unchanged, keeps report_age_s fresh
 
 
-def create_app(service, runs_dir: pathlib.Path,
+class AddPrinter(BaseModel):
+    """Pydantic rejects non-strings at the body-parse layer -> 422.
+
+    That matters: PrinterConfig's type validation lives in from_dict(), NOT in
+    its constructor, so `PrinterConfig(serial=None, ...)` still coerces to "".
+    The registry keys on serial, so a None reaching it would collapse printers
+    onto one entry. This model is what keeps a request body off that path --
+    do not bypass it by building a PrinterConfig straight from raw request data.
+    """
+
+    host: str
+    serial: str
+    access_code: str
+    name: str = ""
+    capture: bool = False
+
+
+def _comparable(printers: list[dict]) -> list[dict]:
+    """report_age_s ticks every sample; ignore it when deciding whether the
+    state meaningfully changed."""
+    return [{k: v for k, v in p.items() if k != "report_age_s"}
+            for p in printers]
+
+
+def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None) -> FastAPI:
-    """`service` is anything with a summary() -> dict (PrinterService,
-    MockPrinter, or a test fake)."""
+    """`registry` is anything with summaries() -> list[dict], get(serial),
+    add(...), remove(serial) (PrinterRegistry, or a test fake)."""
     app = FastAPI(title="bambu-monitor")
 
-    @app.get("/api/status")
-    def status():
-        return service.summary()
+    @app.get("/api/printers")
+    def list_printers():
+        return {"printers": registry.summaries()}
+
+    @app.post("/api/printers", status_code=201)
+    def add_printer(body: AddPrinter):
+        try:
+            return registry.add(host=body.host, serial=body.serial,
+                                access_code=body.access_code,
+                                name=body.name, capture=body.capture)
+        except DuplicateSerial:
+            raise HTTPException(409, "that serial is already registered")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.delete("/api/printers/{serial}", status_code=204)
+    def remove_printer(serial: str):
+        if not registry.remove(serial):
+            raise HTTPException(404, "unknown printer")
+        return Response(status_code=204)
+
+    @app.get("/api/printers/{serial}/files")
+    def list_files(serial: str, path: str = "/"):
+        # Deliberately a SYNC def: FastAPI runs these on a threadpool, so the
+        # blocking FTPS handshake cannot stall the event loop and freeze every
+        # connected WebSocket.
+        svc = registry.get(serial)
+        if svc is None:
+            raise HTTPException(404, "unknown printer")
+        try:
+            target = sdcard.normalize_path(path)
+        except SdError as e:
+            raise HTTPException(400, str(e))  # bad input, not a printer fault
+        try:
+            return {"path": target, "entries": svc.list_files(target)}
+        except SdError as e:
+            raise HTTPException(502, str(e))  # the printer/FTPS failed us
 
     @app.get("/api/frame/latest")
     def frame_latest():
@@ -53,24 +114,19 @@ def create_app(service, runs_dir: pathlib.Path,
     async def ws(sock: WebSocket):
         try:
             await sock.accept()
-            payload = service.summary()
-            await sock.send_text(json.dumps(payload))
-            last_sent, last_time = payload, time.monotonic()
+            printers = registry.summaries()
+            await sock.send_text(json.dumps({"printers": printers}))
+            last_sent, last_time = printers, time.monotonic()
             while True:
                 await asyncio.sleep(WS_POLL_S)
                 now = time.monotonic()
-                # summary() must stay non-blocking: it runs on the event loop
+                # summaries() must stay non-blocking: it runs on the event loop
                 # and a stall here would freeze every connected client.
-                payload = service.summary()
-                # report_age_s ticks every sample; ignore it when deciding
-                # whether the state meaningfully changed.
-                changed = ({k: v for k, v in payload.items()
-                            if k != "report_age_s"}
-                           != {k: v for k, v in last_sent.items()
-                               if k != "report_age_s"})
+                printers = registry.summaries()
+                changed = _comparable(printers) != _comparable(last_sent)
                 if changed or now - last_time >= WS_HEARTBEAT_S:
-                    await sock.send_text(json.dumps(payload))
-                    last_sent, last_time = payload, now
+                    await sock.send_text(json.dumps({"printers": printers}))
+                    last_sent, last_time = printers, now
         except WebSocketDisconnect:
             pass
 
