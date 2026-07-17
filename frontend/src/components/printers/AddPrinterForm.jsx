@@ -61,17 +61,7 @@ export default function AddPrinterForm() {
       </label>
       {err && <div className="add-form__error">{err}</div>}
       <div className="add-form__actions">
-        {/*
-          Button.jsx computes `disabled={busy || rest.disabled}` but then
-          spreads {...rest} AFTER that attribute in its JSX — so when a
-          caller passes its own `disabled` prop, that raw value silently
-          overwrites Button's merged one, dropping `busy` entirely. Verified
-          empirically: passing busy={true} disabled={false} together yields
-          a DOM button with disabled=false, not true. Can't fix Button.jsx
-          (out of scope), so pre-merge `busy` into the value passed down —
-          the overwrite then lands on the already-correct result.
-        */}
-        <Button type="submit" variant="primary" busy={busy} disabled={busy || !ready}>
+        <Button type="submit" variant="primary" busy={busy} disabled={!ready}>
           Connect
         </Button>
         <span className="ui-field__help">
