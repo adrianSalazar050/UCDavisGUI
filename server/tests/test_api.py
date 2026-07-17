@@ -353,3 +353,18 @@ def test_detection_routes_404_when_detection_disabled(tmp_path):
     # create_app(..., detection=None) -> the whole feature is inert.
     r = client(tmp_path).get("/api/printers/S1/detection")
     assert r.status_code == 404
+
+
+# ---------- lifespan starts/stops detection (Task 12) ----------
+
+def test_lifespan_starts_and_stops_detection(tmp_path):
+    events = []
+
+    class LifecycleDetection(FakeDetection):
+        def start(self): events.append("start")
+        def stop(self): events.append("stop")
+
+    c, _ = det_client(tmp_path, LifecycleDetection())
+    with c:                      # triggers startup + shutdown
+        pass
+    assert events == ["start", "stop"]

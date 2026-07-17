@@ -6,6 +6,7 @@ import json
 import logging
 import pathlib
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -73,7 +74,18 @@ def create_app(registry, runs_dir: pathlib.Path,
                detection=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake)."""
-    app = FastAPI(title="bambu-monitor")
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        if detection is not None:
+            detection.start()
+        try:
+            yield
+        finally:
+            if detection is not None:
+                detection.stop()
+
+    app = FastAPI(title="bambu-monitor", lifespan=lifespan)
 
     @app.get("/api/printers")
     def list_printers():

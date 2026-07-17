@@ -13,6 +13,7 @@ import signal
 
 import uvicorn
 
+from .detection import DetectionCoordinator, DetectorSupervisor, MockDetectorRunner
 from .main import create_app
 from .printer import MockPrinter, PrinterService
 from .registry import PrinterRegistry
@@ -98,8 +99,15 @@ def main() -> int:
         registry = PrinterRegistry(PrinterStore(a.printers_file), real_factory)
         registry.load()
 
+    detect_out = runs_dir / "_detect"
+    weights = pathlib.Path(__file__).resolve().parent.parent / "runs" / "train" \
+        / "failure_detector" / "weights" / "best.pt"
+    runner = MockDetectorRunner(detect_out) if a.mock \
+        else DetectorSupervisor(detect_out, weights)
+    coordinator = DetectionCoordinator(registry, runs_dir, runner)
+
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
-    app = create_app(registry, runs_dir, dist)
+    app = create_app(registry, runs_dir, dist, detection=coordinator)
     # uvicorn re-raises the signal it caught using whatever handler was
     # installed beforehand. SIGBREAK's OS default kills the process outright
     # (skipping `finally`), so map it to KeyboardInterrupt like SIGINT gets.
