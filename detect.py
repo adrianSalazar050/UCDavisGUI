@@ -142,9 +142,9 @@ class BambuCameraSource:
     def _open(self) -> None:
         self._close()
         s = self._connect(self.host, self._timeout)
-        s.settimeout(self._timeout)
+        self._sock = s            # track before auth send so a handshake/auth
+        s.settimeout(self._timeout)  # failure is still reachable by _close()
         s.sendall(_bambu_auth_packet(self._code))
-        self._sock = s
 
     def _recv_exactly(self, n: int) -> bytes:
         buf = b""
@@ -161,7 +161,10 @@ class BambuCameraSource:
         if not (0 < size <= 20_000_000):
             raise ConnectionError(f"implausible frame size {size}")
         jpeg = self._recv_exactly(size)
-        return cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise ConnectionError("failed to decode JPEG frame")
+        return img
 
     def grab(self):
         for attempt in (1, 2):    # try, then one reconnect

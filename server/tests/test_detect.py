@@ -202,3 +202,45 @@ def test_bambu_source_returns_none_on_persistent_failure():
 
     src = detect.BambuCameraSource("h", "C", connect=connect)
     assert src.grab() is None   # -> the loop writes an error status
+
+
+def test_bambu_source_retries_on_decode_failure():
+    # valid-size header but a non-JPEG payload -> imdecode None -> must reconnect
+    # and recover, not silently return None on the first attempt.
+    socks = [FakeSock(_framed(b"not a jpeg at all")), FakeSock(_framed(_jpeg_bytes()))]
+    calls = []
+
+    def connect(host, t):
+        s = socks[len(calls)]
+        calls.append(s)
+        return s
+
+    src = detect.BambuCameraSource("h", "C", connect=connect)
+    assert src.grab() is not None
+    assert len(calls) == 2          # decode failure triggered exactly one reconnect
+
+
+def test_bambu_source_rejects_implausible_frame_size():
+    bad = struct.pack("<I", 0) + b"\x00" * 12    # size 0 header, then nothing
+    socks = [FakeSock(bad), FakeSock(_framed(_jpeg_bytes()))]
+    calls = []
+
+    def connect(host, t):
+        s = socks[len(calls)]
+        calls.append(s)
+        return s
+
+    src = detect.BambuCameraSource("h", "C", connect=connect)
+    assert src.grab() is not None
+    assert len(calls) == 2
+
+
+def test_bambu_source_closes_socket_if_auth_send_fails():
+    class BadSendSock(FakeSock):
+        def sendall(self, b):
+            raise OSError("reset after handshake")
+
+    sock = BadSendSock(b"")
+    src = detect.BambuCameraSource("h", "C", connect=lambda host, t: sock)
+    assert src.grab() is None
+    assert sock.closed is True      # the just-opened socket was cleaned up
