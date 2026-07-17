@@ -186,6 +186,14 @@ class BambuLink:
                                  "command": "gcode_line",
                                  "param": line}})
 
+    def stop_print(self) -> None:
+        """Stop the running print. This is a Bambu *print command*, not
+        G-code. Like send_gcode there is NO ack -- the caller must confirm the
+        stop took by watching gcode_state (the AutoStopController does this and
+        re-sends once). UNVERIFIED against real A1 mini hardware."""
+        self._publish({"print": {"sequence_id": self._next_seq(),
+                                 "command": "stop"}})
+
     # ---------------- convenience views ----------------
 
     def summary(self) -> dict:
