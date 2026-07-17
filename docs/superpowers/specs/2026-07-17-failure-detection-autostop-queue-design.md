@@ -8,14 +8,22 @@ the multi-printer app; it changes none of v2's printer/SD behaviour except where
 noted (`build_summary` gains a `detection` sub-object; `/api/frame/latest` is
 supplemented, not replaced).
 
+**Revision 2026-07-17b:** the Phase-1 backend is now **built and reviewed**
+(branch `dashboard`, 194 tests, final review = SHIP). This revision (a) adds a
+second camera **source** — the A1 mini's own built-in camera — as a per-printer
+alternative to a USB webcam (see "Camera sources" below), and (b) the printer now
+being on the LAN, moves several items from "deferred to hardware" into "verify
+now".
+
 ## Purpose
 
 Close the loop from the webcam to the printer, then give the bench a planner:
 
-1. **Live failure detection** — a USB webcam feeds the already-trained YOLOv8
-   failure detector (`runs/train/failure_detector/weights/best.pt`, 6 classes).
-   The dashboard shows the annotated feed and what is being detected right now.
-   Camera index and confidence threshold are set in the UI.
+1. **Live failure detection** — a USB webcam **or the A1 mini's built-in camera**
+   feeds the already-trained YOLOv8 failure detector
+   (`runs/train/failure_detector/weights/best.pt`, 6 classes). The dashboard shows
+   the annotated feed and what is being detected right now. Camera **source**,
+   index, and confidence threshold are set in the UI.
 2. **Auto-stop** — when *armed*, a qualifying failure that persists for **10
    continuous seconds** stops the print over MQTT.
 3. **Print queue** — a per-printer planner: order SD-card jobs, show each file's
@@ -35,6 +43,7 @@ once.
 | Where inference runs | **Separate process** (`detect.py`), server-supervised | Keeps torch/CUDA out of the FastAPI process; matches v2's "server reads frames off disk, never opens the camera" (`runs.py`). |
 | Camera ownership | The detector owns the webcam while enabled; **mutually exclusive** with `capture.py` | Windows allows one process per camera device. An explicit `detect_enabled` flag frees the camera for `capture.py` when off. |
 | Which printer | Reuse the existing **`capture` printer** gate | One webcam, one rig — the single-capture invariant already enforces "at most one" (`registry._clear_capture`). |
+| Camera source | Per-printer **`camera_source`**: `a1` (default) or `webcam` | User wants the built-in camera usable with no extra hardware. A1 protocol verified on the real printer (TCP 6000/TLS/JPEG, **~0.43 fps** measured); auto-stop allowed on both sources. |
 | Detector → server channel | **Disk handoff**: atomic `status.json` + `latest.jpg` | Same pattern and failure-tolerance as `capture.py` → `runs.py`. No new socket, no shared memory. |
 | Who decides & actuates the stop | **The server**, never the detector | The MQTT link is single-owner in `PrinterService`; every destructive action stays on the side that holds the arm state. |
 | What counts as a failure | **Per-class arming**, chosen in the UI; default `spaghetti` only | The model is a prototype on generic data (`FAILURE_DETECTOR_REPORT.md`) — it can false-positive on this printer. Narrow default. |
@@ -57,7 +66,7 @@ server/
   threemf.py     # NEW — parse sliced .gcode.3mf: est. time + filament grams. Pure.
   queue.py       # NEW — per-serial ordered job list + totals. Pure state, no I/O.
   sdcard.py      # + fetch_file(host, code, path) -> bytes  (FTPS download; hardware-gated)
-  store.py       # PrinterConfig gains camera_index, conf, armed_classes, detect_enabled
+  store.py       # PrinterConfig gains camera_source, camera_index, conf, armed_classes, detect_enabled
   printer.py     # PrinterService/MockPrinter gain stop_print() (mock → FAILED)
   registry.py    # exposes capture_serial(); owns the DetectorSupervisor lifecycle
   main.py        # + detection & queue endpoints; WS merges detection into capture summary
@@ -105,10 +114,11 @@ existing frame endpoint and the detector never collide.
 
 ### `detect.py` (camera owner + inference)
 
-CLI (server passes these; also runnable by hand for debugging):
-`--camera INT --conf FLOAT --weights PATH --imgsz 640 --out DIR --fps 4 --mock`.
+CLI (server passes these; also runnable by hand for debugging): `--source
+{a1,webcam} --host IP --camera INT --conf FLOAT --weights PATH --imgsz 640 --out
+DIR --fps 4 --mock`. `--source` picks the frame source (see "Camera sources").
 
-Loop: open camera (buffer size 1, like `run_camera_detection.py`); each iteration
+Loop: open the frame source (webcam or a1, see below); each iteration
 grab → `model.predict(conf=…, imgsz=…, verbose=False)` → annotate → write
 `latest.jpg` and `status.json` **atomically** (temp + `os.replace`, the `store.py`
 pattern) so the server never reads a half-written file.
@@ -126,15 +136,47 @@ rather than exiting silently, so the Detection page can show *why* it is down.
 `--mock` runs the same loop against a synthetic frame source (no camera, no
 weights) and emits a scripted detection pattern.
 
+### Camera sources (webcam or A1 mini built-in)
+
+`--source` selects the frame source; both feed the same YOLO loop and write the
+identical `status.json`/`latest.jpg`, so nothing downstream cares which was used.
+
+- **`webcam`** (uses `--camera INT`): today's `cv2.VideoCapture(index)` path,
+  buffer size 1 like `run_camera_detection.py`. Local USB device.
+- **`a1`** (uses `--host IP`; the default): connects to the printer's own camera
+  over the **verified** Bambu P1/A1-family protocol — TCP **6000**, TLS
+  (self-signed, verification off, same trust model as MQTT), an 80-byte auth packet
+  (`struct.pack("<IIII", 0x40, 0x3000, 0, 0)` + `bblp` padded to 32 bytes + access
+  code padded to 32), then a stream of `[16-byte header][JPEG]` frames where the
+  header's first LE uint32 is the JPEG length; each frame is decoded with
+  `cv2.imdecode`. **~0.43 fps measured** on the real A1 mini (a frame every
+  ~2.3 s), wide fisheye bed view. Reconnects on drop; a connect/auth failure writes
+  an `error` status like the webcam path.
+
+**Access-code handling (a1 only):** the camera auth needs the access code, so the
+detector receives it — but **only via the `BAMBU_ACCESS_CODE` environment
+variable**, never argv. This preserves the "no secret in the process list / logs /
+status file / API payload" property already asserted by tests:
+`DetectorSupervisor.build_argv` stays secret-free (it adds `--source`/`--host`),
+and the code goes in the child's `env`. `--mock` uses no real source, so it needs
+no code.
+
+**fps consequence:** at ~0.43 fps a 10 s auto-stop window is ~4 frames — enough for
+catastrophic failures (spaghetti), coarser than a webcam. Auto-stop is allowed on
+both sources (user decision).
+
 ### `server/detection.py`
 
 - **`DetectorSupervisor`** — a reconcile loop (~1 Hz, off the event loop):
-  compute the *desired* detector = `(capture_serial, camera_index, conf, weights)`
-  iff a capture printer exists **and** `detect_enabled`. If the running subprocess
-  doesn't match desired (wrong printer/index/conf, or crashed), stop it and start
-  the right one; if desired is none, stop it. Restart on crash with bounded
-  backoff. Exactly one detector process, ever (one webcam). Graceful `stop()` on
-  shutdown (`registry.stop_all` path).
+  compute the *desired* detector from `registry.detection_target()` =
+  `{serial, camera_source, camera_index, conf, host, access_code}` iff a capture
+  printer exists **and** `detect_enabled`. If the running subprocess doesn't match
+  desired (wrong printer/source/index/conf, or crashed), stop it and start the
+  right one; if desired is none, stop it. `build_argv` carries `--source` plus
+  `--host` (a1) or `--camera` (webcam) — **never the access code**, which rides the
+  child's `BAMBU_ACCESS_CODE` env for the a1 source only. Restart on crash with
+  bounded backoff. Exactly one detector process, ever (one camera). Graceful
+  `stop()` on shutdown (`registry.stop_all` path).
 - **`StatusReader`** — tolerant read of `_detect/status.json` (missing / half /
   stale → treated as "no detections", staleness surfaced as detector-down), the
   way `runs.py` tolerates a vanishing frame.
@@ -163,21 +205,26 @@ exact stop payload and that the printer honours it need the real A1 mini.
 ### Config & persistence
 
 `PrinterConfig` gains (persisted in `printers.json`, already gitignored):
+`camera_source: str = "a1"` (validated to `a1`/`webcam`, else default),
 `camera_index: int = 0`, `conf: float = 0.25`, `armed_classes: list[str] =
 ["spaghetti"]`, `detect_enabled: bool = False`. Same tolerant `from_dict`
 validation as `capture` (wrong type → safe default). **`armed` is not stored.**
+(`camera_index`/`conf`/`armed_classes`/`detect_enabled` shipped in the Phase-1
+backend; `camera_source` is this revision's addition.)
 
 ### API
 
 - The `/ws` tick **merges a `detection` object into the capture printer's
   summary** (null for the others), assembled by `detection.py` from the
-  StatusReader + controller: `{running, fps, camera_index, conf, detect_enabled,
-  armed, armed_classes, detections, stopped_by_monitor, error}`. Detection state
-  stays out of `PrinterService` — it is joined at the WS edge (`main.py`) keyed on
-  `capture_serial()`. No new polling; it rides the existing socket.
+  StatusReader + controller: `{running, fps, camera_source, camera_index, conf,
+  detect_enabled, armed, armed_classes, detections, stopped_by_monitor,
+  seconds_to_stop, error}`. Detection state stays out of `PrinterService` — it is
+  joined at the WS edge (`main.py`) keyed on `capture_serial()`. No new polling; it
+  rides the existing socket. (Shipped as built; `camera_source` added this
+  revision.)
 - `GET /api/printers/{serial}/detection` — config + live status (same object).
-- `PUT /api/printers/{serial}/detection` — `{camera_index, conf, armed_classes,
-  detect_enabled}`; the supervisor reconciles on the next tick.
+- `PUT /api/printers/{serial}/detection` — `{camera_source, camera_index, conf,
+  armed_classes, detect_enabled}`; the supervisor reconciles on the next tick.
 - `POST /api/printers/{serial}/detection/arm` — `{armed: bool}` (runtime only).
 - `GET /api/printers/{serial}/detection/frame` — serves `_detect/latest.jpg`
   (404 when no detector), mirroring `/api/frame/latest`'s in-handler read.
@@ -189,10 +236,12 @@ validation as `capture` (wrong type → safe default). **`armed` is not stored.*
   and a latched "Stopped by monitor" banner. `CameraCard` shows the annotated
   detection frame when `detection.running`, else falls back to the capture layer
   frame (`/api/frame/latest`) exactly as today.
-- **Detection page** (new, in `pageRegistry`) — camera **index**, confidence
-  **threshold**, **Enable detection** toggle, the **per-class arming** checklist
-  (6 classes), and detector **health** (running / fps / `error`) with the live
-  preview. Writes via `PUT …/detection`.
+- **Detection page** (new, in `pageRegistry`) — camera **source** (A1 built-in /
+  USB webcam), the webcam **index** (shown only when `webcam` is selected),
+  confidence **threshold**, **Enable detection** toggle, the **per-class arming**
+  checklist (6 classes), and detector **health** (running / fps / `error`) with the
+  live preview. Writes via `PUT …/detection`. (Phase 1b — the backend it drives is
+  already built and reviewed.)
 
 ## Phase 2 details — Queue
 
@@ -239,8 +288,14 @@ Dashboard/SD Files).
 - **`--mock` end-to-end:** synthetic detector emits `spaghetti`; arm → ~10 s →
   `MockPrinter` goes `FAILED` → summary shows `stopped_by_monitor`. The Queue page
   works over `MockPrinter.list_files` + a fixture 3MF. All green with no hardware.
-- **Deferred to hardware** (see branch status): a real webcam at the given index;
-  the printer actually honouring `stop`; FTPS fetch of a real sliced 3MF.
+- **A1 camera source:** unit-test the frame reader against a fake socket (auth
+  bytes; `[header][JPEG]` framing; reconnect on drop) with no network; assert
+  `build_argv` never contains the access code and the a1 `env` carries it.
+- **Hardware verification (printer now on the LAN — no longer deferred):** the a1
+  source end-to-end against the real printer (protocol already probed ✓); real YOLO
+  on real A1 frames; and the destructive `stop` command — run **only against a
+  sacrificial print with the user's explicit go-ahead**, confirming `gcode_state`
+  goes terminal. FTPS fetch of a real sliced 3MF stays for Phase 2.
 
 ## Safety & non-goals
 
@@ -256,6 +311,9 @@ Dashboard/SD Files).
 - **Stop payload:** `{"print":{"command":"stop"}}` is the documented Bambu LAN
   stop; verify on the A1 mini and keep the verify+retry as the backstop if a firmware
   variant ignores it.
+- **A1 camera:** ~0.43 fps (measured) makes auto-stop coarse but workable; the
+  built-in camera may permit only one concurrent stream, so the detector and Bambu
+  Studio's live view can contend — documented, not fixed.
 - **3MF metadata keys** vary by slicer/version — the parser stays tolerant and the
   UI always allows manual override.
 - **Projected finish** ignores inter-job bed-clearing and warm-up — always shown
