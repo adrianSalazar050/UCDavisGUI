@@ -19,6 +19,11 @@ import tempfile
 
 log = logging.getLogger("server.store")
 
+# The 6 classes the failure detector emits (FAILURE_DETECTOR_REPORT.md). The
+# only values accepted for armed_classes; anything else is dropped.
+DETECTION_CLASSES = ("blobs", "cracks", "over_extrusion", "spaghetti",
+                     "stringing", "under_extrusion")
+
 
 @dataclasses.dataclass
 class PrinterConfig:
@@ -29,6 +34,11 @@ class PrinterConfig:
     access_code: str
     name: str = ""
     capture: bool = False
+    camera_index: int = 0
+    conf: float = 0.25
+    armed_classes: list = dataclasses.field(
+        default_factory=lambda: ["spaghetti"])
+    detect_enabled: bool = False
 
     def __post_init__(self) -> None:
         self.serial = (self.serial or "").strip()
@@ -63,8 +73,25 @@ class PrinterConfig:
             log.warning("capture must be true/false, got %r; defaulting to "
                         "False", capture)
             capture = False
+        camera_index = d.get("camera_index", 0)
+        if not isinstance(camera_index, int) or isinstance(camera_index, bool):
+            camera_index = 0
+        conf = d.get("conf", 0.25)
+        if not isinstance(conf, (int, float)) or isinstance(conf, bool):
+            conf = 0.25
+        conf = min(1.0, max(0.0, float(conf)))
+        detect_enabled = d.get("detect_enabled", False)
+        if not isinstance(detect_enabled, bool):
+            detect_enabled = False
+        raw_classes = d.get("armed_classes", ["spaghetti"])
+        if not isinstance(raw_classes, list):
+            raw_classes = ["spaghetti"]
+        armed_classes = [c for c in raw_classes if c in DETECTION_CLASSES] \
+            or ["spaghetti"]
         return cls(serial=d["serial"], host=d["host"],
-                   access_code=d["access_code"], name=name, capture=capture)
+                   access_code=d["access_code"], name=name, capture=capture,
+                   camera_index=camera_index, conf=conf,
+                   armed_classes=armed_classes, detect_enabled=detect_enabled)
 
 
 class PrinterStore:

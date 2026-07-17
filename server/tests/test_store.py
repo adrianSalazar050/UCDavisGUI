@@ -219,3 +219,64 @@ def test_memory_store_load_returns_a_copy():
     store.save([cfg()])
     store.load().clear()
     assert len(store.load()) == 1
+
+
+def test_detection_fields_default(tmp_path):
+    c = PrinterConfig(serial="S1", host="1.2.3.4", access_code="c")
+    assert c.camera_index == 0
+    assert c.conf == 0.25
+    assert c.armed_classes == ["spaghetti"]
+    assert c.detect_enabled is False
+
+
+def test_detection_fields_round_trip(tmp_path):
+    p = tmp_path / "printers.json"
+    store = PrinterStore(p)
+    store.save([PrinterConfig(serial="S1", host="1.2.3.4", access_code="c",
+                              camera_index=2, conf=0.4,
+                              armed_classes=["spaghetti", "cracks"],
+                              detect_enabled=True)])
+    got = store.load()[0]
+    assert got.camera_index == 2
+    assert got.conf == 0.4
+    assert got.armed_classes == ["spaghetti", "cracks"]
+    assert got.detect_enabled is True
+
+
+def test_detection_defaults_are_independent_lists():
+    # A dataclass mutable default MUST use default_factory, or every config
+    # shares one list and appending to one printer's classes mutates them all.
+    a = PrinterConfig(serial="A", host="h", access_code="c")
+    b = PrinterConfig(serial="B", host="h", access_code="c")
+    a.armed_classes.append("cracks")
+    assert b.armed_classes == ["spaghetti"]
+
+
+def test_detect_enabled_wrong_type_defaults_false(tmp_path):
+    p = tmp_path / "printers.json"
+    p.write_text(json.dumps([
+        {"serial": "S1", "host": "1.2.3.4", "access_code": "c",
+         "detect_enabled": "true"},
+    ]), encoding="utf-8")
+    got = PrinterStore(p).load()
+    assert got[0].detect_enabled is False
+
+
+def test_armed_classes_wrong_type_defaults_to_spaghetti(tmp_path):
+    p = tmp_path / "printers.json"
+    p.write_text(json.dumps([
+        {"serial": "S1", "host": "1.2.3.4", "access_code": "c",
+         "armed_classes": "spaghetti"},   # a string, not a list
+    ]), encoding="utf-8")
+    got = PrinterStore(p).load()
+    assert got[0].armed_classes == ["spaghetti"]
+
+
+def test_unknown_armed_class_is_dropped(tmp_path):
+    p = tmp_path / "printers.json"
+    p.write_text(json.dumps([
+        {"serial": "S1", "host": "1.2.3.4", "access_code": "c",
+         "armed_classes": ["spaghetti", "banana"]},
+    ]), encoding="utf-8")
+    got = PrinterStore(p).load()
+    assert got[0].armed_classes == ["spaghetti"]
