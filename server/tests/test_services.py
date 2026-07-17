@@ -35,8 +35,8 @@ def test_service_capture_flag_in_summary():
 
 
 def test_service_summary_never_leaks_access_code():
-    s = svc(access_code="31661007").summary()
-    assert "31661007" not in repr(s)
+    s = svc(access_code="test-access-code").summary()
+    assert "test-access-code" not in repr(s)
     assert "access_code" not in s
 
 

@@ -69,7 +69,7 @@ def test_summary_never_contains_access_code():
     s = build_summary({"gcode_state": "RUNNING"}, 1.0, True, "192.168.137.2",
                       serial="S1", name="n", capture=False)
     assert "access_code" not in s
-    assert "31661007" not in repr(s)
+    assert "test-access-code" not in repr(s)
 
 
 def test_summary_key_set_matches_design_spec_payload():

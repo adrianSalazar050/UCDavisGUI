@@ -117,8 +117,8 @@ def test_load_restores_and_starts_from_store():
 
 def test_summaries_never_contain_access_code():
     r = reg()
-    r.add(host="1.2.3.4", serial="S1", access_code="31661007")
-    assert "31661007" not in repr(r.summaries())
+    r.add(host="1.2.3.4", serial="S1", access_code="test-access-code")
+    assert "test-access-code" not in repr(r.summaries())
 
 
 def test_stop_all_stops_every_service():

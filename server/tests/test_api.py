@@ -95,10 +95,10 @@ def test_add_printer_201(tmp_path):
     reg = FakeRegistry([])
     r = client(tmp_path, reg).post("/api/printers", json={
         "host": "192.168.137.2", "serial": "S9",
-        "access_code": "31661007", "name": "bench", "capture": True})
+        "access_code": "test-access-code", "name": "bench", "capture": True})
     assert r.status_code == 201
     assert r.json()["serial"] == "S9"
-    assert reg.added == [("192.168.137.2", "S9", "31661007", "bench", True)]
+    assert reg.added == [("192.168.137.2", "S9", "test-access-code", "bench", True)]
 
 
 def test_add_printer_duplicate_409(tmp_path):

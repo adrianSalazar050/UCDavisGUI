@@ -23,7 +23,7 @@ A1 >= 01.05.00.00, P1 >= 01.08.02.00, H2D >= 01.01.00.01; P2 ships with it).
 |---|---|---|
 | IP | `192.168.137.2` | Settings -> WLAN |
 | Serial | `0300CA633005010` | Also the TLS certificate's common name |
-| LAN Access Code | `31661007` | Shown on the printer screen; **rotates on some firmware updates** |
+| LAN Access Code | `<read from printer screen>` | Shown on the printer screen; **rotates on some firmware updates** |
 | Port | `8883` (fixed) | MQTT over TLS |
 | Username | `bblp` (fixed) | Same for every printer |
 
@@ -101,7 +101,7 @@ Then open http://localhost:8000, go to **Overview → Add printer**, and type:
 |---|---|
 | IP address | `192.168.137.2` |
 | Serial | `0300CA633005010` |
-| LAN access code | `31661007` |
+| LAN access code | `<your 8-digit code>` |
 | Name (optional) | anything, e.g. `A1-bench` |
 | Camera checkbox | tick it if the webcam points at this printer |
 

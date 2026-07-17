@@ -50,7 +50,7 @@ export default function AddPrinterForm() {
       </div>
       <div className="add-form__row">
         <Field label="LAN access code" value={form.access_code}
-               onChange={set("access_code")} placeholder="31661007"
+               onChange={set("access_code")} placeholder="00000000"
                help="Usually 8 characters. Rotates on some firmware updates." />
         <Field label="Name (optional)" value={form.name} onChange={set("name")}
                placeholder="A1-bench" help="Defaults to the IP address" />

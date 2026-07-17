@@ -106,7 +106,7 @@ import json
 from server.store import MemoryStore, PrinterConfig, PrinterStore
 
 
-def cfg(serial="0300CA633005010", host="192.168.137.2", code="31661007",
+def cfg(serial="0300CA633005010", host="192.168.137.2", code="test-access-code",
         name="", capture=False):
     return PrinterConfig(serial=serial, host=host, access_code=code,
                          name=name, capture=capture)
@@ -136,7 +136,7 @@ def test_round_trip(tmp_path):
     got = store.load()
     assert len(got) == 1
     assert got[0].serial == "0300CA633005010"
-    assert got[0].access_code == "31661007"
+    assert got[0].access_code == "test-access-code"
     assert got[0].name == "A1-bench"
     assert got[0].capture is True
 
@@ -827,7 +827,7 @@ def test_summary_never_contains_access_code():
     s = build_summary({"gcode_state": "RUNNING"}, 1.0, True, "192.168.137.2",
                       serial="S1", name="n", capture=False)
     assert "access_code" not in s
-    assert "31661007" not in repr(s)
+    assert "test-access-code" not in repr(s)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -946,8 +946,8 @@ def test_service_capture_flag_in_summary():
 
 
 def test_service_summary_never_leaks_access_code():
-    s = svc(access_code="31661007").summary()
-    assert "31661007" not in repr(s)
+    s = svc(access_code="test-access-code").summary()
+    assert "test-access-code" not in repr(s)
     assert "access_code" not in s
 
 
@@ -1394,8 +1394,8 @@ def test_load_restores_and_starts_from_store():
 
 def test_summaries_never_contain_access_code():
     r = reg()
-    r.add(host="1.2.3.4", serial="S1", access_code="31661007")
-    assert "31661007" not in repr(r.summaries())
+    r.add(host="1.2.3.4", serial="S1", access_code="test-access-code")
+    assert "test-access-code" not in repr(r.summaries())
 
 
 def test_stop_all_stops_every_service():
@@ -1657,10 +1657,10 @@ def test_add_printer_201(tmp_path):
     reg = FakeRegistry([])
     r = client(tmp_path, reg).post("/api/printers", json={
         "host": "192.168.137.2", "serial": "S9",
-        "access_code": "31661007", "name": "bench", "capture": True})
+        "access_code": "test-access-code", "name": "bench", "capture": True})
     assert r.status_code == 201
     assert r.json()["serial"] == "S9"
-    assert reg.added == [("192.168.137.2", "S9", "31661007", "bench", True)]
+    assert reg.added == [("192.168.137.2", "S9", "test-access-code", "bench", True)]
 
 
 def test_add_printer_duplicate_409(tmp_path):
@@ -2793,7 +2793,7 @@ export default function AddPrinterForm() {
       </div>
       <div className="add-form__row">
         <Field label="LAN access code" value={form.access_code}
-               onChange={set("access_code")} placeholder="31661007"
+               onChange={set("access_code")} placeholder="00000000"
                help="Usually 8 characters. Rotates on some firmware updates." />
         <Field label="Name (optional)" value={form.name} onChange={set("name")}
                placeholder="A1-bench" help="Defaults to the IP address" />
@@ -3172,7 +3172,7 @@ Then open http://localhost:8000, go to **Overview → Add printer**, and type:
 |---|---|
 | IP address | `192.168.137.2` |
 | Serial | `0300CA633005010` |
-| LAN access code | `31661007` |
+| LAN access code | `<your 8-digit code>` |
 | Name (optional) | anything, e.g. `A1-bench` |
 | Camera checkbox | tick it if the webcam points at this printer |
 
@@ -3293,7 +3293,7 @@ git commit -m "docs: GUI-configured printers, SD browser, retired CLI flags"
 **Deferred to hardware — do NOT treat as blocking.** The printer was offline
 during planning (all ports time out). When it is back:
 
-1. Add the real printer (`192.168.137.2` / `0300CA633005010` / `31661007`) via
+1. Add the real printer (`192.168.137.2` / `0300CA633005010` / `<real LAN code>`) via
    the GUI and confirm the card goes green.
 2. Open SD Files and confirm real filenames appear. **This is the highest-risk
    step in the whole plan.** Both known failure modes are already pre-empted in

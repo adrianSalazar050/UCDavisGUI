@@ -151,7 +151,7 @@ held it — it is a single-occupancy flag, since there is one webcam.
 
 ```json
 [{"serial": "0300CA633005010", "host": "192.168.137.2",
-  "access_code": "31661007", "name": "A1-bench", "capture": true}]
+  "access_code": "test-access-code", "name": "A1-bench", "capture": true}]
 ```
 
 Written atomically (temp file + replace) so a crash mid-write cannot leave a

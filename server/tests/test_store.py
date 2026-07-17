@@ -10,7 +10,7 @@ import pytest
 from server.store import MemoryStore, PrinterConfig, PrinterStore
 
 
-def cfg(serial="0300CA633005010", host="192.168.137.2", code="31661007",
+def cfg(serial="0300CA633005010", host="192.168.137.2", code="test-access-code",
         name="", capture=False):
     return PrinterConfig(serial=serial, host=host, access_code=code,
                          name=name, capture=capture)
@@ -40,7 +40,7 @@ def test_round_trip(tmp_path):
     got = store.load()
     assert len(got) == 1
     assert got[0].serial == "0300CA633005010"
-    assert got[0].access_code == "31661007"
+    assert got[0].access_code == "test-access-code"
     assert got[0].name == "A1-bench"
     assert got[0].capture is True
 
