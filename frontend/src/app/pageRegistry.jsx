@@ -1,4 +1,5 @@
 import Dashboard from "../pages/Dashboard.jsx";
+import Detection from "../pages/Detection.jsx";
 import Overview from "../pages/Overview.jsx";
 import SdFiles from "../pages/SdFiles.jsx";
 
@@ -10,6 +11,7 @@ import SdFiles from "../pages/SdFiles.jsx";
 export const pages = {
   overview: { title: "Overview", group: "Monitor", component: Overview },
   dashboard: { title: "Dashboard", group: "Monitor", component: Dashboard },
+  detection: { title: "Detection", group: "Monitor", component: Detection },
   sdfiles: { title: "SD Files", group: "Monitor", component: SdFiles },
 };
 

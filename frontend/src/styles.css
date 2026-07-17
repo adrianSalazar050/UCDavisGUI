@@ -464,3 +464,15 @@ a { color: var(--primary); }
 .autostop__stopped { color: var(--danger-text); font-weight: 600; font-size: 0.85rem; }
 .autostop__count { color: var(--warn-text); font-weight: 600; font-size: 0.85rem; }
 .autostop__now { color: var(--text-muted); font-size: 0.85rem; }
+
+/* detection page */
+.detect-settings { display: flex; flex-direction: column; gap: 0.9rem; }
+.detect-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.detect-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted); }
+.detect-classes { display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem 1rem; }
+.detect-class { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; }
+.detect-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r-control); overflow: hidden; }
+.detect-seg__btn { border: none; background: transparent; padding: 0.3rem 0.7rem; font-size: 0.8rem; cursor: pointer; }
+.detect-seg__btn.is-on { background: var(--primary); color: var(--on-primary); }
+.detect-health { display: flex; align-items: center; gap: 0.6rem; }
