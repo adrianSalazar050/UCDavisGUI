@@ -457,3 +457,10 @@ a { color: var(--primary); }
    Button.jsx does not merge a caller's className, so this is reached by
    descendant selector rather than a modifier class. */
 .printer-card__foot .ui-btn { position: relative; z-index: 1; }
+
+/* auto-stop card */
+.autostop { display: flex; flex-direction: column; gap: 0.6rem; }
+.autostop__row { display: flex; align-items: center; justify-content: space-between; }
+.autostop__stopped { color: var(--danger-text); font-weight: 600; font-size: 0.85rem; }
+.autostop__count { color: var(--warn-text); font-weight: 600; font-size: 0.85rem; }
+.autostop__now { color: var(--text-muted); font-size: 0.85rem; }
