@@ -78,6 +78,18 @@ def write_frame(out_dir, frame: np.ndarray) -> None:
     _atomic_write_bytes(pathlib.Path(out_dir) / "latest.jpg", buf.tobytes())
 
 
+def _safe_write(write_fn, out_dir, payload) -> None:
+    """Call a write_* function, tolerating a transient FS error -- notably the
+    Windows/OneDrive os.replace sharing-violation when the repo is in a synced
+    folder. A dropped frame/status is fine (the next tick rewrites); a
+    *persistent* failure surfaces as a stale status (the server marks the
+    detector down) instead of crash-looping the process."""
+    try:
+        write_fn(out_dir, payload)
+    except OSError as e:
+        log.warning("detector write to %s failed (skipped): %s", out_dir, e)
+
+
 def build_status(detections, *, ts, fps, camera, conf, error=None) -> dict:
     return {"ts": ts, "fps": fps, "camera": camera, "conf": conf,
             "detections": detections, "error": error}
@@ -224,16 +236,16 @@ def detection_loop(grab, infer, out_dir, *, camera, conf, fps, stop_event,
         t0 = clock()
         frame = grab()
         if frame is None:
-            write_status(out_dir, build_status([], ts=clock(), fps=0.0,
+            _safe_write(write_status, out_dir, build_status([], ts=clock(), fps=0.0,
                                                camera=camera, conf=conf,
                                                error=f"camera {camera} read failed"))
             return
         detections, annotated = infer(frame)
         dt = max(clock() - t0, 1e-6)
-        write_frame(out_dir, annotated)
-        write_status(out_dir, build_status(detections, ts=clock(),
-                                           fps=round(1.0 / dt, 1), camera=camera,
-                                           conf=conf))
+        _safe_write(write_frame, out_dir, annotated)
+        _safe_write(write_status, out_dir, build_status(detections, ts=clock(),
+                                                        fps=round(1.0 / dt, 1),
+                                                        camera=camera, conf=conf))
         if period:
             slack = period - (clock() - t0)
             if slack > 0:

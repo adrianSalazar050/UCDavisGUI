@@ -131,6 +131,34 @@ def test_detection_loop_records_camera_read_failure(tmp_path):
     assert status["detections"] == []
 
 
+def test_detection_loop_survives_a_transient_write_error(monkeypatch, tmp_path):
+    # A frame/status write raising OSError (Windows/OneDrive os.replace race)
+    # must NOT crash the detector -- the frame is skipped and the loop continues.
+    frames = [np.zeros((16, 16, 3), np.uint8) for _ in range(3)]
+    it = iter(frames)
+    stop = detect.threading.Event()
+    calls = {"n": 0}
+
+    def grab():
+        return next(it, None)
+
+    def infer(frame):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            stop.set()
+        return ([], frame)
+
+    def boom(*a, **k):
+        raise OSError("[WinError 5] Access is denied")
+
+    monkeypatch.setattr(detect, "write_frame", boom)   # every frame write fails
+
+    # Must return normally (no exception propagates out of the loop).
+    detect.detection_loop(grab, infer, tmp_path, camera=0, conf=0.25, fps=0,
+                          stop_event=stop)
+    assert calls["n"] >= 2   # the loop kept running despite the write errors
+
+
 import struct
 
 import cv2
