@@ -148,3 +148,68 @@ def test_seconds_to_stop_counts_down():
     c.update(SPAG, "RUNNING")
     clk.t = 4.0
     assert c.snapshot()["seconds_to_stop"] == 6.0
+
+
+from server.detection import DetectorSupervisor
+
+
+class FakeProc:
+    def __init__(self, argv): self.argv = argv; self._alive = True; self.terminated = False
+    def poll(self): return None if self._alive else 1
+    def terminate(self): self.terminated = True; self._alive = False
+    def die(self): self._alive = False
+
+
+def supervisor(tmp_path, clock):
+    spawned = []
+    def spawn(argv):
+        p = FakeProc(argv); spawned.append(p); return p
+    sup = DetectorSupervisor(tmp_path, "weights.pt", spawn=spawn,
+                             clock=clock, backoff_s=5.0)
+    return sup, spawned
+
+
+T1 = {"serial": "S1", "camera_index": 0, "conf": 0.25}
+T2 = {"serial": "S1", "camera_index": 2, "conf": 0.4}
+
+
+def test_spawns_for_a_new_target(tmp_path):
+    sup, spawned = supervisor(tmp_path, lambda: 0.0)
+    sup.reconcile(T1)
+    assert len(spawned) == 1
+    assert "--camera" in spawned[0].argv and "0" in spawned[0].argv
+
+
+def test_argv_never_contains_access_code(tmp_path):
+    sup, spawned = supervisor(tmp_path, lambda: 0.0)
+    sup.reconcile(T1)
+    assert not any("code" in str(a) for a in spawned[0].argv)
+
+
+def test_changed_target_restarts(tmp_path):
+    sup, spawned = supervisor(tmp_path, lambda: 0.0)
+    sup.reconcile(T1)
+    sup.reconcile(T2)
+    assert spawned[0].terminated is True
+    assert len(spawned) == 2
+    assert "2" in spawned[1].argv
+
+
+def test_none_target_stops(tmp_path):
+    sup, spawned = supervisor(tmp_path, lambda: 0.0)
+    sup.reconcile(T1)
+    sup.reconcile(None)
+    assert spawned[0].terminated is True
+
+
+def test_crash_respawns_after_backoff(tmp_path):
+    clk = Clock()
+    sup, spawned = supervisor(tmp_path, clk)
+    sup.reconcile(T1)
+    spawned[0].die()
+    clk.t = 2.0
+    sup.reconcile(T1)                 # within backoff -> no respawn
+    assert len(spawned) == 1
+    clk.t = 6.0
+    sup.reconcile(T1)                 # backoff elapsed -> respawn
+    assert len(spawned) == 2

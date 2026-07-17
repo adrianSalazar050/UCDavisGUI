@@ -141,3 +141,62 @@ class AutoStopController:
         return {"armed": self._armed, "state": self._state,
                 "seconds_to_stop": secs,
                 "stopped_by_monitor": self._stopped_by_monitor}
+
+
+class DetectorSupervisor:
+    """Keeps exactly one detect.py subprocess matching the desired target.
+    Injectable spawn/clock make it testable with no real process."""
+
+    def __init__(self, out_dir, weights, *, python=sys.executable,
+                 script="detect.py", spawn=subprocess.Popen, clock=time.time,
+                 backoff_s: float = 5.0, fps: float = 4.0):
+        self._out_dir = pathlib.Path(out_dir)
+        self._weights = weights
+        self._python = python
+        self._script = script
+        self._spawn_fn = spawn
+        self._clock = clock
+        self._backoff_s = backoff_s
+        self._fps = fps
+        self._target = None
+        self._proc = None
+        self._last_spawn = 0.0
+
+    def build_argv(self, target) -> list:
+        # NB: no access code -- detect.py never talks MQTT.
+        return [self._python, self._script,
+                "--camera", str(target["camera_index"]),
+                "--conf", str(target["conf"]),
+                "--weights", str(self._weights),
+                "--out", str(self._out_dir),
+                "--fps", str(self._fps)]
+
+    def _spawn(self, target) -> None:
+        self._proc = self._spawn_fn(self.build_argv(target))
+        self._last_spawn = self._clock()
+
+    def _stop_proc(self) -> None:
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception as e:  # noqa: BLE001
+                log.warning("detector terminate failed: %s", e)
+            self._proc = None
+
+    def reconcile(self, target) -> None:
+        if target != self._target:
+            self._stop_proc()
+            self._target = target
+            if target is not None:
+                self._spawn(target)
+            return
+        if target is None:
+            return
+        if self._proc is not None and self._proc.poll() is not None:
+            if self._clock() - self._last_spawn >= self._backoff_s:
+                log.warning("detector exited; respawning")
+                self._spawn(target)
+
+    def stop(self) -> None:
+        self._stop_proc()
+        self._target = None
