@@ -17,6 +17,7 @@ from . import runs, sdcard
 from .detection import CLASSES  # the 6 valid armed classes
 from .registry import DuplicateSerial
 from .sdcard import SdError
+from .store import CAMERA_SOURCES
 
 log = logging.getLogger("server.main")
 
@@ -42,6 +43,7 @@ class AddPrinter(BaseModel):
 
 
 class DetectionUpdate(BaseModel):
+    camera_source: str | None = None
     camera_index: int | None = None
     conf: float | None = None
     armed_classes: list[str] | None = None
@@ -165,6 +167,8 @@ def create_app(registry, runs_dir: pathlib.Path,
             bad = [c for c in body.armed_classes if c not in CLASSES]
             if bad:
                 raise HTTPException(400, f"unknown class(es): {', '.join(bad)}")
+        if body.camera_source is not None and body.camera_source not in CAMERA_SOURCES:
+            raise HTTPException(400, f"camera_source must be one of {CAMERA_SOURCES}")
         fields = {k: v for k, v in body.model_dump().items() if v is not None}
         if not registry.update_detection(serial, **fields):
             raise HTTPException(404, "unknown printer")

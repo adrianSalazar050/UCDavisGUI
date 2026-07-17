@@ -300,6 +300,7 @@ class DetectionCoordinator:
             status = self._last_status
             snap = self._controller_for(serial).snapshot()
         return {"running": status["running"], "fps": status["fps"],
+                "camera_source": cfg["camera_source"],
                 "camera_index": cfg["camera_index"], "conf": cfg["conf"],
                 "detect_enabled": cfg["detect_enabled"],
                 "armed": snap["armed"], "armed_classes": cfg["armed_classes"],

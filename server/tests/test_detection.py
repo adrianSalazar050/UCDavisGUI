@@ -298,7 +298,7 @@ class FakeReg:
     def detection_target(self): return self._target
     def capture_serial(self): return self._target["serial"] if self._target else None
     def detection_config(self, serial):
-        return {"camera_index": 0, "conf": 0.5,
+        return {"camera_source": "a1", "camera_index": 0, "conf": 0.5,
                 "armed_classes": ["spaghetti"], "detect_enabled": True}
     def get(self, serial):
         reg = self
@@ -356,6 +356,12 @@ def test_snapshot_none_for_non_capture(tmp_path):
     assert co.snapshot("OTHER") is None
     snap = co.snapshot("S1")
     assert snap["armed_classes"] == ["spaghetti"]
+
+
+def test_snapshot_includes_camera_source(tmp_path):
+    reg = FakeReg({"serial": "S1", "camera_index": 0, "conf": 0.5})
+    co = DetectionCoordinator(reg, tmp_path, FakeRunner())
+    assert co.snapshot("S1")["camera_source"] == "a1"
 
 
 def test_capture_switch_resets_auto_stop_state(tmp_path):

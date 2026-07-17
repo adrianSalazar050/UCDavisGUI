@@ -260,7 +260,8 @@ class FakeDetection:
     def snapshot(self, serial):
         if serial != self.capture:
             return None
-        return {"running": True, "fps": 4.0, "camera_index": 0, "conf": 0.25,
+        return {"running": True, "fps": 4.0, "camera_source": "a1",
+                "camera_index": 0, "conf": 0.25,
                 "detect_enabled": True, "armed": self.armed.get(serial, False),
                 "armed_classes": ["spaghetti"], "detections": [],
                 "stopped_by_monitor": False, "seconds_to_stop": None,
@@ -314,6 +315,20 @@ def test_put_detection_updates_and_returns_snapshot(tmp_path):
 def test_put_detection_rejects_unknown_class_400(tmp_path):
     c, _ = det_client(tmp_path, FakeDetection())
     r = c.put("/api/printers/S1/detection", json={"armed_classes": ["banana"]})
+    assert r.status_code == 400
+
+
+def test_put_detection_accepts_camera_source(tmp_path):
+    det = FakeDetection()
+    c, reg = det_client(tmp_path, det)
+    r = c.put("/api/printers/S1/detection", json={"camera_source": "webcam"})
+    assert r.status_code == 200
+    assert reg.updated[-1]["camera_source"] == "webcam"
+
+
+def test_put_detection_rejects_bad_camera_source(tmp_path):
+    c, _ = det_client(tmp_path, FakeDetection())
+    r = c.put("/api/printers/S1/detection", json={"camera_source": "usb"})
     assert r.status_code == 400
 
 
