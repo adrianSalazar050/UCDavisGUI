@@ -57,3 +57,33 @@ export async function fetchLatestFrame() {
     return null; // network error or body stream failure — same as "no frame"
   }
 }
+
+// Update detection config for a printer. Body may include any of:
+// { camera_source, camera_index, conf, armed_classes, detect_enabled }.
+export async function updateDetection(serial, body) {
+  const res = await fetch(`/api/printers/${encodeURIComponent(serial)}/detection`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// Arm or disarm the auto-stop (runtime-only). Returns the detection snapshot.
+export async function armDetection(serial, armed) {
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/detection/arm`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ armed }),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// URL for the detector's latest annotated frame. Cache-busted by the caller.
+export function detectionFrameUrl(serial) {
+  return `/api/printers/${encodeURIComponent(serial)}/detection/frame`;
+}
