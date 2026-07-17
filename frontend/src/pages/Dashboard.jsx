@@ -1,6 +1,7 @@
 import CameraCard from "../components/dashboard/CameraCard.jsx";
 import HmsCard from "../components/dashboard/HmsCard.jsx";
 import PrintInfoCard from "../components/dashboard/PrintInfoCard.jsx";
+import Card from "../components/ui/Card.jsx";
 import Columns from "../components/ui/Columns.jsx";
 import PageFrame from "../components/ui/PageFrame.jsx";
 import Stack from "../components/ui/Stack.jsx";
@@ -9,7 +10,18 @@ import StatTile from "../components/ui/StatTile.jsx";
 const deg = (v) => (v == null ? "—" : `${Number(v).toFixed(0)}°`);
 
 export default function Dashboard({ printers, selected }) {
-  const s = printers.find((p) => p.serial === selected) ?? {};
+  const s = printers.find((p) => p.serial === selected) ?? null;
+
+  if (!s) {
+    return (
+      <PageFrame>
+        <div className="empty">
+          No printer selected — pick one on the Overview page.
+        </div>
+      </PageFrame>
+    );
+  }
+
   return (
     <PageFrame>
       <div className="tile-row">
@@ -28,7 +40,18 @@ export default function Dashboard({ printers, selected }) {
                   sub={`target ${deg(s.bed_target_temper)}`} />
       </div>
       <Columns template="3fr 2fr">
-        <CameraCard />
+        {/* There is one webcam. Showing its frames on a printer it isn't
+            pointed at would be a lie, so only the capture printer gets it. */}
+        {s.capture ? (
+          <CameraCard />
+        ) : (
+          <Card title="Camera">
+            <div className="camera-placeholder">
+              No camera on this printer — mark it as the capture printer on the
+              Overview page if the webcam points at it.
+            </div>
+          </Card>
+        )}
         <Stack gap={5}>
           <PrintInfoCard summary={s} />
           <HmsCard summary={s} />
