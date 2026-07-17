@@ -1,19 +1,19 @@
 // Fetch wrappers for the dashboard backend. WebSocket lives in usePrinters.
 
-// FastAPI puts HTTPException messages in {"detail": "..."}.
+// FastAPI puts HTTPException messages in {"detail": "..."}. For a 422 the
+// detail is a list of validation objects, not a string — flatten it so a
+// future caller never surfaces "[object Object]".
 async function detail(res) {
   try {
-    const body = await res.json();
-    return body.detail ?? `HTTP ${res.status}`;
+    const { detail } = await res.json();
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      return detail.map((d) => d.msg ?? JSON.stringify(d)).join("; ");
+    }
+    return `HTTP ${res.status}`;
   } catch {
     return `HTTP ${res.status}`;
   }
-}
-
-export async function fetchPrinters() {
-  const res = await fetch("/api/printers");
-  if (!res.ok) throw new Error(await detail(res));
-  return (await res.json()).printers ?? [];
 }
 
 export async function addPrinter({ host, serial, access_code, name, capture }) {

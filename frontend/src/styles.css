@@ -304,7 +304,8 @@ a { color: var(--primary); }
   cursor: pointer;
 }
 .printer-card:hover { border-color: var(--line-strong); }
-.printer-card:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+/* No .printer-card:focus-visible — the card is a <div>, never focusable.
+   Focus lives on .printer-card__select:focus-visible::after below. */
 .printer-card--selected {
   border-color: var(--primary);
   box-shadow: 0 0 0 2px var(--focus);
