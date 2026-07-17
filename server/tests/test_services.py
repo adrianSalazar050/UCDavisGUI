@@ -171,3 +171,18 @@ def test_mock_list_files_does_not_let_caller_mutate_shared_tree(tmp_path):
     entries[0]["name"] = "TAMPERED"
     fresh = MockPrinter(tmp_path).list_files("/")
     assert "TAMPERED" not in [e["name"] for e in fresh]
+
+
+def test_service_stop_print_delegates_to_link(monkeypatch):
+    s = svc()
+    called = []
+    monkeypatch.setattr(s.link, "stop_print", lambda: called.append(True))
+    s.stop_print()
+    assert called == [True]
+
+
+def test_mock_stop_print_marks_failed(tmp_path):
+    mp = MockPrinter(tmp_path)
+    mp._touch({"gcode_state": "RUNNING", "layer_num": 3})
+    mp.stop_print()
+    assert mp.summary()["gcode_state"] == "FAILED"

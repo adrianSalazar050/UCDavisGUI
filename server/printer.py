@@ -190,6 +190,11 @@ class PrinterService:
             serial=self.serial, name=self.name, capture=self.capture,
             last_error=None if connected else self._last_error)
 
+    def stop_print(self) -> None:
+        """Fire-and-verify: publishing can't fail loudly (no ack), so callers
+        confirm via gcode_state. See BambuLink.stop_print."""
+        self.link.stop_print()
+
 
 class MockPrinter:
     """Endless fake print for developing the GUI with no hardware.
@@ -248,6 +253,9 @@ class MockPrinter:
             self.state, age, connected, self.host,
             serial=self.serial, name=self.name, capture=self.capture,
             last_error=None if connected else ERR_UNREACHABLE)
+
+    def stop_print(self) -> None:
+        self._touch({"gcode_state": "FAILED"})
 
     def list_files(self, path: str = "/") -> list[dict]:
         target = sdcard.normalize_path(path)  # raises SdError on traversal
