@@ -50,3 +50,94 @@ class StatusReader:
                 "detections": data.get("detections") or [],
                 "error": data.get("error"),
                 "age_s": None if age is None else round(age, 2)}
+
+
+class AutoStopController:
+    """arm -> a qualifying failure held for sustain_s -> 'fire'. Pure: it
+    returns "fire" and the caller actuates. Firing auto-disarms; a sub-threshold
+    gap resets the timer. In 'stopping' it re-sends once if gcode_state hasn't
+    gone terminal within verify_s, then latches 'stopped'."""
+
+    TERMINAL = ("FAILED", "IDLE", "FINISH")
+
+    def __init__(self, *, sustain_s: float = 10.0, verify_s: float = 5.0,
+                 clock=time.time):
+        self._sustain_s = sustain_s
+        self._verify_s = verify_s
+        self._clock = clock
+        self._classes: set = {"spaghetti"}
+        self._threshold = 0.25
+        self._armed = False
+        self._state = "disarmed"
+        self._fault_since = None
+        self._stop_at = None
+        self._stop_count = 0
+        self._stopped_by_monitor = False
+
+    def configure(self, armed_classes, threshold) -> None:
+        self._classes = set(armed_classes)
+        self._threshold = float(threshold)
+
+    def arm(self, value: bool) -> None:
+        if value:
+            self._armed = True
+            self._stopped_by_monitor = False
+            self._state = "armed_idle"
+            self._fault_since = None
+        else:
+            self._armed = False
+            self._state = "disarmed"
+            self._fault_since = None
+
+    def _qualifying(self, detections) -> bool:
+        return any(d.get("cls") in self._classes
+                   and float(d.get("conf", 0.0)) >= self._threshold
+                   for d in detections)
+
+    def update(self, detections, gcode_state) -> str | None:
+        now = self._clock()
+        if self._state in ("disarmed", "stopped"):
+            return None
+        fault = self._qualifying(detections)
+
+        if self._state == "armed_idle":
+            if fault:
+                self._state = "armed_faulting"
+                self._fault_since = now
+            return None
+
+        if self._state == "armed_faulting":
+            if not fault:
+                self._state = "armed_idle"
+                self._fault_since = None
+                return None
+            if now - self._fault_since >= self._sustain_s:
+                self._armed = False
+                self._stopped_by_monitor = True
+                self._state = "stopping"
+                self._stop_at = now
+                self._stop_count = 1
+                return "fire"
+            return None
+
+        if self._state == "stopping":
+            if gcode_state in self.TERMINAL:
+                self._state = "stopped"
+                return None
+            if now - self._stop_at >= self._verify_s:
+                if self._stop_count < 2:
+                    self._stop_count += 1
+                    self._stop_at = now
+                    return "fire"
+                self._state = "stopped"   # gave up re-sending; stop trying
+            return None
+        return None
+
+    def snapshot(self) -> dict:
+        secs = None
+        if self._state == "armed_faulting" and self._fault_since is not None:
+            secs = round(max(0.0, self._sustain_s
+                             - (self._clock() - self._fault_since)), 1)
+        return {"armed": self._armed, "state": self._state,
+                "seconds_to_stop": secs,
+                "stopped_by_monitor": self._stopped_by_monitor}
