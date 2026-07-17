@@ -1,4 +1,5 @@
 import json
+import pathlib
 import time
 
 from server.detection import StatusReader
@@ -242,6 +243,16 @@ def test_crash_respawns_after_backoff(tmp_path):
     assert len(spawned) == 2
 
 
+def test_build_argv_script_defaults_to_absolute_path(tmp_path):
+    # A cwd-relative default ("detect.py") silently never runs the detector
+    # if the server is launched from a different working directory. The
+    # default must resolve to an absolute path, same as the weights path.
+    sup, _ = supervisor(tmp_path, lambda: 0.0)
+    script = sup.build_argv(T1)[1]
+    assert pathlib.Path(script).is_absolute()
+    assert script.endswith("detect.py")
+
+
 from server.detection import DetectionCoordinator
 
 
@@ -342,6 +353,30 @@ def test_capture_switch_resets_auto_stop_state(tmp_path):
     reg._target = {"serial": "S1", "camera_index": 0, "conf": 0.5}
     clk.t = 501.0; status(clk.t); co.tick()           # camera back on S1
     assert reg.stopped == 0                            # fresh & disarmed: no fire
+
+
+def test_snapshot_uses_cached_status_not_a_live_read(tmp_path):
+    # The WS path calls snapshot() every tick and must never touch the
+    # filesystem -- tick() already reads status.json every 0.5s, so snapshot()
+    # must serve that cached copy. Prove it: tick() once against a running
+    # status with a spaghetti detection, delete status.json, then confirm
+    # snapshot() still reports running/detections from the cache (a live
+    # re-read of the now-missing file would report running False, []).
+    reg = FakeReg({"serial": "S1", "camera_index": 0, "conf": 0.5})
+    clk = Clock()
+    co = DetectionCoordinator(reg, tmp_path, FakeRunner(),
+                              controller_factory=lambda: AutoStopController(clock=clk))
+    (tmp_path / "_detect").mkdir()
+    status_path = tmp_path / "_detect" / "status.json"
+    status_path.write_text(json.dumps(
+        {"ts": clk.t, "fps": 4.0, "camera": 0, "conf": 0.5,
+         "detections": [{"cls": "spaghetti", "conf": 0.9}], "error": None}))
+    co.reader = StatusReader(tmp_path / "_detect", clock=lambda: clk.t)
+    co.tick()               # caches a running status with the detection
+    status_path.unlink()    # a live re-read from here on would see "down"
+    snap = co.snapshot("S1")
+    assert snap["running"] is True
+    assert snap["detections"] == [{"cls": "spaghetti", "conf": 0.9}]
 
 
 from server.detection import MockDetectorRunner

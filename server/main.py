@@ -184,6 +184,8 @@ def create_app(registry, runs_dir: pathlib.Path,
     def detection_frame(serial: str):
         if detection is None:
             raise HTTPException(404, "detection not enabled on this server")
+        if detection.snapshot(serial) is None:
+            raise HTTPException(404, "not the capture printer")
         path = detection.frame_path()
         if path is None:
             return JSONResponse({"error": "no detector frame"}, status_code=404)

@@ -341,6 +341,19 @@ def test_detection_frame_served(tmp_path):
     assert r.headers["content-type"] == "image/jpeg"
 
 
+def test_detection_frame_404_for_non_capture_serial(tmp_path):
+    # The route must be capture-gated like the other detection routes: a
+    # frame file existing is not enough -- the requested serial must be the
+    # capture printer, even though frame_path() itself is serial-agnostic.
+    det = FakeDetection(capture="S1")
+    frame = tmp_path / "latest.jpg"
+    frame.write_bytes(b"\xff\xd8\xff\xe0jpeg")
+    det._frame = frame
+    c, _ = det_client(tmp_path, det)
+    assert c.get("/api/printers/S1/detection/frame").status_code == 200
+    assert c.get("/api/printers/NOTCAP/detection/frame").status_code == 404
+
+
 def test_ws_merges_detection_into_capture_summary(tmp_path):
     c, _ = det_client(tmp_path, FakeDetection())
     with c.websocket_connect("/ws") as ws:

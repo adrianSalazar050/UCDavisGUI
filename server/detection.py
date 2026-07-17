@@ -155,12 +155,13 @@ class DetectorSupervisor:
     Injectable spawn/clock make it testable with no real process."""
 
     def __init__(self, out_dir, weights, *, python=sys.executable,
-                 script="detect.py", spawn=subprocess.Popen, clock=time.time,
+                 script=None, spawn=subprocess.Popen, clock=time.time,
                  backoff_s: float = 5.0, fps: float = 4.0):
         self._out_dir = pathlib.Path(out_dir)
         self._weights = weights
         self._python = python
-        self._script = script
+        self._script = script or str(
+            pathlib.Path(__file__).resolve().parent.parent / "detect.py")
         self._spawn_fn = spawn
         self._clock = clock
         self._backoff_s = backoff_s
@@ -224,6 +225,7 @@ class DetectionCoordinator:
         self.out_dir = pathlib.Path(runs_dir) / DETECT_SUBDIR
         self.runner = runner
         self.reader = StatusReader(self.out_dir)
+        self._last_status = self.reader._down()
         self._factory = controller_factory
         self._controllers = {}
         self._tick_s = tick_s
@@ -264,6 +266,7 @@ class DetectionCoordinator:
         svc = self.registry.get(cap)
         gstate = svc.summary().get("gcode_state") if svc else None
         with self._lock:
+            self._last_status = status
             ctrl = self._controller_for(cap)
             ctrl.configure(cfg["armed_classes"], cfg["conf"])
             action = ctrl.update(detections, gstate)
@@ -280,8 +283,8 @@ class DetectionCoordinator:
         cfg = self.registry.detection_config(serial)
         if cfg is None:
             return None
-        status = self.reader.read()
         with self._lock:
+            status = self._last_status
             snap = self._controller_for(serial).snapshot()
         return {"running": status["running"], "fps": status["fps"],
                 "camera_index": cfg["camera_index"], "conf": cfg["conf"],
