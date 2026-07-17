@@ -246,6 +246,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--camera", type=int, default=0)
+    p.add_argument("--source", choices=("a1", "webcam"), default="a1",
+                   help="frame source: the printer's built-in camera or a USB webcam")
+    p.add_argument("--host", default=None,
+                   help="printer IP, required for --source a1")
     p.add_argument("--conf", type=float, default=0.25)
     p.add_argument("--imgsz", type=int, default=640)
     p.add_argument("--weights",
@@ -271,12 +275,25 @@ def main() -> int:
         if not pathlib.Path(a.weights).exists():
             print(f"weights not found: {a.weights}", file=sys.stderr)
             return 1
-        cap = open_camera(a.camera)
+        cam = None
+        if a.source == "a1":
+            if not a.host:
+                print("--source a1 requires --host", file=sys.stderr)
+                return 1
+            code = os.environ.get("BAMBU_ACCESS_CODE")
+            if not code:
+                print("--source a1 requires BAMBU_ACCESS_CODE in the environment",
+                      file=sys.stderr)
+                return 1
+            cam = BambuCameraSource(a.host, code)
+            grab = cam.grab
+        else:
+            cap = open_camera(a.camera)
 
-        def grab():
-            cap.read()                 # flush one stale buffered frame
-            ok, frame = cap.read()
-            return frame if ok else None
+            def grab():
+                cap.read()                 # flush one stale buffered frame
+                ok, frame = cap.read()
+                return frame if ok else None
 
         infer = make_yolo_infer(a.weights, a.conf, a.imgsz, a.device)
         try:
@@ -285,7 +302,10 @@ def main() -> int:
         except KeyboardInterrupt:
             pass
         finally:
-            cap.release()  # always release the device, even on error/Ctrl-C
+            if cam is not None:
+                cam.close()
+            else:
+                cap.release()
     return 0
 
 
