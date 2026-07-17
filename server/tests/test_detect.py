@@ -129,3 +129,76 @@ def test_detection_loop_records_camera_read_failure(tmp_path):
     status = json.loads((tmp_path / "status.json").read_text())
     assert status["error"] is not None
     assert status["detections"] == []
+
+
+import struct
+
+import cv2
+
+
+class FakeSock:
+    """A socket-like that hands out a fixed byte buffer and records sends."""
+    def __init__(self, data=b""):
+        self.buf = data
+        self.sent = b""
+        self.closed = False
+
+    def settimeout(self, t):
+        pass
+
+    def sendall(self, b):
+        self.sent += b
+
+    def recv(self, n):
+        if not self.buf:
+            return b""   # peer closed
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def close(self):
+        self.closed = True
+
+
+def _jpeg_bytes():
+    ok, buf = cv2.imencode(".jpg", np.zeros((8, 8, 3), np.uint8))
+    return buf.tobytes()
+
+
+def _framed(jpeg):
+    return struct.pack("<I", len(jpeg)) + b"\x00" * 12 + jpeg
+
+
+def test_bambu_source_auths_and_reads_a_frame():
+    jpeg = _jpeg_bytes()
+    sock = FakeSock(_framed(jpeg))
+    src = detect.BambuCameraSource("h", "MYCODE", connect=lambda host, t: sock)
+    frame = src.grab()
+    assert frame is not None and frame.shape == (8, 8, 3)
+    # 80-byte auth: header + bblp + access code
+    assert len(sock.sent) == 80
+    assert sock.sent[:16] == struct.pack("<IIII", 0x40, 0x3000, 0, 0)
+    assert sock.sent[16:20] == b"bblp"
+    assert b"MYCODE" in sock.sent
+
+
+def test_bambu_source_reconnects_once_on_drop():
+    jpeg = _jpeg_bytes()
+    socks = [FakeSock(b""), FakeSock(_framed(jpeg))]   # first is dead
+    calls = []
+
+    def connect(host, t):
+        s = socks[len(calls)]
+        calls.append(s)
+        return s
+
+    src = detect.BambuCameraSource("h", "C", connect=connect)
+    assert src.grab() is not None
+    assert len(calls) == 2   # reconnected exactly once
+
+
+def test_bambu_source_returns_none_on_persistent_failure():
+    def connect(host, t):
+        raise OSError("connection refused")
+
+    src = detect.BambuCameraSource("h", "C", connect=connect)
+    assert src.grab() is None   # -> the loop writes an error status

@@ -18,9 +18,17 @@ import sys
 import tempfile
 import threading
 import time
+import logging
+import socket
+import ssl
+import struct
 
 import cv2
 import numpy as np
+
+log = logging.getLogger("detect")
+
+CAMERA_PORT = 6000
 
 REPLACE_RETRIES = 5
 REPLACE_RETRY_S = 0.05
@@ -98,6 +106,84 @@ def open_camera(index: int, width: int = 1280, height: int = 720):
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # always a current frame, not a stale one
     return cap
+
+
+def _bambu_auth_packet(access_code: str) -> bytes:
+    return (struct.pack("<IIII", 0x40, 0x3000, 0, 0)
+            + b"bblp".ljust(32, b"\x00")
+            + access_code.encode().ljust(32, b"\x00"))
+
+
+def _default_connect(host: str, timeout: float):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE   # printer's cert is self-signed, like MQTT
+    raw = socket.create_connection((host, CAMERA_PORT), timeout=timeout)
+    return ctx.wrap_socket(raw, server_hostname=host)
+
+
+class BambuCameraSource:
+    """Reads JPEG frames from a Bambu P1/A1-family camera (TCP 6000, TLS).
+
+    grab() returns the next frame decoded to BGR, reconnecting once on a drop;
+    returns None only if the reconnect also fails (the detection loop then
+    writes an error status). The access code is passed in by the caller, NEVER
+    read from argv.
+    """
+
+    def __init__(self, host: str, access_code: str, *, timeout: float = 8.0,
+                 connect=_default_connect):
+        self.host = host
+        self._code = access_code
+        self._timeout = timeout
+        self._connect = connect
+        self._sock = None
+
+    def _open(self) -> None:
+        self._close()
+        s = self._connect(self.host, self._timeout)
+        s.settimeout(self._timeout)
+        s.sendall(_bambu_auth_packet(self._code))
+        self._sock = s
+
+    def _recv_exactly(self, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            chunk = self._sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("camera stream closed")
+            buf += chunk
+        return buf
+
+    def _read_frame(self):
+        header = self._recv_exactly(16)
+        size = int.from_bytes(header[:4], "little")
+        if not (0 < size <= 20_000_000):
+            raise ConnectionError(f"implausible frame size {size}")
+        jpeg = self._recv_exactly(size)
+        return cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+
+    def grab(self):
+        for attempt in (1, 2):    # try, then one reconnect
+            try:
+                if self._sock is None:
+                    self._open()
+                return self._read_frame()
+            except (OSError, ConnectionError) as e:
+                log.warning("A1 camera grab failed (attempt %d): %s", attempt, e)
+                self._close()
+        return None
+
+    def _close(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def close(self) -> None:
+        self._close()
 
 
 def mock_infer(frame):
