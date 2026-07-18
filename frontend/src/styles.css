@@ -458,6 +458,11 @@ a { color: var(--primary); }
    descendant selector rather than a modifier class. */
 .printer-card__foot .ui-btn { position: relative; z-index: 1; }
 
+/* EditPrinterForm reuses add-form*, but a printer-card is much narrower than
+   the 700px the add-form__row two-column breakpoint assumes (grid columns
+   are minmax(260px, 1fr)) -- stack fields instead of squeezing two per row. */
+.printer-card .add-form__row { grid-template-columns: 1fr; }
+
 /* auto-stop card */
 .autostop { display: flex; flex-direction: column; gap: 0.6rem; }
 .autostop__row { display: flex; align-items: center; justify-content: space-between; }

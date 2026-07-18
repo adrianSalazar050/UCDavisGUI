@@ -1,0 +1,78 @@
+import { useState } from "react";
+import { updatePrinter } from "../../api/printer.js";
+import Button from "../ui/Button.jsx";
+import Field from "../ui/Field.jsx";
+
+// Prefilled from the printer summary, which never carries the access code
+// (see EditPrinter in server/main.py) -- that field always starts blank.
+export default function EditPrinterForm({ printer, onDone }) {
+  const [form, setForm] = useState({
+    host: printer.printer,
+    access_code: "",
+    name: printer.name ?? "",
+    capture: !!printer.capture,
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const set = (k) => (e) =>
+    setForm((f) => ({
+      ...f,
+      [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value,
+    }));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      // name/capture are sent every time, prefilled -- the backend applies
+      // them unconditionally, so omitting them would reset them.
+      await updatePrinter(printer.serial, {
+        host: form.host.trim(),
+        access_code: form.access_code.trim(),
+        name: form.name.trim(),
+        capture: form.capture,
+      });
+      onDone(); // /ws pushes the refreshed card in on its own
+    } catch (e2) {
+      setErr(e2.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ready = form.host.trim();
+
+  return (
+    <form className="add-form" onSubmit={submit}>
+      <div className="add-form__row">
+        <Field label="IP address" value={form.host} onChange={set("host")}
+               placeholder="192.168.137.2"
+               help="Printer screen: Settings → WLAN" />
+        <Field label="Serial" value={printer.serial} disabled
+               help="Serial can't be changed" />
+      </div>
+      <div className="add-form__row">
+        <Field label="LAN access code" value={form.access_code}
+               onChange={set("access_code")} placeholder="00000000"
+               help="Leave blank to keep the current code" />
+        <Field label="Name (optional)" value={form.name} onChange={set("name")}
+               placeholder="A1-bench" help="Defaults to the IP address" />
+      </div>
+      <label className="add-form__check">
+        <input type="checkbox" checked={form.capture} onChange={set("capture")} />
+        This printer is the one the webcam points at
+      </label>
+      {err && <div className="add-form__error">{err}</div>}
+      <div className="add-form__actions">
+        <Button type="submit" variant="primary" busy={busy} disabled={!ready}>
+          Save
+        </Button>
+        <Button type="button" variant="secondary" onClick={onDone} disabled={busy}>
+          Cancel
+        </Button>
+      </div>
+    </form>
+  );
+}

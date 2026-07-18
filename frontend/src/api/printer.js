@@ -32,6 +32,17 @@ export async function removePrinter(serial) {
   if (!res.ok) throw new Error(await detail(res));
 }
 
+// Edit a registered printer. Blank access_code keeps the current one.
+export async function updatePrinter(serial, { host, access_code, name, capture }) {
+  const res = await fetch(`/api/printers/${encodeURIComponent(serial)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ host, access_code, name, capture }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 // { path, entries: [{ name, is_dir, size, mtime }] }
 export async function fetchFiles(serial, path = "/") {
   const res = await fetch(

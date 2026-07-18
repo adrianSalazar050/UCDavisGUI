@@ -2,6 +2,7 @@ import { useState } from "react";
 import { removePrinter } from "../../api/printer.js";
 import Button from "../ui/Button.jsx";
 import StatusPill from "../ui/StatusPill.jsx";
+import EditPrinterForm from "./EditPrinterForm.jsx";
 
 // connection -> pill. When connected, show what the printer is actually doing.
 function pill(p) {
@@ -13,6 +14,7 @@ function pill(p) {
 export default function PrinterCard({ printer, selected, onSelect }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
+  const [editing, setEditing] = useState(false);
   const { status, label } = pill(printer);
 
   const remove = async () => {
@@ -28,6 +30,16 @@ export default function PrinterCard({ printer, selected, onSelect }) {
       setBusy(false);
     }
   };
+
+  // Replaces the whole card body -- the form has its own Save/Cancel, and
+  // the same /ws push that refreshes add/remove refreshes this on save.
+  if (editing) {
+    return (
+      <div className="printer-card">
+        <EditPrinterForm printer={printer} onDone={() => setEditing(false)} />
+      </div>
+    );
+  }
 
   const progress = printer.layer_num != null
     ? `layer ${printer.layer_num} / ${printer.total_layer_num ?? "?"}` +
@@ -55,6 +67,9 @@ export default function PrinterCard({ printer, selected, onSelect }) {
       {err && <div className="printer-card__error">{err}</div>}
       <div className="printer-card__foot">
         {printer.capture && <span className="ui-stattile__sub">camera</span>}
+        <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
+          Edit
+        </Button>
         <Button variant="ghost" size="sm" busy={busy} onClick={remove}>
           Remove
         </Button>
