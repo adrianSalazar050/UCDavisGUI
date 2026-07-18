@@ -263,3 +263,30 @@ def test_list_dir_unexpected_exception_becomes_sderror(monkeypatch):
     with pytest.raises(SdError):
         sdcard.list_dir("10.0.0.5", "code", "/")
     assert fake.closed
+
+
+# ---------- fetch_file ----------
+
+def test_fetch_file_returns_bytes(monkeypatch):
+    import server.sdcard as sd
+
+    class FakeFTP:
+        def __init__(self, *a, **k): pass
+        def connect(self, *a, **k): pass
+        def login(self, *a, **k): pass
+        def prot_p(self): pass
+        def set_pasv(self, *a, **k): pass
+        def retrbinary(self, cmd, cb):
+            assert cmd == "RETR /Benchy.gcode.3mf"
+            cb(b"PK\x03\x04zipbytes")
+        def close(self): pass
+
+    monkeypatch.setattr(sd, "ImplicitFTP_TLS", FakeFTP)
+    assert sd.fetch_file("h", "code", "/Benchy.gcode.3mf") == b"PK\x03\x04zipbytes"
+
+
+def test_fetch_file_rejects_traversal():
+    import server.sdcard as sd
+    import pytest
+    with pytest.raises(sd.SdError):
+        sd.fetch_file("h", "code", "/../etc/passwd")

@@ -262,3 +262,31 @@ def list_dir(host: str, access_code: str, path: str = "/") -> list[dict]:
             ftp.close()
         except Exception:  # close() must never mask the real error above
             pass
+
+
+def fetch_file(host: str, access_code: str, path: str) -> bytes:
+    """Download one file off the card over FTPS. Always raises SdError on
+    failure (same contract as list_dir); the message never contains the
+    access code. Path is traversal-guarded via normalize_path."""
+    target = normalize_path(path)
+    ftp = ImplicitFTP_TLS(context=_ssl_context(), timeout=TIMEOUT_S)
+    chunks: list[bytes] = []
+    try:
+        ftp.connect(host, FTPS_PORT)
+        ftp.login(FTP_USER, access_code)
+        ftp.prot_p()
+        ftp.set_pasv(True)
+        ftp.retrbinary(f"RETR {target}", chunks.append)
+        return b"".join(chunks)
+    except SdError:
+        raise
+    except ftplib.all_errors as e:
+        raise SdError(f"Could not fetch {target} on {host}: {e}") from e
+    except Exception as e:  # putline ValueError etc. -> clean SdError
+        raise SdError(f"Could not fetch {target} on {host}: unexpected "
+                      f"error ({type(e).__name__})") from e
+    finally:
+        try:
+            ftp.close()
+        except Exception:
+            pass
