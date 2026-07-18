@@ -34,6 +34,7 @@ class FakeRegistry:
         self.duplicate = duplicate
         self.added = []
         self.removed = []
+        self.updated = []
 
     def summaries(self):
         return [s.summary() for s in self._services.values()]
@@ -57,6 +58,15 @@ class FakeRegistry:
         del self._services[serial]
         self.removed.append(serial)
         return True
+
+    def update(self, serial, host=None, access_code=None, name="", capture=False):
+        if serial not in self._services:
+            return None
+        if not (host and host.strip()):
+            raise ValueError("host must not be empty")
+        svc = self._services[serial]
+        self.updated.append((serial, host, access_code, name, capture))
+        return svc.summary()
 
 
 def client(tmp_path, registry=None):
@@ -152,6 +162,51 @@ def test_remove_printer_204_has_empty_body(tmp_path):
 def test_remove_unknown_printer_404(tmp_path):
     r = client(tmp_path, FakeRegistry([])).delete("/api/printers/nope")
     assert r.status_code == 404
+
+
+# ---------- PUT /api/printers/{serial} ----------
+
+def test_edit_printer_200(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).put("/api/printers/S1", json={
+        "host": "192.168.1.50", "access_code": "new-secret-code",
+        "name": "bench", "capture": True})
+    assert r.status_code == 200
+    assert "access_code" not in r.json()
+    assert "new-secret-code" not in r.text
+    assert reg.updated == [("S1", "192.168.1.50", "new-secret-code",
+                            "bench", True)]
+
+
+def test_edit_printer_unknown_404(tmp_path):
+    reg = FakeRegistry([])
+    r = client(tmp_path, reg).put("/api/printers/nope",
+                                  json={"host": "1.2.3.4"})
+    assert r.status_code == 404
+
+
+def test_edit_printer_empty_host_400(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).put("/api/printers/S1", json={"host": ""})
+    assert r.status_code == 400
+
+
+def test_edit_printer_missing_host_422(tmp_path):
+    r = client(tmp_path, FakeRegistry([FakeService("S1")])).put(
+        "/api/printers/S1", json={})
+    assert r.status_code == 422  # pydantic rejects it before the route runs
+
+
+def test_edit_printer_blank_access_code_defaults_to_keep(tmp_path):
+    # The frontend never has the real code to send back, so the model
+    # default (and an omitted field) must both mean "keep the current one",
+    # not "wipe it" -- confirm the route passes "" through untouched rather
+    # than substituting something else.
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).put("/api/printers/S1",
+                                  json={"host": "1.2.3.4"})
+    assert r.status_code == 200
+    assert reg.updated == [("S1", "1.2.3.4", "", "", False)]
 
 
 # ---------- GET /api/printers/{serial}/files ----------

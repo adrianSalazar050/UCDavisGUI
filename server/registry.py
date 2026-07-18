@@ -179,6 +179,75 @@ class PrinterRegistry:
         self._persist()
         return True
 
+    def update(self, serial, *, host=None, access_code=None, name=None,
+               capture=None) -> dict | None:
+        """Edit a registered printer's connection info. Returns the new summary
+        dict, or None if the serial is unknown. The serial is NOT changeable.
+        A blank/None access_code KEEPS the current one. Changing host or
+        access_code rebuilds the service (so it reconnects with the new
+        params); name/capture-only edits update the live service in place.
+        Raises ValueError on an empty host when host is provided."""
+        # Same validation posture as add(): reject wrong types outright
+        # (before they can reach `.strip()` and raise a raw AttributeError,
+        # or reach PrinterConfig and get silently coerced); cosmetic fields
+        # default instead of raising.
+        if host is not None:
+            if not isinstance(host, str):
+                raise ValueError(f"host must be a string, got "
+                                f"{type(host).__name__}")
+            if not host.strip():
+                raise ValueError("host must not be empty")
+        if access_code is not None and not isinstance(access_code, str):
+            raise ValueError(f"access_code must be a string, got "
+                            f"{type(access_code).__name__}")
+        if name is not None and not isinstance(name, str):
+            name = ""
+        if capture is not None and not isinstance(capture, bool):
+            capture = False
+
+        with self._lock:
+            cfg = self._configs.get(serial)
+            if cfg is None:
+                return None
+            # access_code is a secret the client never receives back, so a
+            # blank/omitted value means "keep the current one", not "wipe it".
+            new_code = (access_code or "").strip()
+            reconnect = ((host is not None and host.strip() != cfg.host) or
+                        bool(new_code and new_code != cfg.access_code))
+            if host is not None:
+                cfg.host = host.strip()
+            if new_code:
+                cfg.access_code = new_code
+            if name is not None:
+                cfg.name = name.strip() or cfg.host
+            if capture is not None:
+                if capture:
+                    self._clear_capture()
+                cfg.capture = bool(capture)
+            old_svc = None
+            if reconnect:
+                # Factory is called under the lock -- same reasoning as
+                # add(): it only builds an in-memory object, never touches a
+                # socket. start()/stop() are not, and run outside the lock
+                # below.
+                old_svc = self._services.get(serial)
+                svc = self._factory(cfg)
+                self._services[serial] = svc
+            else:
+                # PrinterService/MockPrinter each keep their own name/capture
+                # copy independent of cfg (see _clear_capture()'s docstring),
+                # so the live service must be told explicitly.
+                svc = self._services[serial]
+                svc.name = cfg.name
+                svc.capture = cfg.capture
+
+        if reconnect:
+            if old_svc is not None:
+                old_svc.stop()
+            svc.start()
+        self._persist()
+        return svc.summary()
+
     # ---------------- reads ----------------
 
     def get(self, serial: str):

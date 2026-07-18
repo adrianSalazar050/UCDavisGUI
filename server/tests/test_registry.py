@@ -358,3 +358,103 @@ def test_update_detection_ignores_bad_camera_source():
     r.add(host="1.1.1.1", serial="B", access_code="c", capture=True)
     r.update_detection("B", camera_source="usb")
     assert r.detection_config("B")["camera_source"] == "a1"
+
+
+# ---------------------------------------------------------------------------
+# update() -- editing a registered printer's connection info
+# ---------------------------------------------------------------------------
+
+
+def test_update_name_only_keeps_same_service_and_updates_name():
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="code", name="old-name")
+    svc_before = r.get("S1")
+    result = r.update("S1", name="new-name")
+    assert r.get("S1") is svc_before
+    assert result["name"] == "new-name"
+
+
+def test_update_host_swaps_service_starts_new_and_stops_old():
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="code")
+    old_svc = r.get("S1")
+    result = r.update("S1", host="5.6.7.8")
+    new_svc = r.get("S1")
+    assert new_svc is not old_svc
+    assert old_svc.stopped is True
+    assert new_svc.started is True
+    assert result["printer"] == "5.6.7.8"
+
+
+def test_update_access_code_change_also_swaps_service():
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="original")
+    old_svc = r.get("S1")
+    r.update("S1", access_code="new-code")
+    new_svc = r.get("S1")
+    assert new_svc is not old_svc
+    assert old_svc.stopped is True
+    assert new_svc.started is True
+
+
+def test_update_no_reconnect_when_host_resubmitted_unchanged():
+    # An edit form round-trips the current host even when only the name
+    # changed. Resubmitting the SAME host must not tear down the connection.
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="code")
+    old_svc = r.get("S1")
+    r.update("S1", host="1.2.3.4", name="renamed")
+    assert r.get("S1") is old_svc
+    assert old_svc.stopped is False
+
+
+def test_update_blank_access_code_keeps_old_code():
+    # A blank access_code means "keep the current one" -- it's a secret the
+    # client never receives back, so it can't round-trip it in an edit form.
+    # Inspect via detection_target(), the one existing accessor that exposes
+    # access_code, rather than asserting anything about summary().
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="original-code",
+          capture=True)
+    r.update_detection("S1", detect_enabled=True)
+    r.update("S1", access_code="")
+    target = r.detection_target()
+    assert target["access_code"] == "original-code"
+
+
+def test_update_capture_true_clears_other_printers():
+    r = reg()
+    r.add(host="1.1.1.1", serial="S1", access_code="c", capture=True)
+    r.add(host="2.2.2.2", serial="S2", access_code="c")
+    r.update("S2", capture=True)
+    caps = {s["serial"]: s["capture"] for s in r.summaries()}
+    assert caps == {"S1": False, "S2": True}
+
+
+def test_update_unknown_serial_returns_none():
+    r = reg()
+    r.add(host="1.1.1.1", serial="S1", access_code="c")
+    assert r.update("nope", name="x") is None
+
+
+def test_update_empty_host_raises():
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="c")
+    with pytest.raises(ValueError):
+        r.update("S1", host="")
+
+
+def test_update_whitespace_only_host_raises():
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="c")
+    with pytest.raises(ValueError):
+        r.update("S1", host="   ")
+
+
+def test_update_persists_to_store():
+    store = MemoryStore()
+    r = reg(store)
+    r.add(host="1.2.3.4", serial="S1", access_code="code")
+    r.update("S1", name="renamed")
+    saved = store.load()
+    assert saved[0].name == "renamed"

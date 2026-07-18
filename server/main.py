@@ -42,6 +42,19 @@ class AddPrinter(BaseModel):
     capture: bool = False
 
 
+class EditPrinter(BaseModel):
+    """Edits a registered printer's connection info. `serial` is deliberately
+    absent -- it's the identity key and is not editable here. `access_code`
+    defaults to "" ("keep the current one"): the client never receives the
+    real code back (see AddPrinter/store.py), so it has nothing to round-trip
+    into an edit form."""
+
+    host: str
+    access_code: str = ""     # blank = keep the current code
+    name: str = ""
+    capture: bool = False
+
+
 class DetectionUpdate(BaseModel):
     camera_source: str | None = None
     camera_index: int | None = None
@@ -103,6 +116,18 @@ def create_app(registry, runs_dir: pathlib.Path,
             raise HTTPException(409, "that serial is already registered")
         except ValueError as e:
             raise HTTPException(400, str(e))
+
+    @app.put("/api/printers/{serial}")
+    def edit_printer(serial: str, body: EditPrinter):
+        try:
+            result = registry.update(serial, host=body.host,
+                                     access_code=body.access_code,
+                                     name=body.name, capture=body.capture)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if result is None:
+            raise HTTPException(404, "unknown printer")
+        return result
 
     @app.delete("/api/printers/{serial}", status_code=204)
     def remove_printer(serial: str):
