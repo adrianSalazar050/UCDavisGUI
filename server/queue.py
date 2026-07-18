@@ -90,6 +90,21 @@ class QueueStore:
             raise
 
 
+class MemoryQueueStore:
+    """Same interface as QueueStore, no disk. Used by --mock so fake printers'
+    queues never land in the user's real queues.json (mirrors store.py's
+    MemoryStore for printers.json)."""
+
+    def __init__(self) -> None:
+        self._data: dict = {}
+
+    def load(self) -> dict:
+        return {k: list(v) for k, v in self._data.items()}
+
+    def save(self, data: dict) -> None:
+        self._data = {k: list(v) for k, v in data.items()}
+
+
 class PrintQueue:
     """{serial: [job, ...]} guarded by a lock, persisting after each
     mutation. Pure of network/registry -- the API layer does the fetch+parse

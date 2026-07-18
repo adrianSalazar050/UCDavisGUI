@@ -16,7 +16,7 @@ import uvicorn
 from .detection import DetectionCoordinator, DetectorSupervisor, MockDetectorRunner
 from .main import create_app
 from .printer import MockPrinter, PrinterService
-from .queue import PrintQueue, QueueStore
+from .queue import MemoryQueueStore, PrintQueue, QueueStore
 from .registry import PrinterRegistry
 from .store import MemoryStore, PrinterStore
 
@@ -107,12 +107,12 @@ def main() -> int:
         else DetectorSupervisor(detect_out, weights)
     coordinator = DetectionCoordinator(registry, runs_dir, runner)
 
-    # Queue jobs hold no secrets (just filenames + cached metrics -- see
-    # server/queue.py), so unlike printers.json there is no MemoryStore-style
-    # split between --mock and real: queues.json always lives on disk,
-    # alongside wherever runs_dir was pointed (its parent, since runs_dir
-    # itself is "runs"/"runs-mock" by default).
-    queue = PrintQueue(QueueStore(runs_dir.parent / "queues.json"))
+    # --mock uses an in-memory queue store so the seeded fake printers' jobs
+    # never land in the user's real queues.json (mirrors printers.json's
+    # MemoryStore split). Real runs persist to queues.json beside runs_dir.
+    queue_store = MemoryQueueStore() if a.mock \
+        else QueueStore(runs_dir.parent / "queues.json")
+    queue = PrintQueue(queue_store)
 
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
     app = create_app(registry, runs_dir, dist, detection=coordinator, queue=queue)
