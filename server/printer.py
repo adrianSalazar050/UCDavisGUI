@@ -8,15 +8,18 @@ works with no hardware.
 Both are duck-typed to the same interface, which is what lets registry.py
 (Task 5) hold a `{serial: service}` map without caring which kind of service
 a given entry is: start(), stop(), summary() -> dict, list_files(path) ->
-list[dict], plus the identity attributes serial, host, name, capture.
+list[dict], fetch_file(path) -> bytes, plus the identity attributes serial,
+host, name, capture.
 """
 from __future__ import annotations
 
+import io
 import logging
 import pathlib
 import sys
 import threading
 import time
+import zipfile
 from datetime import datetime
 
 import cv2
@@ -28,6 +31,7 @@ from bambu_link import BambuLink, decode_hms  # noqa: E402
 
 from . import sdcard  # noqa: E402
 from .sdcard import SdError  # noqa: E402
+from .threemf import SLICE_INFO_PATH  # noqa: E402
 
 log = logging.getLogger("server.printer")
 
@@ -65,6 +69,31 @@ MOCK_TREE: dict[str, list[dict]] = {
          "mtime": "2026-07-16T13:04:00"},
     ],
 }
+
+# What --mock hands back for ANY queue "Add from SD" fetch (MockPrinter.
+# fetch_file, below) -- there is no per-file mock data, just one small
+# in-memory .gcode.3mf, built once at import time. The numbers echo the real
+# printer sample confirmed in the print-queue plan (smallCylinderPLA15m17s ->
+# 917s / 1.69g) purely so a mock screenshot reads the same as a real one.
+_MOCK_SLICE_INFO = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<config><plate>'
+    '<metadata key="index" value="1"/>'
+    '<metadata key="prediction" value="917"/>'
+    '<metadata key="weight" value="1.69"/>'
+    '<filament id="1" type="PLA" color="#000000" used_g="1.69" used_m="0.57"/>'
+    '</plate></config>'
+)
+
+
+def _build_mock_3mf() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(SLICE_INFO_PATH, _MOCK_SLICE_INFO)
+    return buf.getvalue()
+
+
+MOCK_3MF_BYTES = _build_mock_3mf()
 
 
 def build_summary(state: dict, report_age: float | None,
@@ -181,6 +210,12 @@ class PrinterService:
         route that uses it is a sync def, so FastAPI runs it on a threadpool."""
         return sdcard.list_dir(self.host, self.access_code, path)
 
+    def fetch_file(self, path: str) -> bytes:
+        """Blocking FTPS call, same posture as list_files: MUST NOT be
+        called from the event loop. Thin delegation only -- access_code
+        never leaves this method, exactly like list_files."""
+        return sdcard.fetch_file(self.host, self.access_code, path)
+
     def summary(self) -> dict:
         age = (None if self._last_report is None
                else time.time() - self._last_report)
@@ -269,6 +304,13 @@ class MockPrinter:
         # not corrupt it for every other printer/instance for the rest of the
         # process's life.
         return sdcard.sort_entries([dict(e) for e in entries])
+
+    def fetch_file(self, path: str) -> bytes:
+        """No per-file mock data -- every mock SD path fetches the same
+        built-in fixture 3mf (MOCK_3MF_BYTES), so --mock's queue "Add from
+        SD" flow yields real-looking time/grams with zero hardware."""
+        sdcard.normalize_path(path)  # traversal guard, same posture as list_files
+        return MOCK_3MF_BYTES
 
     def _touch(self, patch: dict) -> None:
         self.state.update(patch)

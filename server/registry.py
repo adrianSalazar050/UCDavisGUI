@@ -46,6 +46,7 @@ import logging
 import threading
 from typing import Any, Callable
 
+from .sdcard import SdError
 from .store import CAMERA_SOURCES, DETECTION_CLASSES, PrinterConfig
 
 log = logging.getLogger("server.registry")
@@ -272,6 +273,26 @@ class PrinterRegistry:
         with self._lock:
             services = list(self._services.values())
         return [svc.summary() for svc in services]
+
+    def fetch_sd_file(self, serial: str, path: str) -> bytes:
+        """Download one file off `serial`'s SD card, hiding the access code
+        behind the service exactly like the /files route's svc.list_files()
+        call does -- this method's own signature never takes or returns an
+        access_code, so there is no channel for the secret to reach a queue
+        route or its response.
+
+        get() is a single atomic dict lookup (see get()'s docstring), so,
+        like list_files, this never holds self._lock across the blocking
+        FTPS call that follows -- svc.fetch_file() always runs unlocked.
+
+        Always raises SdError on failure, unknown serial included, so
+        callers get one exception type to handle regardless of which kind of
+        failure this is (same contract as sdcard.list_dir/fetch_file).
+        """
+        svc = self.get(serial)
+        if svc is None:
+            raise SdError(f"unknown printer {serial}")
+        return svc.fetch_file(path)
 
     # ---------------- detection accessors ----------------
 

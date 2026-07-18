@@ -1,7 +1,9 @@
 import pytest
 
+import server.sdcard as sdcard
 from server.printer import STALE_S, MockPrinter, PrinterService
 from server.sdcard import SdError
+from server.threemf import parse_slice_info
 
 
 # ---------- PrinterService ----------
@@ -186,3 +188,44 @@ def test_mock_stop_print_marks_failed(tmp_path):
     mp._touch({"gcode_state": "RUNNING", "layer_num": 3})
     mp.stop_print()
     assert mp.summary()["gcode_state"] == "FAILED"
+
+
+# ---------- fetch_file (Task 4: queue "Add from SD") ----------
+
+def test_service_fetch_file_delegates_to_sdcard(monkeypatch):
+    # Mirrors list_files: PrinterService.fetch_file must be a thin
+    # delegation to sdcard.fetch_file(host, access_code, path), never doing
+    # its own socket work and never letting access_code reach anything but
+    # that call.
+    s = svc()
+    calls = []
+
+    def fake_fetch(host, access_code, path):
+        calls.append((host, access_code, path))
+        return b"PK\x03\x04zipbytes"
+
+    monkeypatch.setattr(sdcard, "fetch_file", fake_fetch)
+    assert s.fetch_file("/Benchy.gcode.3mf") == b"PK\x03\x04zipbytes"
+    assert calls == [("192.0.2.1", "12345678", "/Benchy.gcode.3mf")]
+
+
+def test_mock_fetch_file_returns_a_parseable_3mf(tmp_path):
+    # --mock's queue "Add from SD" must yield real-looking time/grams with
+    # zero hardware -- confirm the fixture bytes actually parse, and echo
+    # the real confirmed sample (smallCylinderPLA15m17s -> 917s / 1.69g).
+    data = MockPrinter(tmp_path).fetch_file("/calibration_cube.gcode.3mf")
+    meta = parse_slice_info(data)
+    assert meta["seconds"] == 917
+    assert meta["grams"] == 1.69
+
+
+def test_mock_fetch_file_same_fixture_regardless_of_path(tmp_path):
+    # MockPrinter has no per-file data -- it always hands back the one
+    # built-in fixture, whichever mock SD path was asked for.
+    mp = MockPrinter(tmp_path)
+    assert mp.fetch_file("/Benchy.3mf") == mp.fetch_file("/cache/Benchy.gcode.3mf")
+
+
+def test_mock_fetch_file_rejects_traversal(tmp_path):
+    with pytest.raises(SdError):
+        MockPrinter(tmp_path).fetch_file("/../etc/passwd")

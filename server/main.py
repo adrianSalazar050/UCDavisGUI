@@ -5,7 +5,9 @@ import asyncio
 import json
 import logging
 import pathlib
+import posixpath
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -13,7 +15,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import runs, sdcard
+from . import runs, sdcard, threemf
 from .detection import CLASSES  # the 6 valid armed classes
 from .registry import DuplicateSerial
 from .sdcard import SdError
@@ -67,6 +69,19 @@ class ArmBody(BaseModel):
     armed: bool
 
 
+class AddQueueJob(BaseModel):
+    """POST body for queuing an SD-card file. sd_path is the only
+    user-supplied field -- id/name/seconds/grams/source are all derived
+    server-side from the fetched + parsed .gcode.3mf, never trusted from the
+    client."""
+
+    sd_path: str
+
+
+class ReorderQueueJobs(BaseModel):
+    ids: list[str]
+
+
 def _comparable(printers: list[dict]) -> list[dict]:
     """report_age_s ticks every sample; ignore it when deciding whether the
     state meaningfully changed."""
@@ -86,9 +101,13 @@ def _with_detection(printers: list[dict], detection) -> list[dict]:
 
 def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
-               detection=None) -> FastAPI:
+               detection=None, queue=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
-    add(...), remove(serial) (PrinterRegistry, or a test fake)."""
+    add(...), remove(serial) (PrinterRegistry, or a test fake). `queue` is
+    anything with add(serial, job), remove(serial, id) -> bool,
+    reorder(serial, ids), get(serial) -> list, totals(serial) -> dict
+    (PrintQueue, or a test fake); None disables the queue routes entirely,
+    same "None means inert" convention as `detection`."""
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -151,6 +170,64 @@ def create_app(registry, runs_dir: pathlib.Path,
             return {"path": target, "entries": svc.list_files(target)}
         except SdError as e:
             raise HTTPException(502, str(e))  # the printer/FTPS failed us
+
+    def _require_queue() -> None:
+        if queue is None:
+            raise HTTPException(404, "queue not enabled on this server")
+
+    @app.get("/api/printers/{serial}/queue")
+    def get_queue(serial: str):
+        _require_queue()
+        return {"jobs": queue.get(serial), "totals": queue.totals(serial)}
+
+    @app.post("/api/printers/{serial}/queue", status_code=201)
+    def add_queue_job(serial: str, body: AddQueueJob):
+        # Planner only: this never commands the printer, it only reads one
+        # SD file to learn its estimated time/grams. Deliberately a SYNC def
+        # for the same reason as list_files -- fetch_sd_file's FTPS call
+        # blocks and must run on the threadpool, not the event loop.
+        _require_queue()
+        if registry.get(serial) is None:
+            raise HTTPException(404, "unknown printer")
+        try:
+            target = sdcard.normalize_path(body.sd_path)
+        except SdError as e:
+            raise HTTPException(400, str(e))  # bad input, not a printer fault
+        try:
+            # registry.fetch_sd_file hides the access code behind the
+            # service, same as svc.list_files() above -- this route never
+            # sees it. A fetch/FTPS failure here is NOT fatal to the
+            # request: the job is still queued, just without parsed
+            # metrics, so a momentarily-offline printer doesn't block
+            # planning the queue.
+            data = registry.fetch_sd_file(serial, target)
+            meta = threemf.parse_slice_info(data)
+        except SdError:
+            meta = {"seconds": None, "grams": None, "filaments": []}
+        seconds, grams = meta.get("seconds"), meta.get("grams")
+        job = {
+            "id": uuid.uuid4().hex,
+            "sd_path": target,
+            "name": posixpath.basename(target) or target,
+            "seconds": seconds,
+            "grams": grams,
+            "source": "3mf" if (seconds or grams) else "manual",
+        }
+        queue.add(serial, job)
+        return job
+
+    @app.delete("/api/printers/{serial}/queue/{job_id}", status_code=204)
+    def remove_queue_job(serial: str, job_id: str):
+        _require_queue()
+        if not queue.remove(serial, job_id):
+            raise HTTPException(404, "unknown job")
+        return Response(status_code=204)
+
+    @app.put("/api/printers/{serial}/queue")
+    def reorder_queue(serial: str, body: ReorderQueueJobs):
+        _require_queue()
+        queue.reorder(serial, body.ids)
+        return {"jobs": queue.get(serial), "totals": queue.totals(serial)}
 
     @app.get("/api/frame/latest")
     def frame_latest():

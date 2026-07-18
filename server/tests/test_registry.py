@@ -4,6 +4,7 @@ import time
 import pytest
 
 from server.registry import DuplicateSerial, PrinterRegistry
+from server.sdcard import SdError
 from server.store import MemoryStore, PrinterConfig
 
 
@@ -14,6 +15,9 @@ class FakeService:
         self.cfg = cfg
         self.started = False
         self.stopped = False
+        self.fetch_result = b"fake-3mf-bytes"
+        self.fetch_error = None
+        self.fetch_calls: list[str] = []
 
     def start(self):
         self.started = True
@@ -25,6 +29,12 @@ class FakeService:
         return {"serial": self.cfg.serial, "name": self.cfg.name,
                 "printer": self.cfg.host, "capture": self.cfg.capture,
                 "connection": "ok"}
+
+    def fetch_file(self, path):
+        self.fetch_calls.append(path)
+        if self.fetch_error is not None:
+            raise self.fetch_error
+        return self.fetch_result
 
 
 def reg(store=None):
@@ -458,3 +468,41 @@ def test_update_persists_to_store():
     r.update("S1", name="renamed")
     saved = store.load()
     assert saved[0].name == "renamed"
+
+
+# ---------------------------------------------------------------------------
+# fetch_sd_file (Task 4) -- hides the access code behind the service exactly
+# like the /files route's svc.list_files() call does.
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_sd_file_delegates_to_service():
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="code")
+    svc = r.get("S1")
+    svc.fetch_result = b"PK\x03\x04zipbytes"
+    assert r.fetch_sd_file("S1", "/Benchy.gcode.3mf") == b"PK\x03\x04zipbytes"
+    assert svc.fetch_calls == ["/Benchy.gcode.3mf"]
+
+
+def test_fetch_sd_file_unknown_serial_raises_sderror():
+    r = reg()
+    with pytest.raises(SdError):
+        r.fetch_sd_file("nope", "/x.3mf")
+
+
+def test_fetch_sd_file_propagates_service_sderror():
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="code")
+    r.get("S1").fetch_error = SdError("Could not fetch /x.3mf on 1.2.3.4")
+    with pytest.raises(SdError):
+        r.fetch_sd_file("S1", "/x.3mf")
+
+
+def test_fetch_sd_file_never_needs_access_code_argument():
+    # Structural guard against regression: fetch_sd_file's own signature has
+    # no access_code parameter at all, so there is no channel for the secret
+    # to flow through it -- this only stays true as long as nobody adds one.
+    import inspect
+    params = inspect.signature(PrinterRegistry.fetch_sd_file).parameters
+    assert "access_code" not in params

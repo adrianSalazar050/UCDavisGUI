@@ -16,6 +16,7 @@ import uvicorn
 from .detection import DetectionCoordinator, DetectorSupervisor, MockDetectorRunner
 from .main import create_app
 from .printer import MockPrinter, PrinterService
+from .queue import PrintQueue, QueueStore
 from .registry import PrinterRegistry
 from .store import MemoryStore, PrinterStore
 
@@ -106,8 +107,15 @@ def main() -> int:
         else DetectorSupervisor(detect_out, weights)
     coordinator = DetectionCoordinator(registry, runs_dir, runner)
 
+    # Queue jobs hold no secrets (just filenames + cached metrics -- see
+    # server/queue.py), so unlike printers.json there is no MemoryStore-style
+    # split between --mock and real: queues.json always lives on disk,
+    # alongside wherever runs_dir was pointed (its parent, since runs_dir
+    # itself is "runs"/"runs-mock" by default).
+    queue = PrintQueue(QueueStore(runs_dir.parent / "queues.json"))
+
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
-    app = create_app(registry, runs_dir, dist, detection=coordinator)
+    app = create_app(registry, runs_dir, dist, detection=coordinator, queue=queue)
     # uvicorn re-raises the signal it caught using whatever handler was
     # installed beforehand. SIGBREAK's OS default kills the process outright
     # (skipping `finally`), so map it to KeyboardInterrupt like SIGINT gets.
