@@ -52,6 +52,46 @@ export async function fetchFiles(serial, path = "/") {
   return res.json();
 }
 
+// { jobs: [{id, sd_path, name, seconds, grams, source}],
+//   totals: {seconds, grams, finish_epoch} }
+export async function fetchQueue(serial) {
+  const res = await fetch(`/api/printers/${encodeURIComponent(serial)}/queue`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// Fetches + parses one SD-card .gcode.3mf and appends it to the queue.
+// Returns the added job. sd_path is the only client-supplied field -- the
+// server derives id/name/seconds/grams/source from the fetched file.
+export async function addQueueJob(serial, sd_path) {
+  const res = await fetch(`/api/printers/${encodeURIComponent(serial)}/queue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sd_path }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function removeQueueJob(serial, id) {
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/queue/${encodeURIComponent(id)}`,
+    { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+// Reorders the queue to match `ids` (unknown ids are dropped server-side).
+// Returns the fresh { jobs, totals } envelope, same shape as fetchQueue.
+export async function reorderQueue(serial, ids) {
+  const res = await fetch(`/api/printers/${encodeURIComponent(serial)}/queue`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 // Returns { url, layer, run } (url is an object URL the caller must revoke)
 // or null when there is no active run (HTTP 404) or on network error.
 export async function fetchLatestFrame() {

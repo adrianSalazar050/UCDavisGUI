@@ -408,6 +408,75 @@ a { color: var(--primary); }
 .file-table__dir:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
 .file-table__muted { color: var(--text-faint); }
 
+/* ================= queue ================= */
+.queue-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+.queue-picker {
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-3);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+}
+.queue-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.queue-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  font-weight: 500;
+  padding: 0 var(--sp-3) var(--sp-2);
+  border-bottom: 1px solid var(--line);
+}
+.queue-table td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+}
+.queue-table tr:last-child td { border-bottom: 0; }
+.queue-table__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.queue-table__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+}
+.queue-table__move, .queue-table__remove {
+  height: var(--ctl-h-sm);
+  width: var(--ctl-h-sm);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.queue-table__move:hover, .queue-table__remove:hover { background: var(--surface-2); }
+.queue-table__move:disabled, .queue-table__remove:disabled { opacity: 0.55; cursor: default; }
+.queue-table__move:focus-visible, .queue-table__remove:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+.queue-table__remove { color: var(--danger-text); }
+.queue-totals {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ================= shared empty / error states ================= */
 .empty {
   padding: var(--sp-7);
