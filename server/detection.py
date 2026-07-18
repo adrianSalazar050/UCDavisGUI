@@ -336,9 +336,9 @@ class DetectionCoordinator:
 
 class MockDetectorRunner:
     """--mock stand-in for DetectorSupervisor: instead of spawning detect.py,
-    write a synthetic 'spaghetti' status.json so the arm->10s->stop loop runs
-    with no camera and no weights. Reuses detect.write_status for the same
-    atomic-write contract."""
+    write a synthetic 'spaghetti' status.json + annotated frame so the
+    arm->10s->stop loop AND the live camera view both work with no camera and
+    no weights. Reuses detect.mock_infer/write_* for the same contracts."""
 
     def __init__(self, out_dir, *, period_s: float = 0.5):
         self.out_dir = pathlib.Path(out_dir)
@@ -358,15 +358,18 @@ class MockDetectorRunner:
 
     def _loop(self) -> None:
         import detect  # root module; lazy so server imports don't need cv2 early
+        import numpy as np
         while not self._stop.wait(self._period):
             try:
+                base = np.full((360, 640, 3), 40, np.uint8)
+                dets, annotated = detect.mock_infer(base)  # spaghetti + red box
+                detect.write_frame(self.out_dir, annotated)
                 detect.write_status(self.out_dir, detect.build_status(
-                    [{"cls": "spaghetti", "conf": 0.9, "box": [0, 0, 8, 8]}],
-                    ts=time.time(), fps=4.0, camera=0, conf=0.25))
+                    dets, ts=time.time(), fps=4.0, camera=0, conf=0.25))
             except Exception as e:  # noqa: BLE001 - no supervisor to respawn
                 # this thread; one bad write (even after H1's retries are
                 # exhausted) must not permanently kill the mock writer.
-                log.warning("mock detector write_status failed: %s", e)
+                log.warning("mock detector write failed: %s", e)
 
     def _halt(self) -> None:
         self._stop.set()
