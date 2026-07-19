@@ -1,9 +1,14 @@
 # Bambu Lab A1 mini — LAN Connection Notes
 
-Both `testing.py` and `serial.py` in this folder connected successfully to
-the printer over the local network. This documents how, and the exact
-values used, so they can be reused when wiring up the printer connection in
-`GUI_UCDavis`.
+How the LAN connection to the printer works, the exact values it needs, and what
+to check when it doesn't.
+
+> **On the scripts named below.** The connection was originally proven by two
+> throwaway diagnostics, `testing.py` (full MQTT diagnostic, strict TLS) and
+> `serial.py` (raw TLS handshake check). **Neither is in the repo any more** —
+> `bambu_link.py` superseded both. They are described in §"Historical" because
+> the trust-model contrast with `bambu_link.py` is the useful part, not because
+> you can run them.
 
 ## Printer prerequisites (must be done on the printer first)
 
@@ -15,7 +20,8 @@ values used, so they can be reused when wiring up the printer connection in
 
 Developer Mode only exists on certain firmware versions (X1 >= 01.08.03.00,
 A1 >= 01.05.00.00, P1 >= 01.08.02.00, H2D >= 01.01.00.01; P2 ships with it).
-`testing.py` prints the firmware version on connect so you can double-check.
+The dashboard shows the firmware version on the printer card once connected, so
+you can double-check.
 
 ## Connection parameters used
 
@@ -31,7 +37,23 @@ If the access code stops being accepted, re-read it off the printer screen —
 it's the most common cause of a rejected connection after everything else
 worked before.
 
-## Two approaches verified in this folder
+## What the code actually uses today
+
+Everything below the "Historical" heading is background. The live path is:
+
+| Channel | Port | Module | Notes |
+|---|---|---|---|
+| Telemetry + control | 8883 | `bambu_link.py` | MQTT over TLS, self-signed cert accepted |
+| microSD listing/transfer | 990 | `server/sdcard.py` | FTPS, implicit TLS, read-only in the UI |
+| Built-in camera | 6000 | `detect.py` (`BambuCameraSource`) | TLS, 80-byte `bblp` auth packet, then length-prefixed JPEGs |
+
+All three authenticate with the same `bblp` + LAN-access-code pair. See
+[`master.md`](master.md) §2 for how they fit together.
+
+## Historical: the two diagnostics that proved this
+
+Neither script is in the repo any more — `bambu_link.py` replaced both. Kept
+here because the TLS trust-model contrast is worth understanding.
 
 ### 1. `testing.py` — full diagnostic, strict TLS verification
 
@@ -65,10 +87,10 @@ worked before.
 - Useful as a first, fast sanity check (TLS + cert identity only, no MQTT
   auth) before running the fuller `testing.py`.
 
-## The approach `GUI_UCDavis/bambu_link.py` already uses
+### 3. What `bambu_link.py` does instead (the live path)
 
-The dashboard's `BambuLink` class (`bambu_link.py`) connects the same way
-but does **not** pin the CA at all:
+The dashboard's `BambuLink` class connects the same way but does **not** pin the
+CA at all:
 
 - `cert_reqs=ssl.CERT_NONE` + `tls_insecure_set(True)` — accepts the
   printer's self-signed cert without verification, instead of validating
@@ -133,7 +155,7 @@ for the v1 dashboard design, and
 `docs/superpowers/specs/2026-07-16-multi-printer-sd-browser-design.md` for the
 multi-printer + SD browser design this connection feeds into.
 
-## Troubleshooting (from `testing.py`'s own diagnostics)
+## Troubleshooting
 
 - **Broker rejects the connection** -> almost always a wrong access code;
   re-read it off the printer screen.

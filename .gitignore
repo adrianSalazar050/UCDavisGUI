@@ -24,3 +24,5 @@ queues.json*
 *.zip
 .gstack/
 .superpowers/
+# local Claude Code tooling config (per-machine permission allowlist)
+.claude/
