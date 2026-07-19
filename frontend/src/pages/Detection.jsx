@@ -10,11 +10,28 @@ import CameraCard from "../components/dashboard/CameraCard.jsx";
 const CLASSES = ["blobs", "cracks", "over_extrusion", "spaghetti",
                  "stringing", "under_extrusion"];
 
+const ROI_FIELDS = [
+  { key: "x", label: "Left %" }, { key: "y", label: "Top %" },
+  { key: "w", label: "Width %" }, { key: "h", label: "Height %" },
+];
+// Measured off a real A1 mini frame (1680x1080), not guessed: the bed occupies
+// the lower-left of that wide fisheye view. Generous on height because the A1
+// is a bed-slinger -- the bed sweeps toward and away from the camera as it
+// prints, so the region has to cover its whole travel. Tune from the overlay.
+const DEFAULT_ROI_PCT = ["0", "40", "65", "60"];
+
+const roiToPct = (roi) =>
+  roi ? roi.map((v) => String(Math.round(v * 100))) : DEFAULT_ROI_PCT;
+
 export default function Detection({ printers, selected }) {
   const s = printers.find((p) => p.serial === selected) ?? null;
   const d = s?.detection ?? null;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
+  // Held as strings while editing so a half-typed value doesn't fight the
+  // input; converted and validated only on Apply.
+  const [roiPct, setRoiPct] = useState(() => roiToPct(d?.roi));
+  const [roiError, setRoiError] = useState(null);
 
   const save = async (patch) => {
     setBusy(true);
@@ -26,6 +43,22 @@ export default function Detection({ printers, selected }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  // Validate here as well as server-side: the server clamps a bad ROI to "whole
+  // frame", which would look like the setting silently not taking.
+  const saveRoi = () => {
+    const nums = roiPct.map(Number);
+    if (nums.some((n) => !Number.isFinite(n))) {
+      return setRoiError("All four values must be numbers.");
+    }
+    const [x, y, w, h] = nums.map((n) => n / 100);
+    if (w <= 0 || h <= 0) return setRoiError("Width and height must be above 0.");
+    if (x < 0 || y < 0 || x + w > 1 || y + h > 1) {
+      return setRoiError("The region must fit inside the frame.");
+    }
+    setRoiError(null);
+    save({ roi: [x, y, w, h] });
   };
 
   if (!s) {
@@ -84,6 +117,35 @@ export default function Detection({ printers, selected }) {
                    defaultValue={d.conf}
                    onMouseUp={(e) => save({ conf: Number(e.target.value) })}
                    onTouchEnd={(e) => save({ conf: Number(e.target.value) })} />
+
+            <div className="detect-label">Detection region</div>
+            <p className="detect-help">
+              Run detection on the bed only. Everything outside the box is
+              ignored — on the A1's wide, low view the rest of the frame is the
+              room, and the model will happily find "failures" in furniture.
+              Values are percentages of the frame; the region is outlined in the
+              live view so you can tune it by eye.
+            </p>
+            <div className="detect-roi">
+              {ROI_FIELDS.map(({ key, label }, i) => (
+                <label key={key} className="detect-roi__field">
+                  <span>{label}</span>
+                  <input type="number" min="0" max="100" step="1" disabled={busy}
+                         value={roiPct[i]}
+                         onChange={(e) => setRoiPct(
+                           roiPct.map((v, j) => (j === i ? e.target.value : v)))} />
+                </label>
+              ))}
+            </div>
+            <div className="detect-roi__actions">
+              <button type="button" className="detect-seg__btn" disabled={busy}
+                      onClick={saveRoi}>Apply region</button>
+              <button type="button" className="detect-seg__btn" disabled={busy || !d.roi}
+                      onClick={() => { setRoiPct(DEFAULT_ROI_PCT); save({ roi: null }); }}>
+                Use whole frame
+              </button>
+              {roiError && <span className="detect-roi__error">{roiError}</span>}
+            </div>
 
             <div className="detect-label">Arm these classes</div>
             <div className="detect-classes">

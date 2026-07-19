@@ -87,6 +87,10 @@ class DetectionUpdate(BaseModel):
     conf: float | None = None
     armed_classes: list[str] | None = None
     detect_enabled: bool | None = None
+    # [x, y, w, h] fractions of the frame, or null to clear it. NOTE: null is a
+    # real value here ("use the whole frame"), so this field cannot use the
+    # drop-the-Nones convention the others do -- see put_detection.
+    roi: list[float] | None = None
 
 
 class ArmBody(BaseModel):
@@ -344,7 +348,14 @@ def create_app(registry, runs_dir: pathlib.Path,
                 raise HTTPException(400, f"unknown class(es): {', '.join(bad)}")
         if body.camera_source is not None and body.camera_source not in CAMERA_SOURCES:
             raise HTTPException(400, f"camera_source must be one of {CAMERA_SOURCES}")
+        if body.roi is not None and len(body.roi) != 4:
+            raise HTTPException(400, "roi must be [x, y, w, h] fractions")
         fields = {k: v for k, v in body.model_dump().items() if v is not None}
+        # roi only: an explicit null means "clear the ROI", which the filter
+        # above would have swallowed. Forward it only when the client actually
+        # sent the key, so an omitted roi still means "leave it alone".
+        if "roi" in body.model_fields_set:
+            fields["roi"] = body.roi
         if not registry.update_detection(serial, **fields):
             raise HTTPException(404, "unknown printer")
         # Config can be set on any printer, but a snapshot only exists for the

@@ -122,6 +122,82 @@ def detections_from_result(result, names: dict) -> list:
     return out
 
 
+# Colour of the ROI outline drawn on the served frame (BGR).
+ROI_COLOR = (0, 200, 255)
+
+
+def parse_roi(text):
+    """"x,y,w,h" as fractions of the frame -> (x, y, w, h), or None.
+
+    Fractions, not pixels, so the region survives a camera resolution change.
+    Anything malformed, degenerate, or out of bounds degrades to None ("use the
+    whole frame") -- a bad ROI must never crash the detector or, worse, silently
+    crop the print out of view.
+    """
+    if not text:
+        return None
+    parts = str(text).split(",")
+    if len(parts) != 4:
+        return None
+    try:
+        x, y, w, h = (float(p) for p in parts)
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    if x < 0 or y < 0 or x + w > 1 or y + h > 1:
+        return None
+    return (x, y, w, h)
+
+
+def crop_to_roi(frame, roi):
+    """frame, (x,y,w,h) fractions -> (crop, x0, y0) in pixels.
+
+    roi=None returns the frame untouched at origin (0, 0), so callers need no
+    special case. The crop is clamped to at least 1x1: an empty array would
+    raise inside cv2/YOLO rather than simply detecting nothing.
+    """
+    if roi is None:
+        return frame, 0, 0
+    fh, fw = frame.shape[:2]
+    x, y, w, h = roi
+    x0, y0 = int(x * fw), int(y * fh)
+    x1, y1 = min(fw, x0 + max(1, int(w * fw))), min(fh, y0 + max(1, int(h * fh)))
+    x0, y0 = min(x0, fw - 1), min(y0, fh - 1)
+    return frame[y0:y1, x0:x1], x0, y0
+
+
+def offset_detections(dets, x0: int, y0: int) -> list:
+    """Shift crop-relative boxes back into full-frame coordinates.
+
+    box is xywh with a CENTER point, so only the centre moves; width and height
+    are unchanged by a translation. Returns new dicts -- the caller's list is
+    not mutated.
+    """
+    if not x0 and not y0:
+        return dets
+    out = []
+    for d in dets:
+        b = d.get("box") or [0, 0, 0, 0]
+        out.append({**d, "box": [b[0] + x0, b[1] + y0, b[2], b[3]]})
+    return out
+
+
+def compose_frame(frame, annotated_crop, x0: int, y0: int, roi):
+    """Full frame with the annotated crop pasted back and the ROI outlined.
+
+    The operator keeps the whole view (so the ROI can be tuned by eye and
+    nothing is hidden), while the model only ever saw the crop.
+    """
+    if roi is None:
+        return annotated_crop
+    out = frame.copy()
+    ch, cw = annotated_crop.shape[:2]
+    out[y0:y0 + ch, x0:x0 + cw] = annotated_crop
+    cv2.rectangle(out, (x0, y0), (x0 + cw - 1, y0 + ch - 1), ROI_COLOR, 2)
+    return out
+
+
 def open_camera(index: int, width: int = 1280, height: int = 720):
     cap = cv2.VideoCapture(index)
     if not cap.isOpened():
@@ -297,7 +373,7 @@ def make_yolo_infer(weights, conf, imgsz, device):
 
 def detection_loop(grab, infer, out_dir, *, camera, conf, stop_event, fps=None,
                    interval_s=None, clock=time.time,
-                   max_read_failures=MAX_READ_FAILURES):
+                   max_read_failures=MAX_READ_FAILURES, roi=None):
     """Grab -> infer -> write, until stop_event is set.
 
     Cadence: interval_s seconds between captures (the primary knob); fps is the
@@ -335,7 +411,14 @@ def detection_loop(grab, infer, out_dir, *, camera, conf, stop_event, fps=None,
             stop_event.wait(READ_RETRY_S)
             continue
         failures = 0
-        detections, annotated = infer(frame)
+        # Infer on the ROI only: on the A1's wide, low, near-horizontal view
+        # the rest of the frame is the room, and the model happily finds
+        # "failures" in a laptop or a chair. Results are mapped back so the
+        # status and the served frame stay in full-frame coordinates.
+        crop, x0, y0 = crop_to_roi(frame, roi)
+        detections, annotated_crop = infer(crop)
+        detections = offset_detections(detections, x0, y0)
+        annotated = compose_frame(frame, annotated_crop, x0, y0, roi)
         dt = max(clock() - t0, 1e-6)
         _safe_write(write_frame, out_dir, annotated)
         _safe_write(write_status, out_dir, build_status(detections, ts=clock(),
@@ -365,9 +448,21 @@ def main() -> int:
     p.add_argument("--out", type=pathlib.Path, default=repo / "runs" / "_detect")
     p.add_argument("--interval", type=float, default=DEFAULT_INTERVAL_S,
                    help="seconds between captures (default: %(default)s)")
+    p.add_argument("--roi", default=None,
+                   help="bed region to run detection on, as fractions of the "
+                        "frame: x,y,w,h (e.g. 0.15,0.35,0.7,0.45). Everything "
+                        "outside is ignored, which removes background false "
+                        "positives. Default: the whole frame.")
     p.add_argument("--device", default="0" if torch.cuda.is_available() else "cpu")
     p.add_argument("--mock", action="store_true")
     a = p.parse_args()
+
+    roi = parse_roi(a.roi)
+    if a.roi and roi is None:
+        print(f"ignoring malformed --roi {a.roi!r}; using the whole frame",
+              file=sys.stderr)
+    if roi:
+        log.info("detecting on ROI x=%.3f y=%.3f w=%.3f h=%.3f", *roi)
 
     stop = threading.Event()
     if a.mock:
@@ -376,7 +471,7 @@ def main() -> int:
         infer = mock_infer
         try:
             detection_loop(grab, infer, a.out, camera=a.camera, conf=a.conf,
-                           interval_s=a.interval, stop_event=stop)
+                           interval_s=a.interval, stop_event=stop, roi=roi)
         except KeyboardInterrupt:
             pass
     else:
@@ -402,7 +497,7 @@ def main() -> int:
         infer = make_yolo_infer(a.weights, a.conf, a.imgsz, a.device)
         try:
             detection_loop(cam.grab, infer, a.out, camera=a.camera, conf=a.conf,
-                           interval_s=a.interval, stop_event=stop)
+                           interval_s=a.interval, stop_event=stop, roi=roi)
         except KeyboardInterrupt:
             pass
         finally:

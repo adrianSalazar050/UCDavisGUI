@@ -495,3 +495,16 @@ def test_mock_runner_reconcile_writes_status_and_is_idempotent(tmp_path):
         assert runner._active is False
     finally:
         runner.stop()                           # never leak a live writer thread on failure
+
+
+def test_build_argv_passes_the_roi_when_set(tmp_path):
+    sup, _ = supervisor(tmp_path, lambda: 0.0)
+    argv = sup.build_argv({**T2, "roi": [0.1, 0.4, 0.8, 0.5]})
+    assert "--roi" in argv
+    assert argv[argv.index("--roi") + 1] == "0.1,0.4,0.8,0.5"
+
+
+def test_build_argv_omits_the_roi_when_unset(tmp_path):
+    sup, _ = supervisor(tmp_path, lambda: 0.0)
+    assert "--roi" not in sup.build_argv({**T2, "roi": None})
+    assert "--roi" not in sup.build_argv(T2)          # key absent entirely

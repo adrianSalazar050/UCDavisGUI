@@ -29,6 +29,25 @@ DETECTION_CLASSES = ("blobs", "cracks", "over_extrusion", "spaghetti",
 CAMERA_SOURCES = ("a1", "webcam")
 
 
+def normalize_roi(value):
+    """Anything -> a valid [x, y, w, h] fraction list, or None.
+
+    Same rule as detect.parse_roi and deliberately so: a malformed ROI must
+    degrade to "whole frame" rather than crash the server or, worse, silently
+    crop the print out of view. Kept here (not imported from detect) so the
+    server never has to import cv2.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        x, y, w, h = (float(v) for v in value)
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > 1 or y + h > 1:
+        return None
+    return [x, y, w, h]
+
+
 @dataclasses.dataclass
 class PrinterConfig:
     """One registered printer. `name` falls back to the host."""
@@ -44,6 +63,11 @@ class PrinterConfig:
     armed_classes: list = dataclasses.field(
         default_factory=lambda: ["spaghetti"])
     detect_enabled: bool = False
+    # Bed region to run detection on, as [x, y, w, h] fractions of the frame,
+    # or None for the whole frame. Fractions so it survives a resolution
+    # change. On the A1's wide, low view the frame is mostly room, and the
+    # model finds "failures" in furniture -- this is what excludes it.
+    roi: list | None = None
 
     def __post_init__(self) -> None:
         self.serial = (self.serial or "").strip()
@@ -100,7 +124,7 @@ class PrinterConfig:
                    access_code=d["access_code"], name=name, capture=capture,
                    camera_source=camera_source, camera_index=camera_index,
                    conf=conf, armed_classes=armed_classes,
-                   detect_enabled=detect_enabled)
+                   detect_enabled=detect_enabled, roi=normalize_roi(d.get("roi")))
 
 
 class PrinterStore:

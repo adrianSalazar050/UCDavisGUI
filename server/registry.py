@@ -47,9 +47,14 @@ import threading
 from typing import Any, Callable
 
 from .sdcard import SdError
-from .store import CAMERA_SOURCES, DETECTION_CLASSES, PrinterConfig
+from .store import (CAMERA_SOURCES, DETECTION_CLASSES, PrinterConfig,
+                    normalize_roi)
 
 log = logging.getLogger("server.registry")
+
+# "argument not supplied", distinct from None. Needed for roi, where None is a
+# real value meaning "clear it" rather than "leave it alone".
+_UNSET = object()
 
 
 class DuplicateSerial(Exception):
@@ -311,7 +316,8 @@ class PrinterRegistry:
             return {"camera_source": cfg.camera_source,
                     "camera_index": cfg.camera_index, "conf": cfg.conf,
                     "armed_classes": list(cfg.armed_classes),
-                    "detect_enabled": cfg.detect_enabled}
+                    "detect_enabled": cfg.detect_enabled,
+                    "roi": list(cfg.roi) if cfg.roi else None}
 
     def detection_target(self):
         with self._lock:
@@ -319,11 +325,13 @@ class PrinterRegistry:
                 if cfg.capture and cfg.detect_enabled:
                     return {"serial": serial, "camera_source": cfg.camera_source,
                             "camera_index": cfg.camera_index, "conf": cfg.conf,
-                            "host": cfg.host, "access_code": cfg.access_code}
+                            "host": cfg.host, "access_code": cfg.access_code,
+                            "roi": list(cfg.roi) if cfg.roi else None}
         return None
 
     def update_detection(self, serial, *, camera_source=None, camera_index=None,
-                         conf=None, armed_classes=None, detect_enabled=None) -> bool:
+                         conf=None, armed_classes=None, detect_enabled=None,
+                         roi=_UNSET) -> bool:
         with self._lock:
             cfg = self._configs.get(serial)
             if cfg is None:
@@ -339,6 +347,11 @@ class PrinterRegistry:
                                      if c in DETECTION_CLASSES] or ["spaghetti"]
             if detect_enabled is not None:
                 cfg.detect_enabled = bool(detect_enabled)
+            if roi is not _UNSET:
+                # Sentinel, not None: None is a MEANINGFUL value here ("clear
+                # the ROI, use the whole frame"), so it cannot double as
+                # "leave unchanged" the way the other fields do.
+                cfg.roi = normalize_roi(roi)
         self._persist()
         return True
 

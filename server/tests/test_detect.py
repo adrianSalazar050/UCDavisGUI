@@ -401,3 +401,108 @@ def test_bambu_source_closes_socket_if_auth_send_fails():
     src = detect.BambuCameraSource("h", "C", connect=lambda host, t: sock)
     assert src.grab() is None
     assert sock.closed is True      # the just-opened socket was cleaned up
+
+
+# --------------------------------------------------------------------------
+# ROI cropping.
+#
+# The A1's built-in camera is a wide, low, near-horizontal view that includes
+# the whole room -- the detector fired "stringing 0.74" on a laptop edge in the
+# background. Cropping to the bed before inference removes that false-positive
+# surface and enlarges the print in frame, which also helps at this flat angle.
+#
+# ROI is stored as FRACTIONS of the frame so it survives a resolution change.
+# --------------------------------------------------------------------------
+
+def test_parse_roi_reads_four_fractions():
+    assert detect.parse_roi("0.1,0.4,0.8,0.5") == (0.1, 0.4, 0.8, 0.5)
+
+
+def test_parse_roi_rejects_junk_as_no_roi():
+    # A bad --roi must degrade to "whole frame", never crash the detector.
+    for bad in (None, "", "1,2", "a,b,c,d", "0.1,0.2,0.3", "0,0,0,0"):
+        assert detect.parse_roi(bad) is None, bad
+
+
+def test_parse_roi_rejects_out_of_range():
+    assert detect.parse_roi("-0.1,0,0.5,0.5") is None
+    assert detect.parse_roi("0.6,0,0.8,0.5") is None   # x+w > 1
+
+
+def test_crop_to_roi_returns_the_region_and_its_origin():
+    frame = np.zeros((100, 200, 3), np.uint8)
+    frame[40:90, 20:180] = 7                      # mark the expected region
+    crop, x0, y0 = detect.crop_to_roi(frame, (0.1, 0.4, 0.8, 0.5))
+    assert (x0, y0) == (20, 40)
+    assert crop.shape[:2] == (50, 160)
+    assert (crop == 7).all()
+
+
+def test_crop_to_roi_without_roi_is_the_whole_frame():
+    frame = np.zeros((100, 200, 3), np.uint8)
+    crop, x0, y0 = detect.crop_to_roi(frame, None)
+    assert (x0, y0) == (0, 0)
+    assert crop.shape == frame.shape
+
+
+def test_crop_to_roi_never_returns_an_empty_crop():
+    # A sub-pixel ROI on a small frame must still yield at least 1x1, or
+    # cv2/YOLO would raise on an empty array.
+    frame = np.zeros((10, 10, 3), np.uint8)
+    crop, _, _ = detect.crop_to_roi(frame, (0.0, 0.0, 0.01, 0.01))
+    assert crop.size > 0
+
+
+def test_offset_detections_maps_boxes_back_to_full_frame():
+    dets = [{"cls": "spaghetti", "conf": 0.9, "box": [10, 20, 30, 40]}]
+    out = detect.offset_detections(dets, 100, 200)
+    assert out[0]["box"] == [110, 220, 30, 40]     # center moves, size doesn't
+    assert out[0]["cls"] == "spaghetti"
+    assert dets[0]["box"] == [10, 20, 30, 40]      # input not mutated
+
+
+def test_offset_detections_is_a_noop_at_the_origin():
+    dets = [{"cls": "a", "conf": 0.5, "box": [1, 2, 3, 4]}]
+    assert detect.offset_detections(dets, 0, 0) == dets
+
+
+def test_detection_loop_infers_on_the_crop_and_reports_full_frame_boxes(tmp_path):
+    """The whole point: YOLO sees only the bed, but status.json/latest.jpg stay
+    in full-frame coordinates so the UI and the ROI overlay line up."""
+    frame = np.zeros((100, 200, 3), np.uint8)
+    stop = detect.threading.Event()
+    seen = {}
+
+    def infer(f):
+        seen["shape"] = f.shape           # what the model actually got
+        stop.set()
+        return ([{"cls": "spaghetti", "conf": 0.9, "box": [5, 5, 10, 10]}], f)
+
+    detect.detection_loop(lambda: frame, infer, tmp_path, camera=0,
+                          conf=0.25, fps=0, stop_event=stop,
+                          roi=(0.1, 0.4, 0.8, 0.5))
+
+    assert seen["shape"][:2] == (50, 160)          # inferred on the crop
+    status = json.loads((tmp_path / "status.json").read_text())
+    box = status["detections"][0]["box"]
+    assert box[0] == 5 + 20 and box[1] == 5 + 40   # reported in full frame
+
+
+def test_detection_loop_writes_a_full_frame_when_cropping(tmp_path):
+    # latest.jpg must stay the FULL view (annotated crop pasted back, ROI
+    # outlined) -- cropping is an inference optimisation, not a change to what
+    # the operator sees, and the overlay is how the ROI gets tuned by eye.
+    frame = np.zeros((100, 200, 3), np.uint8)
+    stop = detect.threading.Event()
+
+    def infer(f):
+        stop.set()
+        return ([], f)
+
+    detect.detection_loop(lambda: frame, infer, tmp_path, camera=0, conf=0.25,
+                          fps=0, stop_event=stop, roi=(0.1, 0.4, 0.8, 0.5))
+
+    written = cv2.imdecode(
+        np.frombuffer((tmp_path / "latest.jpg").read_bytes(), np.uint8),
+        cv2.IMREAD_COLOR)
+    assert written.shape[:2] == (100, 200)         # full frame, not the crop

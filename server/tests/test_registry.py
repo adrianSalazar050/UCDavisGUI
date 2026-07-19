@@ -322,7 +322,8 @@ def test_detection_target_requires_detect_enabled():
     r.update_detection("B", detect_enabled=True)
     assert r.detection_target() == {"serial": "B", "camera_source": "a1",
                                     "camera_index": 0, "conf": 0.25,
-                                    "host": "1.1.1.1", "access_code": "c"}
+                                    "host": "1.1.1.1", "access_code": "c",
+                                    "roi": None}
 
 
 def test_update_detection_persists_and_clamps():
@@ -506,3 +507,26 @@ def test_fetch_sd_file_never_needs_access_code_argument():
     import inspect
     params = inspect.signature(PrinterRegistry.fetch_sd_file).parameters
     assert "access_code" not in params
+
+
+def test_update_detection_sets_and_clears_the_roi():
+    # None is a MEANINGFUL value here ("whole frame"), so it must be
+    # distinguishable from "argument not supplied".
+    r = reg()
+    r.add(host="1.1.1.1", serial="B", access_code="c", capture=True)
+    r.update_detection("B", roi=[0.1, 0.4, 0.8, 0.5])
+    assert r.detection_config("B")["roi"] == [0.1, 0.4, 0.8, 0.5]
+
+    r.update_detection("B", conf=0.4)                 # roi not mentioned
+    assert r.detection_config("B")["roi"] == [0.1, 0.4, 0.8, 0.5]  # kept
+
+    r.update_detection("B", roi=None)                 # explicitly cleared
+    assert r.detection_config("B")["roi"] is None
+
+
+def test_update_detection_rejects_a_malformed_roi():
+    r = reg()
+    r.add(host="1.1.1.1", serial="B", access_code="c", capture=True)
+    for bad in ([0.1, 0.2], "nope", [0.5, 0, 0.8, 0.5], [-0.1, 0, 0.5, 0.5]):
+        r.update_detection("B", roi=bad)
+        assert r.detection_config("B")["roi"] is None, bad

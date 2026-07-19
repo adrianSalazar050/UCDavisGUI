@@ -182,6 +182,9 @@ class DetectorSupervisor:
             argv += ["--host", target["host"]]
         else:
             argv += ["--camera", str(target["camera_index"])]
+        roi = target.get("roi")
+        if roi:
+            argv += ["--roi", ",".join(str(v) for v in roi)]
         return argv
 
     def build_env(self, target):
