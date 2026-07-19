@@ -35,6 +35,66 @@ MQTT_PORT = 8883
 MQTT_USER = "bblp"
 
 
+# Where the printer looks for a file on its own microSD.
+#
+# VERIFIED on a real A1 mini (2026-07-19): `file:///sdcard/<filename>` was
+# accepted on the first attempt -- gcode_state went FAILED -> PREPARE and the
+# printer echoed the file back as subtask_name.
+#
+# Do NOT "fix" this to match the public references; both are wrong for the A1:
+#   * OpenBambuAPI mqtt.md documents "file:///mnt/sdcard"  (that is the X1)
+#   * davglass/bambu-cli sends           "ftp:///<path>"
+SD_URL_PREFIX = "file:///sdcard/"
+
+
+def build_project_file_command(sd_path: str, *, plate: int = 1,
+                               subtask_name: str | None = None,
+                               use_ams: bool = False,
+                               timelapse: bool = False,
+                               bed_leveling: bool = True,
+                               flow_cali: bool = False,
+                               vibration_cali: bool = True,
+                               layer_inspect: bool = False,
+                               sequence_id: str = "0") -> dict:
+    """Build the MQTT payload that starts a print from the microSD.
+
+    Pure -- no I/O -- so the payload can be asserted in tests without a
+    printer, which matters because a wrong field here fails *silently*: MQTT
+    has no ack and the printer simply ignores a malformed command.
+
+    `plate` picks which plate of a multi-plate .3mf to print (`param` becomes
+    Metadata/plate_N.gcode). Defaults are deliberately conservative: no AMS (we
+    cannot know one is attached), no timelapse, and calibration off except bed
+    leveling, which is the one worth the time on a bed-slinger.
+
+    Both `bed_leveling` and `bed_levelling` are emitted with the same value.
+    The public sources disagree on the spelling and the A1's preference is
+    unconfirmed; the firmware reads the key it knows and ignores the other, so
+    sending both removes the variable rather than betting on one.
+    """
+    path = sd_path.lstrip("/")
+    if subtask_name is None:
+        subtask_name = path.rsplit("/", 1)[-1].split(".")[0]
+    return {"print": {
+        "sequence_id": sequence_id,
+        "command": "project_file",
+        "param": f"Metadata/plate_{int(plate)}.gcode",
+        "url": SD_URL_PREFIX + path,
+        "subtask_name": subtask_name,
+        # Always "0" for a local (non-cloud) print.
+        "project_id": "0", "profile_id": "0", "task_id": "0", "subtask_id": "0",
+        "file": "", "md5": "", "bed_type": "auto",
+        "timelapse": bool(timelapse),
+        "bed_leveling": bool(bed_leveling),
+        "bed_levelling": bool(bed_leveling),   # see docstring
+        "flow_cali": bool(flow_cali),
+        "vibration_cali": bool(vibration_cali),
+        "layer_inspect": bool(layer_inspect),
+        "ams_mapping": "",
+        "use_ams": bool(use_ams),
+    }}
+
+
 def decode_hms(attr: int, code: int) -> str:
     """Bambu HMS codes are packed into two 32-bit ints.
 
@@ -190,9 +250,30 @@ class BambuLink:
         """Stop the running print. This is a Bambu *print command*, not
         G-code. Like send_gcode there is NO ack -- the caller must confirm the
         stop took by watching gcode_state (the AutoStopController does this and
-        re-sends once). UNVERIFIED against real A1 mini hardware."""
+        re-sends once).
+
+        VERIFIED on a real A1 mini (2026-07-19): sent during PREPARE, the
+        printer went PREPARE -> **FAILED**. A stopped print reports as FAILED,
+        not IDLE, which is why FAILED is in AutoStopController.TERMINAL.
+        """
         self._publish({"print": {"sequence_id": self._next_seq(),
                                  "command": "stop"}})
+
+    def start_print(self, sd_path: str, *, plate: int = 1, **options) -> None:
+        """Start printing a file already on the printer's microSD.
+
+        No upload: the queue's jobs are SD paths, so this only points the
+        printer at one. NO ack, same as every other command here -- the caller
+        confirms by watching gcode_state go PREPARE/RUNNING (server/main.py's
+        start route does exactly that before it dequeues the job).
+
+        See build_project_file_command for the payload and what is verified.
+        """
+        cmd = build_project_file_command(sd_path, plate=plate,
+                                         sequence_id=self._next_seq(),
+                                         **options)
+        log.info("start_print -> %s", cmd["print"]["url"])
+        self._publish(cmd)
 
     # ---------------- convenience views ----------------
 

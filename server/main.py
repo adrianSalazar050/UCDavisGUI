@@ -17,9 +17,33 @@ from pydantic import BaseModel
 
 from . import runs, sdcard, threemf
 from .detection import CLASSES  # the 6 valid armed classes
+from .printer import PrinterBusy
 from .registry import DuplicateSerial
 from .sdcard import SdError
 from .store import CAMERA_SOURCES
+
+# How long to wait for a started print to show up in gcode_state before
+# reporting it as not-started. The A1 goes FAILED/IDLE -> PREPARE within a
+# couple of seconds (measured on hardware); 8 s is slack for a busy printer.
+START_VERIFY_S = 8.0
+START_POLL_S = 0.25
+STARTED_STATES = ("PREPARE", "RUNNING", "SLICING")
+
+
+def verify_start(svc, *, timeout: float = START_VERIFY_S,
+                 poll: float = START_POLL_S, clock=time.monotonic,
+                 sleep=time.sleep) -> bool:
+    """Poll gcode_state until the printer reports a print starting.
+
+    Injectable clock/sleep so tests don't spend real seconds.
+    """
+    deadline = clock() + timeout
+    while clock() < deadline:
+        state = (svc.summary().get("gcode_state") or "").upper()
+        if state in STARTED_STATES:
+            return True
+        sleep(poll)
+    return False
 
 log = logging.getLogger("server.main")
 
@@ -228,6 +252,55 @@ def create_app(registry, runs_dir: pathlib.Path,
         _require_queue()
         queue.reorder(serial, body.ids)
         return {"jobs": queue.get(serial), "totals": queue.totals(serial)}
+
+    @app.post("/api/printers/{serial}/queue/{job_id}/start")
+    def start_queue_job(serial: str, job_id: str):
+        """Send the job to the printer and dequeue it only once the printer
+        confirms it actually started.
+
+        MQTT has no ack, so "published" is not "printing". We publish, then
+        watch gcode_state until it leaves idle (verify_start). Confirmed ->
+        drop the job, because it is now the running print and the live status
+        shows it. Not confirmed -> leave it queued and report that, so a
+        command the printer ignored never silently eats a job.
+
+        SYNC def on purpose: it blocks for up to START_VERIFY_S on the
+        threadpool rather than stalling the event loop.
+        """
+        _require_queue()
+        svc = registry.get(serial)
+        if svc is None:
+            raise HTTPException(404, "unknown printer")
+        jobs = queue.get(serial)
+        if not jobs:
+            raise HTTPException(404, "queue is empty")
+        if jobs[0].get("id") != job_id:
+            # Only the head starts. The client shows one button; a request for
+            # any other job means a stale page, and starting the wrong file is
+            # not a mistake worth being permissive about.
+            raise HTTPException(409, "only the first job in the queue can be "
+                                     "started; reorder it to the top first")
+        job = jobs[0]
+        try:
+            svc.start_print(job["sd_path"], plate=job.get("plate") or 1)
+        except PrinterBusy as e:
+            raise HTTPException(409, str(e))
+        except SdError as e:
+            raise HTTPException(502, str(e))
+
+        # Read the module globals here, not as verify_start's defaults: a
+        # default binds at def time and could not be overridden (tests would
+        # burn the full timeout, and it would be un-tunable at runtime).
+        started = verify_start(svc, timeout=START_VERIFY_S, poll=START_POLL_S)
+        if not started:
+            return {"started": False, "job": job,
+                    "detail": "the printer did not report a print starting; "
+                              "the job is still queued",
+                    "jobs": queue.get(serial),
+                    "totals": queue.totals(serial)}
+        queue.remove(serial, job_id)
+        return {"started": True, "job": job,
+                "jobs": queue.get(serial), "totals": queue.totals(serial)}
 
     @app.get("/api/frame/latest")
     def frame_latest():

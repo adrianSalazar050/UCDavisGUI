@@ -4,7 +4,13 @@ import { formatDuration, formatGrams } from "./format.js";
 // row's controls while any one mutation (remove/reorder) is in flight --
 // simpler than per-button state, and the table is small enough that a brief
 // blanket-disable is unnoticeable.
-export default function QueueTable({ jobs, busyId, onRemove, onMove }) {
+//
+// Only the FIRST row gets a Print button: the server refuses to start anything
+// but the head of the queue, so offering it elsewhere would just invite a 409.
+// Reorder with ↑↓ to choose what prints next. `canStart` is false whenever the
+// printer is disconnected or already printing.
+export default function QueueTable({ jobs, busyId, onRemove, onMove, onStart,
+                                     canStart, startBlockedReason }) {
   const busy = busyId != null;
   return (
     <table className="queue-table">
@@ -24,6 +30,16 @@ export default function QueueTable({ jobs, busyId, onRemove, onMove }) {
             <td className="queue-table__num">{formatGrams(job.grams)}</td>
             <td>
               <div className="queue-table__actions">
+                {i === 0 && (
+                  <button type="button" className="queue-table__start"
+                          disabled={busy || !canStart}
+                          title={canStart ? `Print ${job.name} now`
+                                          : startBlockedReason}
+                          aria-label={`Print ${job.name} now`}
+                          onClick={() => onStart(job)}>
+                    ▶ Print
+                  </button>
+                )}
                 <button type="button" className="queue-table__move"
                         disabled={busy || i === 0}
                         aria-label={`Move ${job.name} up`}

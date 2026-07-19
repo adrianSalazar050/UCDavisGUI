@@ -468,6 +468,36 @@ a { color: var(--primary); }
   outline-offset: 1px;
 }
 .queue-table__remove { color: var(--danger-text); }
+/* The one control here that commands the machine, so it is the one that reads
+   as a primary action rather than an icon button. */
+.queue-table__start {
+  height: var(--ctl-h-sm);
+  padding: 0 var(--sp-3);
+  margin-right: var(--sp-2);
+  border: 1px solid var(--accent, var(--line-strong));
+  border-radius: var(--r-control);
+  background: var(--accent, var(--surface-2));
+  color: var(--accent-text, var(--text));
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.queue-table__start:hover:not(:disabled) { filter: brightness(1.06); }
+.queue-table__start:disabled { opacity: 0.45; cursor: not-allowed; }
+.queue-table__start:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+.queue-notice {
+  margin: var(--sp-3) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent, var(--line-strong));
+  border-radius: var(--r-control);
+  background: var(--surface-2);
+  font-size: 13px;
+}
 .queue-totals {
   margin-top: var(--sp-4);
   padding-top: var(--sp-3);

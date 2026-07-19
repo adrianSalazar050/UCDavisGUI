@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { addQueueJob, fetchQueue, removeQueueJob, reorderQueue } from "../api/printer.js";
+import { addQueueJob, fetchQueue, removeQueueJob, reorderQueue, startQueueJob } from "../api/printer.js";
 import QueueTable from "../components/queue/QueueTable.jsx";
 import SdPicker from "../components/queue/SdPicker.jsx";
 import TotalsBar from "../components/queue/TotalsBar.jsx";
@@ -21,6 +21,20 @@ function QueuePanel({ printer }) {
   const [initialLoaded, setInitialLoaded] = useState(false);
   const [busyId, setBusyId] = useState(null); // job id mid remove/reorder
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [notice, setNotice] = useState(null);  // start outcome, cleared on retry
+
+  // Whether the printer can accept a print right now. Mirrors the server's
+  // guard (server/printer.py BUSY_STATES) so the button is disabled rather
+  // than offering an action that would come back 409.
+  const gstate = (printer.gcode_state || "").toUpperCase();
+  const online = printer.connection === "ok";
+  const printing = ["RUNNING", "PREPARE", "PAUSE", "PAUSED", "SLICING"].includes(gstate);
+  const canStart = online && !printing;
+  const startBlockedReason = !online
+    ? `${printer.name} is not connected`
+    : printing
+      ? `${printer.name} is already printing (${gstate})`
+      : "";
 
   // Same-printer race guard as SdFiles: only the most recently issued
   // request may write to state.
@@ -71,6 +85,33 @@ function QueuePanel({ printer }) {
     }
   };
 
+  // Starting moves real hardware, so it is the one queue action behind a
+  // confirm. `started: false` is a normal 200 (command sent, printer never
+  // reported starting) -- surfaced as a warning, and the job stays queued.
+  const handleStart = async (job) => {
+    if (!window.confirm(
+          `Start printing "${job.name}" on ${printer.name} now?\n\n` +
+          `Make sure the build plate is clear and the previous print has been removed.`)) {
+      return;
+    }
+    setBusyId(job.id);
+    setErr(null);
+    setNotice(null);
+    try {
+      const data = await startQueueJob(printer.serial, job.id);
+      setJobs(data.jobs);
+      setTotals(data.totals);
+      setNotice(data.started
+        ? `Printing "${job.name}".`
+        : `Sent "${job.name}", but the printer did not report a print starting — it is still queued.`);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusyId(null);
+      load();
+    }
+  };
+
   const handleMove = async (index, dir) => {
     const target = index + dir;
     if (target < 0 || target >= jobs.length) return;
@@ -103,6 +144,7 @@ function QueuePanel({ printer }) {
           <Button size="sm" onClick={load}>Retry</Button>
         </div>
       )}
+      {notice && <div className="queue-notice">{notice}</div>}
       {!initialLoaded ? (
         <div className="empty">Loading queue…</div>
       ) : jobs.length === 0 ? (
@@ -111,7 +153,9 @@ function QueuePanel({ printer }) {
         </div>
       ) : (
         <QueueTable jobs={jobs} busyId={busyId}
-                    onRemove={handleRemove} onMove={handleMove} />
+                    onRemove={handleRemove} onMove={handleMove}
+                    onStart={handleStart} canStart={canStart}
+                    startBlockedReason={startBlockedReason} />
       )}
       <TotalsBar totals={totals} count={jobs.length} />
     </Card>

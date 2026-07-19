@@ -705,3 +705,115 @@ def test_add_queue_job_under_real_mock_printer_end_to_end(tmp_path):
 
     got = c.get("/api/printers/MOCK1/queue")
     assert [j["id"] for j in got.json()["jobs"]] == [body["id"]]
+
+
+# ---------- POST /api/printers/{serial}/queue/{job_id}/start ----------
+#
+# The contract that matters: a job leaves the queue ONLY when the printer
+# confirms it started. MQTT has no ack, so "published" must never be mistaken
+# for "printing" -- otherwise a command the printer ignored silently eats a job.
+
+class StartableService(FakeService):
+    """FakeService that records start_print and can fake a printer which
+    accepts the command, refuses it, or accepts-then-never-starts."""
+
+    def __init__(self, serial="S1", gcode_state="IDLE", busy=None,
+                 starts=True):
+        super().__init__(serial=serial)
+        self._gcode_state = gcode_state
+        self._busy = busy
+        self._starts = starts
+        self.start_calls = []
+
+    def summary(self):
+        return {"serial": self.serial, "gcode_state": self._gcode_state,
+                "connection": "ok", "report_age_s": 1.0}
+
+    def start_print(self, sd_path, *, plate=1, **options):
+        from server.printer import PrinterBusy
+        self.start_calls.append((sd_path, plate))
+        if self._busy:
+            raise PrinterBusy(self._busy)
+        if self._starts:
+            self._gcode_state = "PREPARE"
+
+
+def _queued(q, serial="S1", job_id="J1", sd_path="/Benchy.gcode.3mf", **kw):
+    job = {"id": job_id, "sd_path": sd_path, "name": "Benchy.gcode.3mf",
+           "seconds": 900, "grams": 2.0, "source": "3mf"}
+    job.update(kw)
+    q.add(serial, job)
+    return job
+
+
+def _fast_verify(monkeypatch):
+    """Keep the verify loop from spending real seconds."""
+    import server.main as m
+    monkeypatch.setattr(m, "START_VERIFY_S", 0.05)
+    monkeypatch.setattr(m, "START_POLL_S", 0.0)
+
+
+def test_start_sends_the_job_and_dequeues_it(tmp_path, monkeypatch):
+    _fast_verify(monkeypatch)
+    q, svc = FakeQueue(), StartableService()
+    _queued(q)
+    c, _ = queue_client(tmp_path, q, registry=FakeRegistry([svc]))
+    r = c.post("/api/printers/S1/queue/J1/start")
+    assert r.status_code == 200
+    assert r.json()["started"] is True
+    assert svc.start_calls == [("/Benchy.gcode.3mf", 1)]
+    assert q.get("S1") == []                     # dequeued only after confirm
+
+
+def test_start_keeps_the_job_when_the_printer_never_starts(tmp_path, monkeypatch):
+    _fast_verify(monkeypatch)
+    q = FakeQueue()
+    svc = StartableService(starts=False)         # ignores the command silently
+    _queued(q)
+    c, _ = queue_client(tmp_path, q, registry=FakeRegistry([svc]))
+    r = c.post("/api/printers/S1/queue/J1/start")
+    assert r.status_code == 200
+    assert r.json()["started"] is False
+    assert len(q.get("S1")) == 1                 # NOT eaten
+    assert "still queued" in r.json()["detail"]
+
+
+def test_start_409s_when_the_printer_is_busy(tmp_path, monkeypatch):
+    _fast_verify(monkeypatch)
+    q = FakeQueue()
+    svc = StartableService(busy="S1 is already printing (RUNNING)")
+    _queued(q)
+    c, _ = queue_client(tmp_path, q, registry=FakeRegistry([svc]))
+    r = c.post("/api/printers/S1/queue/J1/start")
+    assert r.status_code == 409
+    assert "already printing" in r.json()["detail"]
+    assert len(q.get("S1")) == 1                 # kept
+
+
+def test_start_refuses_a_job_that_is_not_at_the_head(tmp_path, monkeypatch):
+    _fast_verify(monkeypatch)
+    q, svc = FakeQueue(), StartableService()
+    _queued(q, job_id="J1")
+    _queued(q, job_id="J2")
+    c, _ = queue_client(tmp_path, q, registry=FakeRegistry([svc]))
+    r = c.post("/api/printers/S1/queue/J2/start")
+    assert r.status_code == 409
+    assert svc.start_calls == []                 # nothing published
+    assert len(q.get("S1")) == 2
+
+
+def test_start_passes_the_plate_through(tmp_path, monkeypatch):
+    _fast_verify(monkeypatch)
+    q, svc = FakeQueue(), StartableService()
+    _queued(q, plate=3)
+    c, _ = queue_client(tmp_path, q, registry=FakeRegistry([svc]))
+    c.post("/api/printers/S1/queue/J1/start")
+    assert svc.start_calls == [("/Benchy.gcode.3mf", 3)]
+
+
+def test_start_404s_on_unknown_printer_and_empty_queue(tmp_path, monkeypatch):
+    _fast_verify(monkeypatch)
+    q = FakeQueue()
+    c, _ = queue_client(tmp_path, q, registry=FakeRegistry([StartableService()]))
+    assert c.post("/api/printers/NOPE/queue/J1/start").status_code == 404
+    assert c.post("/api/printers/S1/queue/J1/start").status_code == 404

@@ -109,6 +109,18 @@ export async function fetchLatestFrame() {
   }
 }
 
+// Send the first queued job to the printer. Resolves to
+// { started, job, detail?, jobs, totals } — note `started: false` is a normal
+// 200, not an error: it means the command went out but the printer never
+// reported a print starting, and the job is still queued.
+export async function startQueueJob(serial, jobId) {
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/queue/${encodeURIComponent(jobId)}/start`,
+    { method: "POST" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 // Update detection config for a printer. Body may include any of:
 // { camera_source, camera_index, conf, armed_classes, detect_enabled }.
 export async function updateDetection(serial, body) {

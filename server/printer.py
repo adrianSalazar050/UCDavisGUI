@@ -38,6 +38,17 @@ log = logging.getLogger("server.printer")
 STALE_S = 15.0   # connected but no report for this long -> "stale"
 RETRY_S = 10.0   # MQTT reconnect attempt interval
 
+# gcode_state values that mean "there is already a print on this machine".
+# Starting another would be ignored at best; refuse instead of publishing
+# blind into silence. A *stopped* print reports FAILED (verified on hardware),
+# and FINISH/IDLE are likewise free -- none of those are busy.
+BUSY_STATES = ("RUNNING", "PREPARE", "PAUSE", "PAUSED", "SLICING")
+
+
+class PrinterBusy(RuntimeError):
+    """Refused a command because the printer is disconnected or already
+    printing. The API layer maps this to 409."""
+
 SUMMARY_FIELDS = (
     "gcode_state", "layer_num", "total_layer_num", "mc_percent",
     "mc_remaining_time", "nozzle_temper", "nozzle_target_temper",
@@ -230,6 +241,20 @@ class PrinterService:
         confirm via gcode_state. See BambuLink.stop_print."""
         self.link.stop_print()
 
+    def start_print(self, sd_path: str, *, plate: int = 1, **options) -> None:
+        """Start an SD-card file. Guards first, because MQTT has no ack: if we
+        published blind into a disconnected link or on top of a running print,
+        the caller would get silence and assume success.
+
+        Raises PrinterBusy so the API layer can turn it into a 409.
+        """
+        if not self.link.connected.is_set():
+            raise PrinterBusy(f"{self.name} is not connected")
+        gstate = (self._snapshot.get("gcode_state") or "").upper()
+        if gstate in BUSY_STATES:
+            raise PrinterBusy(f"{self.name} is already printing ({gstate})")
+        self.link.start_print(sd_path, plate=plate, **options)
+
 
 class MockPrinter:
     """Endless fake print for developing the GUI with no hardware.
@@ -291,6 +316,20 @@ class MockPrinter:
 
     def stop_print(self) -> None:
         self._touch({"gcode_state": "FAILED"})
+
+    def start_print(self, sd_path: str, *, plate: int = 1, **options) -> None:
+        """Same guards and the same observable transition as the real service,
+        so --mock exercises the queue's start -> verify -> dequeue path end to
+        end. Goes straight to RUNNING; the real printer passes through PREPARE
+        first, and the API's verify accepts either."""
+        if self.mode == "offline":
+            raise PrinterBusy(f"{self.name} is not connected")
+        gstate = (self.state.get("gcode_state") or "").upper()
+        if gstate in BUSY_STATES:
+            raise PrinterBusy(f"{self.name} is already printing ({gstate})")
+        self._touch({"gcode_state": "RUNNING", "layer_num": 0,
+                     "mc_percent": 0,
+                     "subtask_name": sd_path.rsplit("/", 1)[-1].split(".")[0]})
 
     def list_files(self, path: str = "/") -> list[dict]:
         target = sdcard.normalize_path(path)  # raises SdError on traversal
