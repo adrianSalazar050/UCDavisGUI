@@ -126,10 +126,15 @@ The one place that speaks the printer protocol.
 - `deep_merge(base, patch)` — the load-bearing one. Reports are partial; lists
   (`hms`, `ams.tray`) are replaced wholesale, dicts merged recursively.
 - `push_all()` — sends `pushall` once on connect to get a full state snapshot.
-- `send_gcode(line)` / `stop_print()` — fire-and-forget. **There is no ack.**
-  `stop_print()` sends the Bambu print command `{"print": {"command": "stop"}}`,
-  not G-code. Its docstring notes it is still unverified against real A1-mini
-  hardware.
+- `send_gcode(line)` / `stop_print()` / `start_print(sd_path, plate=)` —
+  fire-and-forget. **There is no ack**, so every caller confirms by watching
+  `gcode_state`. `stop_print()` sends the Bambu print command
+  `{"print": {"command": "stop"}}`, not G-code; **verified on hardware
+  2026-07-19** — sent during `PREPARE`, the printer went `PREPARE → FAILED`, so
+  a stopped print reports as FAILED (which is why `AutoStopController.TERMINAL`
+  includes it). `start_print` is built by `build_project_file_command` — see
+  §5.3 for the verified URL scheme and the two public references that are wrong
+  for this printer.
 - `decode_hms(attr, code)` — unpacks two 32-bit ints into the
   `AAAA_BBBB_CCCC_DDDD` form the Bambu wiki lookup expects.
 - `summary()` — a convenience view (the server uses its own `build_summary`).
