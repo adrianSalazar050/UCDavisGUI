@@ -54,6 +54,30 @@ from detect import BambuCameraSource, WebcamSource  # noqa: E402
 WINDOW = "A1 dataset collector - space=now  c=clean  s=spaghetti  q=quit"
 LABELS = {ord("c"): "clean", ord("s"): "spaghetti"}
 
+PRINTERS_FILE = pathlib.Path(__file__).resolve().parent / "printers.json"
+
+
+def access_code_from_printers_json(host: str, path=PRINTERS_FILE):
+    """The registered access code for `host`, or None.
+
+    printers.json already holds it -- making the operator re-supply it via an
+    env var or a prompt is redundant, and every extra input step is another way
+    for the tool to do nothing at all. Tolerant by design: any read/parse
+    problem just means "not found", and the caller falls back.
+    """
+    try:
+        import json
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    entries = raw if isinstance(raw, list) else raw.get("printers", [])
+    if not isinstance(entries, list):
+        return None
+    for e in entries:
+        if isinstance(e, dict) and e.get("host") == host and e.get("access_code"):
+            return str(e["access_code"])
+    return None
+
 
 class Grabber:
     """Pulls frames on a background thread so the countdown stays smooth.
@@ -163,22 +187,29 @@ def main() -> int:
         if not a.host:
             print("--source a1 requires --host", file=sys.stderr)
             return 1
+        # Env var, then printers.json, then ask. Three chances to succeed
+        # without the operator having to do anything, because every input step
+        # is another way for this to silently exit and look broken.
         code = os.environ.get("BAMBU_ACCESS_CODE")
-        if not code and sys.stdin.isatty():
-            # Ask rather than exit. This is an interactive tool run while
-            # standing at the printer, and the env var is easy to get wrong --
-            # `export` is bash; PowerShell needs $env:NAME = "...". Prompting
-            # sidesteps the whole class of problem. getpass keeps it off screen
-            # and out of shell history.
-            import getpass
-            code = getpass.getpass("LAN access code (not echoed): ").strip()
+        where = "BAMBU_ACCESS_CODE"
         if not code:
-            print("no access code. Either set it first:\n"
-                  '  PowerShell:  $env:BAMBU_ACCESS_CODE = "12345678"\n'
-                  "  bash:        export BAMBU_ACCESS_CODE=12345678\n"
-                  "or run this from a terminal so it can prompt you.",
+            code = access_code_from_printers_json(a.host)
+            where = "printers.json"
+        if not code and sys.stdin.isatty():
+            import getpass   # off screen, out of shell history
+            code = getpass.getpass("LAN access code (not echoed): ").strip()
+            where = "prompt"
+        if not code:
+            print(f"No access code for {a.host}.\n"
+                  f"  Looked in: BAMBU_ACCESS_CODE, {PRINTERS_FILE}\n"
+                  f"  Add the printer in the dashboard, or set it:\n"
+                  f'    PowerShell:  $env:BAMBU_ACCESS_CODE = "12345678"\n'
+                  f"    bash:        export BAMBU_ACCESS_CODE=12345678",
                   file=sys.stderr)
             return 1
+        print(f"access code: from {where}")
+        print(f"connecting to {a.host} ... (first frame takes a few seconds)",
+              flush=True)
         source = BambuCameraSource(a.host, code)
     else:
         source = WebcamSource(a.camera)
