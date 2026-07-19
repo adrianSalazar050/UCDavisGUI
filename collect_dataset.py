@@ -128,6 +128,17 @@ def overlay(frame, *, remaining, label, saved, flash):
     cv2.putText(view, f"saved: {saved}", (int(520 * scale), int(80 * scale)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9 * scale, (200, 200, 200),
                 max(1, int(2 * scale)))
+
+    # Key hints on the frame itself. cv2 reads keys through the WINDOW, so they
+    # do nothing unless this window has focus -- which is not discoverable, and
+    # is the first thing anyone gets wrong. Say so on screen.
+    foot = int(52 * scale)
+    cv2.rectangle(view, (0, h - foot), (w, h), (0, 0, 0), -1)
+    cv2.putText(view, "click this window first   |   c = clean    "
+                      "s = spaghetti    space = shoot now    q = quit",
+                (int(16 * scale), h - int(18 * scale)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.62 * scale, (255, 255, 255),
+                max(1, int(2 * scale)))
     return view
 
 
