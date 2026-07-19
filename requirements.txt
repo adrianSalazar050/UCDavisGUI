@@ -5,6 +5,11 @@ numpy>=1.26
 fastapi>=0.110
 uvicorn[standard]>=0.29
 
+# training (failure-detection classifier)
+# torch/torchvision need a CUDA build for GPU training:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+ultralytics>=8.4
+
 # tests
 pytest>=8.0
 httpx>=0.27
