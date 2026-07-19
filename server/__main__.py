@@ -13,7 +13,8 @@ import signal
 
 import uvicorn
 
-from .detection import DetectionCoordinator, DetectorSupervisor, MockDetectorRunner
+from .detection import (DEFAULT_INTERVAL_S, DetectionCoordinator,
+                        DetectorSupervisor, MockDetectorRunner)
 from .main import create_app
 from .printer import MockPrinter, PrinterService
 from .queue import MemoryQueueStore, PrintQueue, QueueStore
@@ -75,6 +76,9 @@ def main() -> int:
                    help="capture output dir (default runs/, or runs-mock/ "
                         "with --mock)")
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--detect-interval", type=float, default=DEFAULT_INTERVAL_S,
+                   help="seconds between detector captures (default: "
+                        "%(default)s)")
     a = p.parse_args()
 
     logging.basicConfig(
@@ -103,9 +107,13 @@ def main() -> int:
     detect_out = runs_dir / "_detect"
     weights = pathlib.Path(__file__).resolve().parent.parent / "runs" / "train" \
         / "failure_detector" / "weights" / "best.pt"
+    # One interval drives both halves: the supervisor tells detect.py how often
+    # to capture, and the coordinator sizes its staleness window to match. Wiring
+    # them from the same value keeps a healthy detector from ever reading as down.
     runner = MockDetectorRunner(detect_out) if a.mock \
-        else DetectorSupervisor(detect_out, weights)
-    coordinator = DetectionCoordinator(registry, runs_dir, runner)
+        else DetectorSupervisor(detect_out, weights, interval_s=a.detect_interval)
+    coordinator = DetectionCoordinator(registry, runs_dir, runner,
+                                       interval_s=a.detect_interval)
 
     # --mock uses an in-memory queue store so the seeded fake printers' jobs
     # never land in the user's real queues.json (mirrors printers.json's

@@ -118,17 +118,146 @@ def test_detection_loop_writes_status_and_frame(tmp_path):
 
 
 def test_detection_loop_records_camera_read_failure(tmp_path):
+    # A camera that NEVER returns a frame is genuinely dead: after
+    # MAX_READ_FAILURES consecutive misses the loop gives up and says so.
     stop = detect.threading.Event()
 
-    def grab():          # a dead camera returns None
-        stop.set()
+    def grab():
         return None
 
     detect.detection_loop(grab, lambda f: ([], f), tmp_path, camera=3,
-                          conf=0.25, fps=0, stop_event=stop)
+                          conf=0.25, fps=0, stop_event=stop,
+                          max_read_failures=3)
     status = json.loads((tmp_path / "status.json").read_text())
     assert status["error"] is not None
     assert status["detections"] == []
+
+
+def test_detection_loop_survives_a_transient_read_failure(tmp_path):
+    # THE BUG: one dropped USB frame used to end the loop, exit the process and
+    # make the supervisor respawn it -- releasing and reopening the device every
+    # few seconds (the "camera connects/disconnects continuously" symptom).
+    # A single miss must be ridden out, not treated as a dead camera.
+    seq = [None, np.zeros((16, 16, 3), np.uint8), None,
+           np.zeros((16, 16, 3), np.uint8)]
+    it = iter(seq)
+    stop = detect.threading.Event()
+    infers = {"n": 0}
+
+    def grab():
+        return next(it, None)
+
+    def infer(frame):
+        infers["n"] += 1
+        if infers["n"] >= 2:
+            stop.set()
+        return ([], frame)
+
+    detect.detection_loop(grab, infer, tmp_path, camera=0, conf=0.25, fps=0,
+                          stop_event=stop, max_read_failures=3)
+
+    assert infers["n"] == 2          # kept going across both dropped frames
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["error"] is None   # never declared the camera dead
+
+
+def test_detection_loop_resets_failure_count_on_a_good_frame(tmp_path):
+    # 2 misses, a good frame, then 2 more misses must NOT trip a 3-miss budget.
+    seq = [None, None, np.zeros((16, 16, 3), np.uint8), None, None,
+           np.zeros((16, 16, 3), np.uint8)]
+    it = iter(seq)
+    stop = detect.threading.Event()
+    infers = {"n": 0}
+
+    def infer(frame):
+        infers["n"] += 1
+        if infers["n"] >= 2:
+            stop.set()
+        return ([], frame)
+
+    detect.detection_loop(lambda: next(it, None), infer, tmp_path, camera=0,
+                          conf=0.25, fps=0, stop_event=stop,
+                          max_read_failures=3)
+
+    assert infers["n"] == 2
+    assert json.loads((tmp_path / "status.json").read_text())["error"] is None
+
+
+def test_detection_loop_interval_sets_the_capture_period(tmp_path):
+    # --interval is the primary cadence knob: 5 s between captures.
+    waits = []
+    stop = detect.threading.Event()
+    ticks = {"t": 0.0}
+
+    class Ev:                      # stand-in Event recording the wait it is given
+        def is_set(self_):
+            return stop.is_set()
+        def wait(self_, s):
+            waits.append(s)
+            return stop.wait(0)
+
+    def infer(frame):
+        stop.set()
+        return ([], frame)
+
+    detect.detection_loop(lambda: np.zeros((8, 8, 3), np.uint8), infer, tmp_path,
+                          camera=0, conf=0.25, fps=None, interval_s=5.0,
+                          stop_event=Ev(), clock=lambda: ticks["t"])
+
+    assert waits == [5.0]          # full interval, since the tick took ~0 s
+
+
+class FakeCap:
+    """Minimal cv2.VideoCapture stand-in: `reads` is a list of ok flags."""
+
+    def __init__(self, reads):
+        self._reads = list(reads)
+        self.released = False
+
+    def read(self):
+        ok = self._reads.pop(0) if self._reads else False
+        return (ok, np.zeros((8, 8, 3), np.uint8) if ok else None)
+
+    def release(self):
+        self.released = True
+
+
+def test_webcam_source_retries_a_read_before_reopening():
+    # A dropped frame is recovered by simply reading again -- reopening the
+    # device (the expensive, user-visible disconnect) is a LAST resort.
+    caps = [FakeCap([True, False,   # flush, failed read   -> attempt 1
+                     True, True])]  # flush, good read     -> attempt 2
+    opens = []
+
+    def open_fn(index, w, h):
+        opens.append(index)
+        return caps[len(opens) - 1]
+
+    src = detect.WebcamSource(0, open_fn=open_fn)
+    assert src.grab() is not None
+    assert len(opens) == 1          # never reopened the device
+
+
+def test_webcam_source_reopens_after_a_persistent_read_failure():
+    caps = [FakeCap([True, False, True, False]),   # both attempts fail
+            FakeCap([True, True])]                 # reopened device works
+    opens = []
+
+    def open_fn(index, w, h):
+        opens.append(index)
+        return caps[len(opens) - 1]
+
+    src = detect.WebcamSource(0, open_fn=open_fn)
+    assert src.grab() is not None
+    assert len(opens) == 2          # exactly one reopen
+    assert caps[0].released is True  # old handle freed before reopening
+
+
+def test_webcam_source_returns_none_when_the_device_is_gone():
+    def open_fn(index, w, h):
+        raise RuntimeError(f"cannot open camera index {index}")
+
+    assert detect.WebcamSource(0, open_fn=open_fn).grab() is None
 
 
 def test_detection_loop_survives_a_transient_write_error(monkeypatch, tmp_path):

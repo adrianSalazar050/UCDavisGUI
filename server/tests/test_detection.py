@@ -178,14 +178,16 @@ def test_seconds_to_stop_counts_down():
     assert c.snapshot()["seconds_to_stop"] == 6.0
 
 
-from server.detection import DetectorSupervisor
+from server.detection import DEFAULT_INTERVAL_S, DetectionCoordinator, DetectorSupervisor
 
 
 class FakeProc:
     def __init__(self, argv, env=None):
         self.argv = argv; self.env = env; self._alive = True; self.terminated = False
+        self.waited = None
     def poll(self): return None if self._alive else 1
     def terminate(self): self.terminated = True; self._alive = False
+    def wait(self, timeout=None): self.waited = timeout; return 1
     def die(self): self._alive = False
 
 
@@ -272,6 +274,35 @@ def test_build_argv_webcam_has_camera(tmp_path):
     assert "--source" in argv and "webcam" in argv
     assert "--camera" in argv and "2" in argv
     assert "--host" not in argv
+
+
+def test_build_argv_passes_the_capture_interval(tmp_path):
+    # The cadence knob the detector actually honours: one frame every N seconds.
+    sup, _ = supervisor(tmp_path, lambda: 0.0)
+    argv = sup.build_argv(T1)
+    assert "--interval" in argv
+    assert argv[argv.index("--interval") + 1] == str(DEFAULT_INTERVAL_S)
+
+
+def test_stop_waits_for_the_process_to_release_the_camera(tmp_path):
+    # terminate() is asynchronous on Windows. Respawning before the old process
+    # has actually exited means the new one finds the device still held and dies
+    # with "cannot open camera index N" -- a respawn loop that looks exactly like
+    # the camera connecting and disconnecting over and over.
+    sup, spawned = supervisor(tmp_path, lambda: 0.0)
+    sup.reconcile(T1)
+    sup.reconcile(T2)
+    assert spawned[0].terminated is True
+    assert spawned[0].waited is not None      # reaped before the new spawn
+
+
+def test_stale_window_accommodates_the_capture_interval(tmp_path):
+    # A 5 s capture interval rewrites status.json only every 5 s. A 3 s stale
+    # window would mark a perfectly healthy detector "down" between every frame
+    # -- and feed [] to the controller, silently disabling auto-stop.
+    co = DetectionCoordinator(FakeReg(None), tmp_path, FakeRunner(),
+                              interval_s=5.0)
+    assert co.reader.stale_after > 5.0
 
 
 def test_build_env_carries_code_for_a1_only(tmp_path):

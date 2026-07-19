@@ -157,7 +157,7 @@ class DetectorSupervisor:
 
     def __init__(self, out_dir, weights, *, python=sys.executable,
                  script=None, spawn=subprocess.Popen, clock=time.time,
-                 backoff_s: float = 5.0, fps: float = 4.0):
+                 backoff_s: float = 5.0, interval_s: float = None):
         self._out_dir = pathlib.Path(out_dir)
         self._weights = weights
         self._python = python
@@ -166,7 +166,8 @@ class DetectorSupervisor:
         self._spawn_fn = spawn
         self._clock = clock
         self._backoff_s = backoff_s
-        self._fps = fps
+        self._interval_s = (DEFAULT_INTERVAL_S if interval_s is None
+                            else interval_s)
         self._target = None
         self._proc = None
         self._last_spawn = 0.0
@@ -175,7 +176,8 @@ class DetectorSupervisor:
         # NB: never the access code -- that goes in build_env for a1.
         argv = [self._python, self._script, "--source", target["camera_source"],
                 "--conf", str(target["conf"]), "--weights", str(self._weights),
-                "--out", str(self._out_dir), "--fps", str(self._fps)]
+                "--out", str(self._out_dir),
+                "--interval", str(self._interval_s)]
         if target["camera_source"] == "a1":
             argv += ["--host", target["host"]]
         else:
@@ -200,7 +202,13 @@ class DetectorSupervisor:
         if self._proc is not None:
             try:
                 self._proc.terminate()
-            except Exception as e:  # noqa: BLE001
+                # terminate() only REQUESTS the exit. Until the process is
+                # actually gone it still holds the USB camera, so a respawn that
+                # does not wait finds the device busy, dies with "cannot open
+                # camera index N", and gets respawned again -- a flapping loop
+                # that looks like the camera reconnecting over and over.
+                self._proc.wait(timeout=TERMINATE_TIMEOUT_S)
+            except Exception as e:  # noqa: BLE001 - incl. TimeoutExpired
                 log.warning("detector terminate failed: %s", e)
             self._proc = None
 
@@ -226,6 +234,21 @@ class DetectorSupervisor:
 DETECT_SUBDIR = "_detect"
 TICK_S = 0.5
 
+# Seconds between detector captures. Kept in step with detect.DEFAULT_INTERVAL_S
+# but defined here so importing the server never pulls in cv2/torch.
+DEFAULT_INTERVAL_S = 5.0
+
+# How long to wait for a terminated detector to actually exit and release the
+# camera before giving up on it.
+TERMINATE_TIMEOUT_S = 5.0
+
+# status.json is only rewritten once per capture, so the freshness window has to
+# span more than one interval or a healthy detector reads as "down" between
+# every frame -- which would feed [] to the controller and silently disable
+# auto-stop. Two missed captures plus a margin.
+STALE_INTERVALS = 2.5
+MIN_STALE_S = 3.0
+
 
 class DetectionCoordinator:
     """Background thread: reconcile the detector, read status, run the
@@ -233,11 +256,14 @@ class DetectionCoordinator:
     """
 
     def __init__(self, registry, runs_dir, runner, *, tick_s: float = TICK_S,
-                 controller_factory=AutoStopController):
+                 controller_factory=AutoStopController,
+                 interval_s: float = DEFAULT_INTERVAL_S):
         self.registry = registry
         self.out_dir = pathlib.Path(runs_dir) / DETECT_SUBDIR
         self.runner = runner
-        self.reader = StatusReader(self.out_dir)
+        self.reader = StatusReader(
+            self.out_dir,
+            stale_after=max(MIN_STALE_S, interval_s * STALE_INTERVALS))
         self._last_status = self.reader._down()
         self._factory = controller_factory
         self._controllers = {}

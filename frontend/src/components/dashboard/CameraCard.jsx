@@ -2,12 +2,19 @@ import { useEffect, useState } from "react";
 import { fetchLatestFrame, fetchDetectionFrame } from "../../api/printer.js";
 import Card from "../ui/Card.jsx";
 
-const POLL_MS = 2000;
+// Matches the detector's capture interval (detect.py --interval, 5 s): polling
+// faster than the camera captures just re-fetches a frame we already have.
+const POLL_MS = 5000;
 
 // When `live` (a detector is running for `serial`), poll the annotated detection
 // frame; otherwise fall back to the capture layer frame. Both return an object
 // URL (or null), so a missing frame is a clean placeholder — never a broken
 // <img> — and every URL is revoked exactly once.
+//
+// A poll that comes back empty (detector mid-restart, a write we raced, a blip)
+// KEEPS the frame already on screen rather than blanking to the placeholder: the
+// last picture stays up until a new one actually replaces it. The placeholder is
+// therefore only ever seen before the first successful frame.
 export default function CameraCard({ serial = null, live = false }) {
   const [frame, setFrame] = useState(null);
 
@@ -19,15 +26,20 @@ export default function CameraCard({ serial = null, live = false }) {
       const f = live && serial
         ? await fetchDetectionFrame(serial)
         : await fetchLatestFrame();
-      if (!alive) {
+      if (!alive || !f) {
+        // Unmounted, or nothing new. Revoke only the URL we are discarding —
+        // never `currentUrl`, which is still the <img>'s source.
         if (f) URL.revokeObjectURL(f.url);
         return;
       }
       if (currentUrl) URL.revokeObjectURL(currentUrl);
-      currentUrl = f ? f.url : null;
-      setFrame(f); // null -> placeholder
+      currentUrl = f.url;
+      setFrame(f);
     };
 
+    // Switching printer/source: drop the previous printer's picture rather than
+    // leaving a stale frame captioned as if it belonged to the new one.
+    setFrame(null);
     tick();
     const id = setInterval(tick, POLL_MS);
     return () => {

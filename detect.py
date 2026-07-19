@@ -33,6 +33,18 @@ CAMERA_PORT = 6000
 REPLACE_RETRIES = 5
 REPLACE_RETRY_S = 0.05
 
+# Seconds between captures. One frame every 5 s is plenty for spotting a print
+# failure (spaghetti takes tens of seconds to develop) and it keeps USB
+# bandwidth and GPU load near zero.
+DEFAULT_INTERVAL_S = 5.0
+
+# A USB webcam drops the occasional frame -- bandwidth contention, an
+# auto-exposure re-lock, a driver hiccup while YOLO holds the CPU. That is
+# NORMAL and must not be mistaken for an unplugged camera: give up only after
+# this many consecutive misses, and retry quickly in between.
+MAX_READ_FAILURES = 3
+READ_RETRY_S = 0.5
+
 
 def _atomic_write_bytes(path: pathlib.Path, data: bytes) -> None:
     """temp + os.replace in the same dir -> a reader never sees a half file
@@ -118,6 +130,63 @@ def open_camera(index: int, width: int = 1280, height: int = 720):
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # always a current frame, not a stale one
     return cap
+
+
+class WebcamSource:
+    """Reads frames from a USB webcam, recovering from a dropped frame in
+    process instead of letting one bad read kill the detector.
+
+    Same contract as BambuCameraSource.grab(): a frame, or None only when the
+    device is genuinely gone. Recovery is deliberately staged cheapest-first --
+    read again, and only if that also fails release and reopen the device.
+    Reopening is what the user SEES (Windows plays the USB chime, the webcam LED
+    blinks), so it must be a last resort, never the routine path.
+    """
+
+    def __init__(self, index: int, *, width: int = 1280, height: int = 720,
+                 open_fn=None):
+        self.index = index
+        self._width = width
+        self._height = height
+        self._open_fn = open_fn or open_camera
+        self._cap = None
+
+    def _open(self) -> None:
+        self._close()
+        self._cap = self._open_fn(self.index, self._width, self._height)
+
+    def _read(self):
+        self._cap.read()                 # flush one stale buffered frame
+        ok, frame = self._cap.read()
+        if not ok or frame is None:
+            raise ConnectionError("camera read returned no frame")
+        return frame
+
+    def grab(self):
+        # 1: plain read. 2: read again (rides out a single dropped frame).
+        # 3: read from a freshly reopened device.
+        for attempt in (1, 2, 3):
+            try:
+                if self._cap is None:
+                    self._open()
+                return self._read()
+            except (OSError, ConnectionError, RuntimeError, cv2.error) as e:
+                log.warning("webcam %d grab failed (attempt %d): %s",
+                            self.index, attempt, e)
+                if attempt >= 2:
+                    self._close()        # force a reopen on the next attempt
+        return None
+
+    def _close(self) -> None:
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception as e:  # noqa: BLE001 - release must never raise out
+                log.warning("webcam release failed: %s", e)
+            self._cap = None
+
+    def close(self) -> None:
+        self._close()
 
 
 def _bambu_auth_packet(access_code: str) -> bytes:
@@ -226,20 +295,46 @@ def make_yolo_infer(weights, conf, imgsz, device):
     return infer
 
 
-def detection_loop(grab, infer, out_dir, *, camera, conf, fps, stop_event,
-                   clock=time.time):
-    """Grab -> infer -> write, until stop_event is set. A None grab (dead
-    camera) writes an error status and stops. fps<=0 disables throttling
-    (tests)."""
-    period = (1.0 / fps) if fps and fps > 0 else 0.0
+def detection_loop(grab, infer, out_dir, *, camera, conf, stop_event, fps=None,
+                   interval_s=None, clock=time.time,
+                   max_read_failures=MAX_READ_FAILURES):
+    """Grab -> infer -> write, until stop_event is set.
+
+    Cadence: interval_s seconds between captures (the primary knob); fps is the
+    legacy equivalent, and either being unset/<=0 disables throttling (tests).
+
+    A single None grab is a DROPPED FRAME, not a dead camera -- it is logged and
+    retried. Only max_read_failures consecutive misses write an error status and
+    end the loop. Exiting on the first miss used to take the whole process down;
+    the supervisor then respawned it, reopening the device every few seconds,
+    which is what made the camera appear to connect and disconnect forever.
+    """
+    if interval_s and interval_s > 0:
+        period = float(interval_s)
+    elif fps and fps > 0:
+        period = 1.0 / fps
+    else:
+        period = 0.0
+    failures = 0
     while not stop_event.is_set():
         t0 = clock()
         frame = grab()
         if frame is None:
-            _safe_write(write_status, out_dir, build_status([], ts=clock(), fps=0.0,
-                                               camera=camera, conf=conf,
-                                               error=f"camera {camera} read failed"))
-            return
+            failures += 1
+            if failures >= max_read_failures:
+                _safe_write(write_status, out_dir, build_status(
+                    [], ts=clock(), fps=0.0, camera=camera, conf=conf,
+                    error=f"camera {camera} read failed "
+                          f"({failures} consecutive misses)"))
+                return
+            # Say nothing to the server: the last good status simply ages, and
+            # goes stale on its own if the misses keep coming. Retry sooner than
+            # the full interval so a hiccup costs a fraction of a frame.
+            log.warning("camera %s: dropped frame %d/%d, retrying",
+                        camera, failures, max_read_failures)
+            stop_event.wait(READ_RETRY_S)
+            continue
+        failures = 0
         detections, annotated = infer(frame)
         dt = max(clock() - t0, 1e-6)
         _safe_write(write_frame, out_dir, annotated)
@@ -268,7 +363,8 @@ def main() -> int:
                    default=str(repo / "runs" / "train" / "failure_detector"
                                / "weights" / "best.pt"))
     p.add_argument("--out", type=pathlib.Path, default=repo / "runs" / "_detect")
-    p.add_argument("--fps", type=float, default=4.0)
+    p.add_argument("--interval", type=float, default=DEFAULT_INTERVAL_S,
+                   help="seconds between captures (default: %(default)s)")
     p.add_argument("--device", default="0" if torch.cuda.is_available() else "cpu")
     p.add_argument("--mock", action="store_true")
     a = p.parse_args()
@@ -280,14 +376,13 @@ def main() -> int:
         infer = mock_infer
         try:
             detection_loop(grab, infer, a.out, camera=a.camera, conf=a.conf,
-                           fps=a.fps, stop_event=stop)
+                           interval_s=a.interval, stop_event=stop)
         except KeyboardInterrupt:
             pass
     else:
         if not pathlib.Path(a.weights).exists():
             print(f"weights not found: {a.weights}", file=sys.stderr)
             return 1
-        cam = None
         if a.source == "a1":
             if not a.host:
                 print("--source a1 requires --host", file=sys.stderr)
@@ -298,26 +393,20 @@ def main() -> int:
                       file=sys.stderr)
                 return 1
             cam = BambuCameraSource(a.host, code)
-            grab = cam.grab
         else:
-            cap = open_camera(a.camera)
-
-            def grab():
-                cap.read()                 # flush one stale buffered frame
-                ok, frame = cap.read()
-                return frame if ok else None
+            # Opened lazily by the first grab(), so a camera that is momentarily
+            # busy (the previous detector still shutting down) is retried rather
+            # than being a hard startup failure.
+            cam = WebcamSource(a.camera)
 
         infer = make_yolo_infer(a.weights, a.conf, a.imgsz, a.device)
         try:
-            detection_loop(grab, infer, a.out, camera=a.camera, conf=a.conf,
-                           fps=a.fps, stop_event=stop)
+            detection_loop(cam.grab, infer, a.out, camera=a.camera, conf=a.conf,
+                           interval_s=a.interval, stop_event=stop)
         except KeyboardInterrupt:
             pass
         finally:
-            if cam is not None:
-                cam.close()
-            else:
-                cap.release()
+            cam.close()
     return 0
 
 
