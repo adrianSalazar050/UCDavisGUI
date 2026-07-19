@@ -46,6 +46,7 @@ import time
 from datetime import datetime, timezone
 
 import cv2
+import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from detect import BambuCameraSource, WebcamSource  # noqa: E402
@@ -163,8 +164,19 @@ def main() -> int:
             print("--source a1 requires --host", file=sys.stderr)
             return 1
         code = os.environ.get("BAMBU_ACCESS_CODE")
+        if not code and sys.stdin.isatty():
+            # Ask rather than exit. This is an interactive tool run while
+            # standing at the printer, and the env var is easy to get wrong --
+            # `export` is bash; PowerShell needs $env:NAME = "...". Prompting
+            # sidesteps the whole class of problem. getpass keeps it off screen
+            # and out of shell history.
+            import getpass
+            code = getpass.getpass("LAN access code (not echoed): ").strip()
         if not code:
-            print("--source a1 requires BAMBU_ACCESS_CODE in the environment",
+            print("no access code. Either set it first:\n"
+                  '  PowerShell:  $env:BAMBU_ACCESS_CODE = "12345678"\n'
+                  "  bash:        export BAMBU_ACCESS_CODE=12345678\n"
+                  "or run this from a terminal so it can prompt you.",
                   file=sys.stderr)
             return 1
         source = BambuCameraSource(a.host, code)
@@ -216,7 +228,19 @@ def main() -> int:
                 continue
 
             if frame is None:
-                time.sleep(0.05)
+                # Show a window IMMEDIATELY, before the first frame lands. The
+                # A1 camera takes a few seconds to connect, and silently
+                # showing nothing is indistinguishable from "the tool is
+                # broken" -- which is exactly how it read the first time.
+                waiting = np.zeros((360, 640, 3), np.uint8)
+                cv2.putText(waiting, "connecting to camera...", (40, 170),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+                cv2.putText(waiting, f"{a.host or 'webcam'}   (q to quit)",
+                            (40, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                            (170, 170, 170), 1)
+                cv2.imshow(WINDOW, waiting)
+                if cv2.waitKey(100) & 0xFF in (ord("q"), 27):
+                    break
                 continue
 
             view = overlay(frame, remaining=next_at - now, label=label,
