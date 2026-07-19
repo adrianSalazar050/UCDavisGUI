@@ -214,6 +214,23 @@ upscale, labels copied unchanged since YOLO labels are fractional) and evaluate
 `best.pt` against each tier. Conclusion in the report: essentially unaffected
 down to a simulated 320×320 sensor; noticeably worse at 160×160.
 
+> Note the label handling: copying labels unchanged is correct for a *resize*,
+> because YOLO boxes are fractions of the image. It would be **wrong** for a
+> perspective warp, where boxes have to be transformed through the same
+> homography and re-fitted. Don't copy this script's shortcut into an augmenter.
+
+#### `collect_dataset.py` — in-domain image collection
+Grabs a frame every `--interval` seconds (default 10) from the A1's own camera
+at full resolution, showing a large countdown so the operator knows how long
+they have to reposition a failure between shots. `c`/`s` tag following frames
+clean/spaghetti into `manifest.csv`; `space` shoots immediately. Resumes
+numbering across sessions rather than overwriting. Finds the access code from
+`BAMBU_ACCESS_CODE`, then `printers.json`, then a prompt.
+
+Exists because of the domain gap in §11: the shipped model is effectively blind
+on this camera, and closing that needs images from *this* camera. Competes for
+the camera with `detect.py` — stop the server before collecting.
+
 ### 3.2 `server/` package
 
 There is **no `server/summary.py`** — `build_summary()` lives in
@@ -349,6 +366,16 @@ frame as fatal therefore made the device disconnect and reconnect every few
 seconds indefinitely. See §10 for the two other halves of that fix
 (`WebcamSource` recovery and reaping the old process before respawning).
 
+**ROI cropping.** `--roi x,y,w,h` (fractions of the frame) restricts inference to
+the bed. On the A1's wide, low view most of the frame is the room, and the model
+duly finds "failures" in furniture — measured on a real frame, the full view
+produced 5 false positives, *all* on a laptop keyboard, and the bed ROI produced
+0. The crop is an inference input only: detections are mapped back with
+`offset_detections`, and `compose_frame` pastes the annotated crop into the full
+frame with the region outlined, so the operator keeps the whole view and can
+tune the box by eye. A malformed ROI degrades to "whole frame" rather than
+cropping the print out of view. Stored per printer as `PrinterConfig.roi`.
+
 ### 4.2 `StatusReader`
 
 Reads `status.json` tolerantly. Any of `OSError`, `UnicodeDecodeError` (a torn
@@ -470,7 +497,8 @@ against a hand-edited file, walking entries in file order with "last one wins".
 
 ### 5.2 The queue
 
-A **planner only** — it never commands the printer. `POST .../queue` with
+`PrintQueue` itself is pure planning — no network, no registry. Only the start
+route (§5.3) commands the printer. `POST .../queue` with
 `{"sd_path": "/Benchy.gcode.3mf"}`:
 
 1. `sdcard.normalize_path` (400 on a bad path),
@@ -491,6 +519,40 @@ hint labelled "~" in the UI, and `None` when there is nothing to time.
 
 Passing `queue=None` to `create_app` disables every queue route (they 404),
 the same "None means inert" convention as `detection`.
+
+### 5.3 Starting a print
+
+`POST /api/printers/{serial}/queue/{job_id}/start` sends the queue head to the
+printer. No upload: jobs already reference microSD files, so this is one MQTT
+`project_file` command via `BambuLink.start_print`.
+
+**The URL scheme is `file:///sdcard/<filename>`, verified on a real A1 mini.**
+Both public references are wrong for this printer — OpenBambuAPI's `mqtt.md`
+documents `file:///mnt/sdcard` (that is the X1) and `davglass/bambu-cli` sends
+`ftp:///<path>`. The candidates were tried against the hardware:
+`file:///sdcard/` was accepted first (`FAILED → PREPARE`, the printer echoing
+the file back as `subtask_name`). `param` is `Metadata/plate_N.gcode`. Filenames
+containing spaces work unencoded. Which spelling of `bed_leveling` /
+`bed_levelling` the firmware reads is unconfirmed, so **both keys are sent** with
+the same value. Do not "correct" any of this to match the public docs.
+
+Because MQTT has no ack, publishing is not printing. The route therefore:
+
+1. guards — `PrinterService.start_print` raises `PrinterBusy` (→ 409) when
+   disconnected or already printing, rather than publishing into silence;
+2. publishes;
+3. polls `gcode_state` for up to `START_VERIFY_S` (8 s) via `verify_start`;
+4. **dequeues only on confirmation.** If the printer never reports starting, the
+   job stays queued and the response says so — a command the printer ignored
+   must never silently eat a job.
+
+Only the queue **head** may start (409 otherwise): one unambiguous button, and
+reorder decides what is next. `MockPrinter.start_print` mirrors the guards and
+transitions so `--mock` exercises start → verify → dequeue with no hardware.
+
+What this does *not* do is watch the print afterwards. A start that succeeds and
+then fails at layer 3 on an HMS reports as started, because that is all the
+route claims to verify.
 
 ---
 
@@ -771,3 +833,60 @@ hardware. `BambuLink.stop_print`'s docstring says so explicitly.
   camera angle, lighting, or mount. `README.md`'s exit criterion — print-level
   FPR < 1% over ≥30 successful prints, time-to-detection < 5 min over ≥20 induced
   failures — has not been met yet.
+
+---
+
+## 11. The camera-angle domain gap (measured, 2026-07-19)
+
+The most important open problem, and the thing that governs the next phase of
+work. **The shipped detector does not work on the A1's built-in camera.**
+
+The public dataset it was trained on is shot at roughly 30–70° looking down at
+the print. The A1 mini's built-in camera is a wide fisheye mounted low and
+near-horizontal: the bed occupies the lower-left of the frame, the print is
+foreshortened into a thin band, and the rest of the view is the room.
+
+Measured against a real frame that happened to contain a genuine spaghetti
+failure on the bed:
+
+| Input | Detections |
+|---|---|
+| Full frame, conf ≥ 0.25 | **5 false positives**, all on a laptop keyboard (x 6–11%, y 48–53%); none on the print |
+| Bed ROI, conf ≥ 0.25 | **0** |
+| Cropped straight onto the tangle, conf ≥ 0.03 | `spaghetti: 0.08` |
+
+Two separate conclusions, and they are easy to conflate:
+
+1. **ROI cropping fixes the false positives.** 5 → 0. That is what §4.1's `--roi`
+   is for, and it works.
+2. **It does not fix detection.** On a large, blatant, unambiguous failure the
+   model's best confidence is **0.08**, against a 0.25 threshold and the ~0.9 it
+   scores in its own domain (`FAILURE_DETECTOR_REPORT.md`: mAP50 0.835). At this
+   angle it is effectively blind, and no amount of thresholding or cropping
+   changes that.
+
+Closing it needs training data from this camera. The plan:
+
+1. **Collect real frames** — `collect_dataset.py`, failure repositioned between
+   shots so the model learns the failure and not the corner it sat in.
+   **Collect clean frames too:** a set of only failures teaches "every print is
+   a failure" and yields 100% false positives.
+2. **Copy-paste augmentation** — paste failure crops onto real A1 backgrounds,
+   labels free from the paste location. Best domain match per unit of effort,
+   because it fixes the background and lighting gap directly.
+3. **Perspective warping** — supplementary. It teaches shape distortion but
+   cannot invent the occlusion a truly horizontal view produces. Remember labels
+   must be warped, not copied (see §3.1).
+4. **Fine-tune** from `best.pt` and evaluate on **held-out real A1 frames**. The
+   public test split will keep flattering the model; it is not the eval that
+   matters any more.
+
+A caution on scale: a handful of real failures is not enough to fine-tune on,
+and copy-paste over only a few backgrounds overfits to those backgrounds. Step 1
+carries more weight than it looks.
+
+**The alternative that sidesteps all of this** is a USB webcam at 30–70°, which
+puts the model back in its training domain for near-zero effort —
+`camera_source: webcam` is already built and tested, and the resolution study
+says a cheap sensor is fine. Synthetic data is the right answer only when the
+built-in camera is a hard constraint.
