@@ -70,6 +70,22 @@ def should_capture(*, manual: bool, shoot: bool, now: float, next_at: float) -> 
     return shoot or now >= next_at
 
 
+def printer_entry(host: str, path=PRINTERS_FILE):
+    """The full printers.json entry for `host`, or None."""
+    try:
+        import json
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    entries = raw if isinstance(raw, list) else raw.get("printers", [])
+    if not isinstance(entries, list):
+        return None
+    for e in entries:
+        if isinstance(e, dict) and e.get("host") == host:
+            return e
+    return None
+
+
 def access_code_from_printers_json(host: str, path=PRINTERS_FILE):
     """The registered access code for `host`, or None.
 
