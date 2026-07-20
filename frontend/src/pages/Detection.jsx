@@ -14,11 +14,19 @@ const ROI_FIELDS = [
   { key: "x", label: "Left %" }, { key: "y", label: "Top %" },
   { key: "w", label: "Width %" }, { key: "h", label: "Height %" },
 ];
-// Measured off a real A1 mini frame (1680x1080), not guessed: the bed occupies
-// the lower-left of that wide fisheye view. Generous on height because the A1
-// is a bed-slinger -- the bed sweeps toward and away from the camera as it
-// prints, so the region has to cover its whole travel. Tune from the overlay.
-const DEFAULT_ROI_PCT = ["0", "40", "65", "60"];
+// Measured off real A1 mini frames taken DURING A PRINT (1680x1080).
+//
+// The earlier default (0,40,65,60) was measured from an IDLE frame and was
+// completely wrong: while printing, the bed rides high in the view and that box
+// contained only the printer's front panel and sticker -- no bed whatsoever. An
+// idle frame is not representative, because the bed parks somewhere quite
+// different from where it prints. Always measure from a frame mid-print.
+//
+// Full width, top half: the bed spans the upper portion nearly edge-on, and the
+// A1 is a bed-slinger so it sweeps through frame as it prints. Generous on
+// purpose -- a too-small ROI crops the failure out of view, which is a silent
+// false negative and far worse than including some background.
+const DEFAULT_ROI_PCT = ["0", "0", "100", "50"];
 
 const roiToPct = (roi) =>
   roi ? roi.map((v) => String(Math.round(v * 100))) : DEFAULT_ROI_PCT;

@@ -372,7 +372,11 @@ seconds indefinitely. See §10 for the two other halves of that fix
 (`WebcamSource` recovery and reaping the old process before respawning).
 
 **ROI cropping.** `--roi x,y,w,h` (fractions of the frame) restricts inference to
-the bed. On the A1's wide, low view most of the frame is the room, and the model
+the bed. **Measure it from a frame taken mid-print, not an idle one.** The bed
+parks somewhere quite different from where it prints: the first default here was
+measured idle and, during an actual print, contained only the printer's front
+panel -- no bed at all. While printing, the bed rides high and nearly edge-on,
+so the working default is full width x top half (`0,0,1,0.5`). On the A1's wide, low view most of the frame is the room, and the model
 duly finds "failures" in furniture — measured on a real frame, the full view
 produced 5 false positives, *all* on a laptop keyboard, and the bed ROI produced
 0. The crop is an inference input only: detections are mapped back with
