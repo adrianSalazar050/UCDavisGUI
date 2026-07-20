@@ -57,6 +57,19 @@ LABELS = {ord("c"): "clean", ord("s"): "spaghetti"}
 PRINTERS_FILE = pathlib.Path(__file__).resolve().parent / "printers.json"
 
 
+def should_capture(*, manual: bool, shoot: bool, now: float, next_at: float) -> bool:
+    """Fire the shutter?
+
+    Manual mode fires ONLY on an explicit request. Guarding on `manual` rather
+    than on the interval matters: a zero interval in the timed branch would make
+    `now >= next_at` true on every pass and the tool would capture continuously,
+    filling the disk in seconds.
+    """
+    if manual:
+        return shoot
+    return shoot or now >= next_at
+
+
 def access_code_from_printers_json(host: str, path=PRINTERS_FILE):
     """The registered access code for `host`, or None.
 
@@ -120,7 +133,7 @@ class Grabber:
         self._source.close()
 
 
-def overlay(frame, *, remaining, label, saved, flash):
+def overlay(frame, *, remaining, label, saved, flash, manual=False):
     """Draw the chronometer and status onto a copy of the frame."""
     view = frame.copy()
     h, w = view.shape[:2]
@@ -138,6 +151,13 @@ def overlay(frame, *, remaining, label, saved, flash):
         cv2.putText(view, "CAPTURED", (int(16 * scale), int(70 * scale)),
                     cv2.FONT_HERSHEY_SIMPLEX, 2.0 * scale, (255, 255, 255),
                     int(4 * scale))
+    elif manual:
+        cv2.putText(view, "READY", (int(16 * scale), int(70 * scale)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 2.2 * scale, (0, 255, 255),
+                    int(4 * scale))
+        cv2.putText(view, "press SPACE to capture", (int(210 * scale),
+                    int(70 * scale)), cv2.FONT_HERSHEY_SIMPLEX, 0.9 * scale,
+                    (200, 200, 200), max(1, int(2 * scale)))
     else:
         cv2.putText(view, f"{secs:4.1f}s", (int(16 * scale), int(70 * scale)),
                     cv2.FONT_HERSHEY_SIMPLEX, 2.2 * scale,
@@ -160,7 +180,7 @@ def overlay(frame, *, remaining, label, saved, flash):
     foot = int(52 * scale)
     cv2.rectangle(view, (0, h - foot), (w, h), (0, 0, 0), -1)
     cv2.putText(view, "click this window first   |   c = clean    "
-                      "s = spaghetti    space = shoot now    q = quit",
+                      "s = spaghetti    SPACE = capture    q = quit",
                 (int(16 * scale), h - int(18 * scale)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.62 * scale, (255, 255, 255),
                 max(1, int(2 * scale)))
@@ -174,7 +194,8 @@ def main() -> int:
     p.add_argument("--source", choices=("a1", "webcam"), default="a1")
     p.add_argument("--camera", type=int, default=0, help="webcam index")
     p.add_argument("--interval", type=float, default=10.0,
-                   help="seconds between captures (default: %(default)s)")
+                   help="seconds between captures; 0 = MANUAL, capture only "
+                        "when you press space (default: %(default)s)")
     p.add_argument("--out", type=pathlib.Path,
                    default=pathlib.Path("datasets") / "a1_camera")
     p.add_argument("--label", default="spaghetti", choices=sorted(set(LABELS.values())),
@@ -230,8 +251,12 @@ def main() -> int:
     print(f"collecting every {a.interval:g}s into {images} "
           f"({saved} already there), starting label={label!r}")
 
+    manual = a.interval <= 0
+    if manual:
+        print("MANUAL mode: nothing is captured until you press space.")
     grab = Grabber(source).start()
-    next_at = time.monotonic() + a.interval
+    next_at = time.monotonic() + (a.interval if not manual else 0.0)
+    shoot = False
     flash_until = 0.0
     rc = 0
     try:
@@ -239,8 +264,10 @@ def main() -> int:
             frame = grab.latest
             now = time.monotonic()
 
-            fire = frame is not None and now >= next_at
+            fire = frame is not None and should_capture(
+                manual=manual, shoot=shoot, now=now, next_at=next_at)
             if fire:
+                shoot = False
                 next_at = now + a.interval
                 saved += 1
                 name = f"{saved:05d}_{label}.jpg"
@@ -275,15 +302,15 @@ def main() -> int:
                 continue
 
             view = overlay(frame, remaining=next_at - now, label=label,
-                           saved=saved, flash=now < flash_until)
+                           saved=saved, flash=now < flash_until, manual=manual)
             h, w = view.shape[:2]
             cv2.imshow(WINDOW, cv2.resize(view, (1120, int(1120 * h / w))))
 
             key = cv2.waitKey(30) & 0xFF
             if key in (ord("q"), 27):
                 break
-            if key == ord(" "):
-                next_at = 0.0            # fire on the next pass
+            if key in (ord(" "), 13):    # space or enter
+                shoot = True
             elif key in LABELS:
                 label = LABELS[key]
                 print(f"  label -> {label}")
