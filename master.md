@@ -874,6 +874,17 @@ Two separate conclusions, and they are easy to conflate:
    angle it is effectively blind, and no amount of thresholding or cropping
    changes that.
 
+**Measured end to end (2026-07-19).** `build_real_eval.py` builds a val set of
+29 real spaghetti frames (boxes derived by background differencing) plus 49 real
+clean frames as negatives. The shipped public-data model scores:
+
+| | mAP50 | mAP50-95 |
+|---|---|---|
+| public test split (`FAILURE_DETECTOR_REPORT.md`) | 0.835 | 0.490 |
+| **real A1 frames** | **0.0016** | **0.0003** |
+
+Not weak on this camera -- blind.
+
 Closing it needs training data from this camera. The plan:
 
 1. **Collect real frames** — `collect_dataset.py`, failure repositioned between
