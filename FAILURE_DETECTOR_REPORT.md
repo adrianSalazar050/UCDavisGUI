@@ -151,3 +151,83 @@ python simulate_webcam_resolutions.py              # build the degraded test set
 python eval_webcam_resolutions.py                  # compare baseline vs degraded tiers
 python run_camera_detection.py                     # live webcam demo
 ```
+
+---
+
+## 8. A1 built-in camera: domain adaptation (2026-07-19)
+
+### 8.1 The problem
+
+The model above was trained on a public dataset shot at 30-70 degrees looking
+down. The A1 mini's built-in camera is a wide fisheye mounted low and nearly
+horizontal. Measured on 29 real frames from that camera plus 49 real clean
+frames as negatives:
+
+| Model | mAP50 | mAP50-95 |
+|---|---|---|
+| `best.pt` on the public test split | 0.835 | 0.490 |
+| `best.pt` on **real A1 frames** | **0.0016** | **0.0003** |
+
+Not weak on this camera -- blind.
+
+### 8.2 Method
+
+`collect_dataset.py` gathered 112 real frames (63 spaghetti, 49 clean across 7
+bed positions). `synth_dataset.py` cuts the real tangles out and pastes them
+onto the real clean frames at varied position, scale, rotation and lighting,
+emitting YOLO labels from the paste geometry, plus the clean frames unchanged as
+negatives. `best.pt` was then fine-tuned on the result.
+
+### 8.3 The first result was invalid
+
+The first run scored **mAP50 0.7123, 100% recall, 0% false alarms** -- and was
+circular. All 49 clean frames used as eval negatives were themselves training
+negatives, and all 29 eval positives had their tangle pasted into ~600 training
+composites. (An md5 comparison missed this: the files differ byte-wise only
+because the two writers use JPEG q92 and q95. Content comparison caught it.)
+
+`split_source.py` now partitions the source frames first, in blocks of
+consecutive frames rather than at random -- frames captured seconds apart are
+near-duplicates, so a random split leaks as effectively as sharing a frame.
+
+### 8.4 Result on a disjoint split
+
+Training: 517 composites from 10 cutouts and 32 clean backgrounds (train half).
+Evaluation: 9 real spaghetti frames + 17 real clean frames (test half), no
+overlap with training.
+
+| Model | mAP50 | mAP50-95 | recall @0.25 | false alarm @0.25 |
+|---|---|---|---|---|
+| `best.pt` (public data) | 0.0000 | 0.0000 | 77.8% | 58.8% |
+| fine-tuned on synthetic | **0.4539** | 0.1772 | **100%** | 11.8% |
+
+The baseline's 77.8% "recall" is meaningless alongside a 58.8% false-alarm rate:
+it fires on most frames, which is also why its mAP is 0 -- nothing is localised.
+
+### 8.5 The false alarms are label errors
+
+Both flagged clean frames (conf 0.77 and 0.87) visibly contain debris on the
+plate. They were captured seconds after the operator changed the label, while
+the plate was still being cleared, so the label state was stale. The model was
+right and the labels were wrong.
+
+So **11.8% is an upper bound**; the true rate on genuinely clean frames is near
+zero. Root cause fixed in `collect_dataset.py`: an 8-second hold-off after any
+label change.
+
+### 8.6 What this does NOT establish
+
+* **One physical tangle.** Every failure image in the dataset is the same object.
+  This measures "can it find THIS tangle, in frames and positions it has not
+  seen", not "can it find spaghetti". Different prints fail differently.
+* **Tiny evaluation.** 9 positives and 17 negatives. Wide confidence intervals.
+* **Scene-specific.** Copy-paste bakes in the backgrounds it pastes onto. All
+  49 came from one printer in one room; a second A1 in a different room measures
+  a scene difference of 72 (same-scene frames differ by 1-3), so this checkpoint
+  should not be expected to transfer. The *cutouts* transfer; the backgrounds do
+  not. Re-running `synth_dataset.py` with clean frames from the new scene and
+  the existing cutouts is the cheap path.
+* **Not deployable for auto-stop yet.** Even at the measured 11.8%, three
+  consecutive frames are needed to fire, which works out to roughly 1 spurious
+  stop per hour of printing. That must be verified as near-zero on genuinely
+  clean data before arming.

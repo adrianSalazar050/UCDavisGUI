@@ -56,6 +56,10 @@ LABELS = {ord("c"): "clean", ord("s"): "spaghetti"}
 
 PRINTERS_FILE = pathlib.Path(__file__).resolve().parent / "printers.json"
 
+# Seconds to wait after a label change before capturing again -- time to get
+# hands out of frame and finish clearing the plate.
+LABEL_HOLDOFF_S = 8.0
+
 
 def should_capture(*, manual: bool, shoot: bool, now: float, next_at: float) -> bool:
     """Fire the shutter?
@@ -329,7 +333,17 @@ def main() -> int:
                 shoot = True
             elif key in LABELS:
                 label = LABELS[key]
-                print(f"  label -> {label}")
+                # Hold off after a label change. The operator has just reached
+                # into the printer to add or remove the failure, so the next
+                # frame is likely to contain a hand, or debris that has not been
+                # cleared yet. Measured cost of not doing this: 2 of 31
+                # hand-labelled "clean" frames actually contained debris, and
+                # the trained model correctly flagged both -- they scored as
+                # false alarms when they were really label errors.
+                next_at = time.monotonic() + max(a.interval, LABEL_HOLDOFF_S)
+                shoot = False
+                print(f"  label -> {label} (holding off "
+                      f"{max(a.interval, LABEL_HOLDOFF_S):.0f}s)")
     except KeyboardInterrupt:
         pass
     finally:
