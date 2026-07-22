@@ -19,6 +19,8 @@ from .main import create_app
 from .printer import MockPrinter, PrinterService
 from .queue import MemoryQueueStore, PrintQueue, QueueStore
 from .registry import PrinterRegistry
+from . import slicer as slicer_mod
+from .slicejobs import SliceCoordinator
 from .store import MemoryStore, PrinterStore
 
 log = logging.getLogger("server.__main__")
@@ -84,6 +86,8 @@ def main() -> int:
     p.add_argument("--detect-interval", type=float, default=DEFAULT_INTERVAL_S,
                    help="seconds between detector captures (default: "
                         "%(default)s)")
+    p.add_argument("--no-slicer", action="store_true",
+                   help="disable slicing even if Bambu Studio is installed")
     a = p.parse_args()
 
     logging.basicConfig(
@@ -127,8 +131,35 @@ def main() -> int:
         else QueueStore(runs_dir.parent / "queues.json")
     queue = PrintQueue(queue_store)
 
+    # Three distinct outcomes, each logged clearly: disabled by the flag,
+    # nothing installed, or installed but with a profile tree that didn't
+    # index (a corrupt or unexpected install). Only the last case actually
+    # builds a coordinator -- an empty index would resolve every preset to
+    # None, so "installed" alone is not enough to call slicing enabled.
+    slicer = None
+    if a.no_slicer:
+        log.info("slicing disabled (--no-slicer)")
+    else:
+        exe = slicer_mod.find_slicer()
+        if exe is None:
+            log.info("no Bambu Studio found; slicing disabled "
+                     "(set BAMBU_STUDIO_EXE to point at it)")
+        else:
+            index = slicer_mod.ProfileIndex.load(slicer_mod.profiles_root(exe))
+            if not index:
+                log.warning("found %s but no vendor profiles beside it; "
+                            "slicing disabled", exe)
+            else:
+                log.info("slicing enabled: %s (%d profiles)", exe, len(index))
+                # runs_dir, not a.runs_dir: the CLI flag defaults to None and
+                # is resolved into runs_dir above (runs/ or runs-mock/) --
+                # a.runs_dir itself is still None on that default path.
+                slicer = SliceCoordinator(
+                    registry, queue, exe, index, work_dir=runs_dir / "_slice")
+
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
-    app = create_app(registry, runs_dir, dist, detection=coordinator, queue=queue)
+    app = create_app(registry, runs_dir, dist, detection=coordinator,
+                     queue=queue, slicer=slicer)
     # uvicorn re-raises the signal it caught using whatever handler was
     # installed beforehand. SIGBREAK's OS default kills the process outright
     # (skipping `finally`), so map it to KeyboardInterrupt like SIGINT gets.

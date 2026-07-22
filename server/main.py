@@ -151,9 +151,13 @@ def create_app(registry, runs_dir: pathlib.Path,
     async def lifespan(_app):
         if detection is not None:
             detection.start()
+        if slicer is not None:
+            slicer.start()
         try:
             yield
         finally:
+            if slicer is not None:
+                slicer.stop()
             if detection is not None:
                 detection.stop()
 
