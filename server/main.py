@@ -149,17 +149,23 @@ def create_app(registry, runs_dir: pathlib.Path,
 
     @asynccontextmanager
     async def lifespan(_app):
-        if detection is not None:
-            detection.start()
-        if slicer is not None:
-            slicer.start()
+        # Track what actually STARTED, and stop only that, in reverse order.
+        # With two lifecycle components, a raise from the second start() must
+        # not skip the finally entirely and leave the first one (detection)
+        # running while the app fails to boot -- that was possible when both
+        # start() calls sat outside the try.
+        started = []
         try:
+            if detection is not None:
+                detection.start()
+                started.append(detection)
+            if slicer is not None:
+                slicer.start()
+                started.append(slicer)
             yield
         finally:
-            if slicer is not None:
-                slicer.stop()
-            if detection is not None:
-                detection.stop()
+            for component in reversed(started):
+                component.stop()
 
     app = FastAPI(title="bambu-monitor", lifespan=lifespan)
 

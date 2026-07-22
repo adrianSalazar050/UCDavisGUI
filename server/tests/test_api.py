@@ -2,6 +2,7 @@ import io
 import pathlib
 import zipfile
 
+import pytest
 from fastapi.testclient import TestClient
 
 from server.main import create_app
@@ -1113,11 +1114,19 @@ class FakeSlicer:
 
 def test_slice_routes_404_when_no_slicer_is_installed():
     # "None means inert", same as queue=None / detection=None. The server must
-    # still boot and monitor on a machine with no slicer.
+    # still boot and monitor on a machine with no slicer. All FOUR routes,
+    # not just the two GETs -- a regression that inerts only half the
+    # surface would otherwise go unnoticed.
     client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
                                    slicer=None))
     assert client.get("/api/printers/AAA/slice/options").status_code == 404
     assert client.get("/api/slice/jobs").status_code == 404
+    res = client.post(
+        "/api/printers/AAA/slice",
+        files={"file": ("part.stl", b"solid", "application/octet-stream")},
+        data={"preset": "standard", "material": "PLA", "supports": "false"})
+    assert res.status_code == 404
+    assert client.delete("/api/slice/jobs/anything").status_code == 404
 
 
 def test_slice_options_returns_presets_and_the_detected_filament():
@@ -1140,7 +1149,7 @@ def test_posting_a_model_starts_a_job():
     assert res.json()["job_id"] == "job-1"
     serial, filename, data, tier, material, supports = slicer.submitted[0]
     assert (serial, filename, data) == ("AAA", "part.stl", b"solid")
-    assert (tier, material, supports) is not None and supports is True
+    assert (tier, material, supports) == ("standard", "PLA", True)
 
 
 def test_posting_an_unsupported_extension_is_a_400():
@@ -1193,3 +1202,27 @@ def test_cancelling_an_unknown_job_is_a_404():
                                    slicer=FakeSlicer()))
     assert client.delete("/api/slice/jobs/nope").status_code == 404
     assert client.delete("/api/slice/jobs/job-1").status_code == 204
+
+
+def test_lifespan_does_not_leak_a_component_if_a_later_start_raises():
+    # Two lifecycle components now share one lifespan. If the SECOND start()
+    # raises, the app fails to boot -- but the FIRST component (detection)
+    # must still be stopped. Before the fix, both starts sat outside the
+    # try/finally, so a raise here skipped the finally entirely and left
+    # detection running forever.
+    events = []
+
+    class LifecycleDetection(FakeDetection):
+        def start(self): events.append("detection-start")
+        def stop(self): events.append("detection-stop")
+
+    class BoomSlicer(FakeSlicer):
+        def start(self): raise RuntimeError("boom")
+
+    det = LifecycleDetection()
+    app = create_app(FakeRegistry(), pathlib.Path("."), detection=det,
+                     slicer=BoomSlicer())
+    with pytest.raises(RuntimeError, match="boom"):
+        with TestClient(app):
+            pass
+    assert events == ["detection-start", "detection-stop"]
