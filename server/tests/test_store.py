@@ -371,3 +371,32 @@ def test_camera_source_invalid_defaults_to_a1(tmp_path):
         {"serial": "S", "host": "h", "access_code": "c", "camera_source": "usb"},
     ]), encoding="utf-8")
     assert PrinterStore(p).load()[0].camera_source == "a1"
+
+
+def test_nozzle_defaults_to_04():
+    c = PrinterConfig(serial="s", host="h", access_code="a")
+    assert c.nozzle == "0.4"
+
+
+def test_nozzle_accepts_the_four_known_sizes():
+    for n in ("0.2", "0.4", "0.6", "0.8"):
+        c = PrinterConfig.from_dict(
+            {"serial": "s", "host": "h", "access_code": "a", "nozzle": n})
+        assert c.nozzle == n
+
+
+def test_nozzle_degrades_to_04_on_junk():
+    # Same rule as normalize_roi: a bad value degrades to the safe default
+    # rather than raising. A wrong nozzle slices for the wrong hardware, so
+    # the default has to be the common case, not the last thing typed.
+    for bad in ("0.5", "", None, 0.4, ["0.4"], "abc"):
+        c = PrinterConfig.from_dict(
+            {"serial": "s", "host": "h", "access_code": "a", "nozzle": bad})
+        assert c.nozzle == "0.4"
+
+
+def test_nozzle_survives_a_save_load_round_trip(tmp_path):
+    store = PrinterStore(tmp_path / "printers.json")
+    store.save([PrinterConfig(serial="s", host="h", access_code="a",
+                              nozzle="0.6")])
+    assert store.load()[0].nozzle == "0.6"

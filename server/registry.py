@@ -47,8 +47,8 @@ import threading
 from typing import Any, Callable
 
 from .sdcard import SdError
-from .store import (CAMERA_SOURCES, DETECTION_CLASSES, PrinterConfig,
-                    guess_model_id, normalize_roi)
+from .store import (CAMERA_SOURCES, DEFAULT_NOZZLE, DETECTION_CLASSES,
+                    PrinterConfig, guess_model_id, normalize_roi)
 
 log = logging.getLogger("server.registry")
 
@@ -321,6 +321,15 @@ class PrinterRegistry:
         with self._lock:
             cfg = self._configs.get(serial)
             return cfg.model_id if cfg is not None else ""
+
+    def printer_nozzle(self, serial: str) -> str:
+        """`serial`'s configured nozzle diameter, or the default when the
+        printer is unknown. Never "" -- callers substitute it straight into a
+        profile name, and an empty one would silently build a name that
+        matches nothing."""
+        with self._lock:
+            cfg = self._configs.get(serial)
+            return cfg.nozzle if cfg is not None else DEFAULT_NOZZLE
 
     def reconnect(self, serial: str) -> dict | None:
         """Rebuild `serial`'s connection using the config already stored.

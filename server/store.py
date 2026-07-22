@@ -55,6 +55,13 @@ SERIAL_PREFIX_MODELS = {
     "030": "N1",            # unverified
 }
 
+# Nozzle diameters Bambu ships machine profiles for. Needed because slicer
+# machine profiles are per-nozzle ("Bambu Lab A1 0.4 nozzle"), and the printer
+# does not report its nozzle over MQTT any more than it reports its model --
+# so, like model_id, this can only ever be configured.
+NOZZLES = ("0.2", "0.4", "0.6", "0.8")
+DEFAULT_NOZZLE = "0.4"
+
 
 def model_name(model_id: str) -> str:
     """Friendly name for a model id, or the id itself when unknown. Never
@@ -142,6 +149,11 @@ class PrinterConfig:
     # the printer does not report its own model over MQTT (all 64 published
     # keys were checked, 2026-07-21), so this can only ever be configured.
     model_id: str = ""
+    # Installed nozzle diameter as a string ("0.4"), matching the profile
+    # names exactly. Degrades to DEFAULT_NOZZLE rather than raising: a wrong
+    # nozzle slices for the wrong hardware, so an unparseable value must land
+    # on the common case, not refuse to load the printer.
+    nozzle: str = DEFAULT_NOZZLE
 
     def __post_init__(self) -> None:
         self.serial = (self.serial or "").strip()
@@ -201,12 +213,15 @@ class PrinterConfig:
         if not isinstance(model_id, str):
             model_id = ""
         model_id = model_id.strip()
+        nozzle = d.get("nozzle", DEFAULT_NOZZLE)
+        if nozzle not in NOZZLES:  # covers wrong type, "0.5", "", None
+            nozzle = DEFAULT_NOZZLE
         return cls(serial=d["serial"], host=d["host"],
                    access_code=d["access_code"], name=name, capture=capture,
                    camera_source=camera_source, camera_index=camera_index,
                    conf=conf, armed_classes=armed_classes,
                    detect_enabled=detect_enabled, roi=normalize_roi(d.get("roi")),
-                   model_id=model_id)
+                   model_id=model_id, nozzle=nozzle)
 
 
 class PrinterStore:
