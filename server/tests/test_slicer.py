@@ -4,7 +4,9 @@ import subprocess
 
 import pytest
 
-from server.slicer import ProfileIndex, SliceError, flatten_profile
+from server.slicer import (ProfileIndex, SliceError, build_argv,
+                           find_slicer, flatten_profile, profiles_root,
+                           run_slice)
 
 
 def test_flatten_merges_parent_then_child():
@@ -77,9 +79,6 @@ def test_profile_index_of_a_missing_directory_is_empty(tmp_path):
     assert ProfileIndex.load(tmp_path / "nope") == {}
 
 
-from server.slicer import build_argv, find_slicer, profiles_root
-
-
 def test_find_slicer_prefers_the_env_override(tmp_path):
     exe = tmp_path / "custom.exe"
     exe.write_text("", encoding="utf-8")
@@ -124,8 +123,6 @@ def test_build_argv_always_passes_outputdir():
                       "o.gcode.3mf", "workdir")
     assert argv[argv.index("--outputdir") + 1] == "workdir"
 
-
-from server.slicer import run_slice
 
 MACHINE = {"name": "m", "nozzle_diameter": ["0.4"]}
 PROCESS = {"name": "p", "enable_support": "0"}
