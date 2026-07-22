@@ -86,3 +86,62 @@ class ProfileIndex:
             if isinstance(name, str) and name:
                 index.setdefault(name, data)
         return index
+
+
+# Where Bambu Studio installs itself on Windows. Checked in order, after the
+# BAMBU_STUDIO_EXE override.
+DEFAULT_SLICER_PATHS = (
+    r"C:\Program Files\Bambu Studio\bambu-studio.exe",
+    r"C:\Program Files (x86)\Bambu Studio\bambu-studio.exe",
+)
+
+# Vendor whose profiles we index, relative to the install directory.
+PROFILES_SUBPATH = ("resources", "profiles", "BBL")
+
+
+def find_slicer(env=None, candidates=DEFAULT_SLICER_PATHS) -> str | None:
+    """Path to bambu-studio.exe, or None when it isn't installed.
+
+    None is a supported outcome, not an error: create_app turns it into 404s
+    on every slice route, the same "None means inert" convention queue=None
+    and detection=None already use. A machine with no slicer still boots,
+    still monitors, still prints files already on the card.
+    """
+    env = os.environ if env is None else env
+    override = (env.get("BAMBU_STUDIO_EXE") or "").strip()
+    # An override that no longer exists must not shadow a good install --
+    # otherwise a stale env var silently disables the whole feature.
+    if override and os.path.exists(override):
+        return override
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def profiles_root(exe: str) -> pathlib.Path:
+    """The vendor profile directory shipped beside `exe`.
+
+    Deliberately the INSTALLED resources tree, not the OTA-updated copy under
+    %APPDATA%: the two can differ, and this is the one the slicer itself
+    validated against.
+    """
+    return pathlib.Path(exe).parent.joinpath(*PROFILES_SUBPATH)
+
+
+def build_argv(exe, model_path, machine_json, process_json, filament_json,
+               out_name, out_dir) -> list:
+    """The invocation verified by hand on 2026-07-22.
+
+    --outputdir is MANDATORY: without it the output lands nowhere findable.
+    The model path comes first, before any option, which is the ordering that
+    was verified to work.
+    """
+    return [
+        str(exe), str(model_path),
+        "--load-settings", f"{machine_json};{process_json}",
+        "--load-filaments", str(filament_json),
+        "--slice", "0",
+        "--export-3mf", str(out_name),
+        "--outputdir", str(out_dir),
+    ]

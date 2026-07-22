@@ -73,3 +73,51 @@ def test_profile_index_skips_unreadable_and_nameless_files(tmp_path):
 
 def test_profile_index_of_a_missing_directory_is_empty(tmp_path):
     assert ProfileIndex.load(tmp_path / "nope") == {}
+
+
+from server.slicer import build_argv, find_slicer, profiles_root
+
+
+def test_find_slicer_prefers_the_env_override(tmp_path):
+    exe = tmp_path / "custom.exe"
+    exe.write_text("", encoding="utf-8")
+    assert find_slicer({"BAMBU_STUDIO_EXE": str(exe)}) == str(exe)
+
+
+def test_find_slicer_ignores_an_env_override_that_does_not_exist(tmp_path):
+    # A stale env var must not shadow a perfectly good default install.
+    default = tmp_path / "bambu-studio.exe"
+    default.write_text("", encoding="utf-8")
+    got = find_slicer({"BAMBU_STUDIO_EXE": str(tmp_path / "gone.exe")},
+                      candidates=(str(default),))
+    assert got == str(default)
+
+
+def test_find_slicer_returns_none_when_nothing_is_installed(tmp_path):
+    # None is the "feature is inert" signal -- the server must still boot.
+    assert find_slicer({}, candidates=(str(tmp_path / "nope.exe"),)) is None
+
+
+def test_profiles_root_is_beside_the_executable():
+    got = profiles_root(r"C:\Program Files\Bambu Studio\bambu-studio.exe")
+    assert got.as_posix().endswith("Bambu Studio/resources/profiles/BBL")
+
+
+def test_build_argv_has_the_verified_shape():
+    argv = build_argv("bs.exe", "model.stl", "m.json", "p.json", "f.json",
+                      "out.gcode.3mf", "workdir")
+    assert argv[0] == "bs.exe"
+    assert argv[1] == "model.stl"          # model first, then options
+    assert "--load-settings" in argv
+    assert argv[argv.index("--load-settings") + 1] == "m.json;p.json"
+    assert argv[argv.index("--load-filaments") + 1] == "f.json"
+    assert argv[argv.index("--slice") + 1] == "0"
+    assert argv[argv.index("--export-3mf") + 1] == "out.gcode.3mf"
+
+
+def test_build_argv_always_passes_outputdir():
+    # Measured 2026-07-22: without --outputdir the output lands nowhere
+    # findable, so the slice "succeeds" and produces nothing.
+    argv = build_argv("bs.exe", "m.stl", "m.json", "p.json", "f.json",
+                      "o.gcode.3mf", "workdir")
+    assert argv[argv.index("--outputdir") + 1] == "workdir"
