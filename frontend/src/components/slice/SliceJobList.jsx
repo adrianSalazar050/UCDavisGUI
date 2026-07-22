@@ -72,66 +72,68 @@ export default function SliceJobList({ serial, refreshSignal }) {
     }
   };
 
-  if (err) {
-    return (
-      <div className="state-error">
-        <span>{err}</span>
-        <Button size="sm" onClick={load}>Retry</Button>
-      </div>
-    );
-  }
-  if (!initialLoaded) {
-    return <div className="empty">Loading slice jobs…</div>;
-  }
-  if (jobs.length === 0) {
-    return <div className="empty">No slice jobs yet — submit a model above.</div>;
-  }
-
+  // Same shape as QueuePanel: an error from one bad poll sits ABOVE whatever
+  // was last successfully loaded, rather than blanking a perfectly good table
+  // -- a single transient poll failure must not flash the list away.
   return (
-    <table className="slice-table">
-      <thead>
-        <tr>
-          <th>Name</th><th>Preset</th><th>Material</th><th>Supports</th>
-          <th>State</th><th>Time</th><th>Filament</th><th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {jobs.map((job) => (
-          <tr key={job.id}>
-            <td>
-              {job.name}
-              {job.state === "failed" && job.error && (
-                <pre className="slice-table__error">{job.error}</pre>
-              )}
-            </td>
-            <td>{job.preset_label}</td>
-            <td>{job.material}</td>
-            <td>{job.supports ? "Yes" : "No"}</td>
-            <td>
-              <StatusPill status={PILL_STATUS[job.state] ?? "warn"}>
-                {job.state}
-              </StatusPill>
-            </td>
-            <td className="slice-table__num">
-              {job.state === "done" ? formatDuration(job.seconds) : "—"}
-            </td>
-            <td className="slice-table__num">
-              {job.state === "done" ? formatGrams(job.grams) : "—"}
-            </td>
-            <td>
-              {CANCELLABLE.has(job.state) && (
-                <button type="button" className="slice-table__cancel"
-                        disabled={busyId != null}
-                        aria-label={job.state === "queued"
-                          ? `Cancel ${job.name}` : `Clear ${job.name}`}
-                        onClick={() => handleCancel(job.id)}>
-                  {job.state === "queued" ? "Cancel" : "Clear"}
-                </button>
-              )}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <>
+      {err && (
+        <div className="state-error">
+          <span>{err}</span>
+          <Button size="sm" onClick={load}>Retry</Button>
+        </div>
+      )}
+      {!initialLoaded ? (
+        <div className="empty">Loading slice jobs…</div>
+      ) : jobs.length === 0 ? (
+        <div className="empty">No slice jobs yet — submit a model above.</div>
+      ) : (
+        <table className="slice-table">
+          <thead>
+            <tr>
+              <th>Name</th><th>Preset</th><th>Material</th><th>Supports</th>
+              <th>State</th><th>Time</th><th>Filament</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {jobs.map((job) => (
+              <tr key={job.id}>
+                <td>
+                  {job.name}
+                  {job.state === "failed" && job.error && (
+                    <pre className="slice-table__error">{job.error}</pre>
+                  )}
+                </td>
+                <td>{job.preset_label}</td>
+                <td>{job.material}</td>
+                <td>{job.supports ? "Yes" : "No"}</td>
+                <td>
+                  <StatusPill status={PILL_STATUS[job.state] ?? "warn"}>
+                    {job.state}
+                  </StatusPill>
+                </td>
+                <td className="slice-table__num">
+                  {job.state === "done" ? formatDuration(job.seconds) : "—"}
+                </td>
+                <td className="slice-table__num">
+                  {job.state === "done" ? formatGrams(job.grams) : "—"}
+                </td>
+                <td>
+                  {CANCELLABLE.has(job.state) && (
+                    <button type="button" className="slice-table__cancel"
+                            disabled={busyId != null}
+                            aria-label={job.state === "queued"
+                              ? `Cancel ${job.name}` : `Clear ${job.name}`}
+                            onClick={() => handleCancel(job.id)}>
+                      {job.state === "queued" ? "Cancel" : "Clear"}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </>
   );
 }
