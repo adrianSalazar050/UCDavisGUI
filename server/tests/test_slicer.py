@@ -179,6 +179,25 @@ def test_run_slice_raises_with_stderr_when_the_slicer_fails(tmp_path):
                   tmp_path, runner=runner)
 
 
+def test_run_slice_rejects_a_nonzero_exit_even_when_a_file_exists(tmp_path):
+    # Bambu Studio exits 0 on success (verified 2026-07-22 -- see the
+    # module's run_slice docstring). So a nonzero code with a file on disk
+    # means a crash part-way through export left a TRUNCATED .gcode.3mf --
+    # "there is a file" must never be enough on its own, since those bytes
+    # get uploaded straight to a printer's microSD and queued.
+    #
+    # NOT _fake_runner: it only writes the file on returncode == 0, so it
+    # cannot represent this scenario. This runner writes the (truncated)
+    # file AND returns nonzero, which is the case under test.
+    def runner(argv, **kw):
+        (pathlib.Path(argv[argv.index("--outputdir") + 1])
+         / "sliced.gcode.3mf").write_bytes(b"PK\x03\x04truncated")
+        return subprocess.CompletedProcess(argv, 1, "", "crashed mid-export")
+    with pytest.raises(SliceError, match="crashed mid-export"):
+        run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+                  tmp_path, runner=runner)
+
+
 def test_run_slice_raises_when_exit_0_but_no_file_appeared(tmp_path):
     # Exactly the OrcaSlicer failure mode: "success" with no 3mf. A silent
     # empty success would queue a job pointing at nothing.
@@ -193,5 +212,15 @@ def test_run_slice_turns_a_timeout_into_a_slice_error(tmp_path):
     def runner(argv, **kw):
         raise subprocess.TimeoutExpired(argv, 1.0)
     with pytest.raises(SliceError, match="timed out"):
+        run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+                  tmp_path, runner=runner)
+
+
+def test_run_slice_turns_an_oserror_into_a_slice_error(tmp_path):
+    # Simulates the slicer binary vanishing between find_slicer() and the
+    # call (uninstalled, or a stale cached path, mid-session).
+    def runner(argv, **kw):
+        raise FileNotFoundError("bs.exe not found")
+    with pytest.raises(SliceError, match="could not run the slicer"):
         run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
                   tmp_path, runner=runner)

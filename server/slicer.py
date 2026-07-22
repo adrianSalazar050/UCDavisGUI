@@ -26,7 +26,13 @@ class SliceError(Exception):
 
 
 class SlicerNotFound(SliceError):
-    """No slicer executable on this machine."""
+    """No slicer executable on this machine.
+
+    Not raised anywhere in this module -- find_slicer() returns None instead
+    (see its docstring for why). This is here for a CALLER to raise: a route
+    turning "no slicer installed" into a 404, the same "None means inert"
+    convention queue=None and detection=None already use.
+    """
 
 
 def flatten_profile(name: str, index: dict) -> dict:
@@ -81,8 +87,10 @@ class ProfileIndex:
             if not isinstance(data, dict):
                 continue
             name = data.get("name")
-            # setdefault, not []=: first one wins, so a later duplicate can
-            # never clobber a profile something already resolved against.
+            # setdefault, not []=: first one wins. rglob() yields paths in
+            # sorted order, so this is a deterministic tie-break -- the same
+            # tree always produces the same index, whichever duplicate a
+            # future re-run of this code happens to see first.
             if isinstance(name, str) and name:
                 index.setdefault(name, data)
         return index
@@ -197,7 +205,14 @@ def run_slice(exe, model_path, machine: dict, process: dict, filament: dict,
         raise SliceError(f"could not run the slicer: {e}") from None
 
     produced = out_dir / OUTPUT_NAME
-    if proc.returncode != 0 and not produced.exists():
+    # Bambu Studio exits 0 on success -- VERIFIED on this machine 2026-07-22.
+    # So a nonzero code is a real failure even when a file is on disk: the
+    # likeliest way that happens is a crash part-way through export, leaving
+    # a TRUNCATED .gcode.3mf. Those bytes get uploaded to a printer's microSD
+    # and queued, so "there is a file" must never be enough on its own.
+    # (OrcaSlicer does exit nonzero on success -- but Orca is not our engine,
+    # see the module docstring.)
+    if proc.returncode != 0:
         raise SliceError(_tail(proc.stderr) or
                          f"slicer exited {proc.returncode}")
     if not produced.exists():
