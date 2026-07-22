@@ -2,10 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **STATUS: PROPOSED (2026-07-22).** Not started. Implements
-> `docs/superpowers/specs/2026-07-22-auto-slicing-design.md`.
-> Historical record once executed, not maintained. **`master.md` is
-> authoritative wherever this file disagrees with it.**
+> **STATUS: Tasks 1–11 SHIPPED (2026-07-22); Task 12 deliberately outstanding.**
+> Implements `docs/superpowers/specs/2026-07-22-auto-slicing-design.md`, whose
+> banner records what this plan got wrong in advance. Task 12 — slicing
+> something on the real A1, starting it from the queue, and recording what
+> happened — was intentionally not run: people were working near the printer
+> while this was built, and it would have moved. It remains the only step
+> that can prove a CLI-sliced `.gcode.3mf` is actually accepted by the
+> printer; see `master.md` §1.1 and §10.
+> Historical record, not maintained. **`master.md` is authoritative wherever
+> this file disagrees with it.**
+>
+> Task checkboxes below were never ticked during execution; read the status
+> line above, not the boxes.
 
 **Goal:** Upload an STL in the dashboard, pick a printer, and get a sliced
 `.gcode.3mf` uploaded to that printer's microSD and queued — with the filament
@@ -1998,7 +2007,7 @@ Slice page for the actual printer. Confirm the job reaches `done` and the SD
 Files page lists the new `.gcode.3mf` at the card root.
 
 This is also the first time FTPS **STOR** has ever written to a real card
-(master.md §9) — if it fails, that is the more likely culprit, not the slicer.
+(master.md §10) — if it fails, that is the more likely culprit, not the slicer.
 
 - [ ] **Step 2: Start it from the queue**
 

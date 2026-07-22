@@ -17,10 +17,10 @@
 > | `AuthContext`, `CellContext`, `PreferencesContext`, `useCells` | no contexts at all; one `usePrinters` hook over a WebSocket |
 > | Supabase JS for auth | no auth, no Supabase — the server is LAN-only |
 > | `LoDISA-GUI/vera-web/frontend/src/...` | `frontend/src/...` |
-> | no test setup | `vitest`, over `roiGeometry.js` (see `master.md` §9) |
+> | no test setup | `vitest`, over `roiGeometry.js` (see `master.md` §10) |
 >
 > Read it for **conventions**, not for facts about this codebase. For what
-> `frontend/` really contains, see [`master.md` §6](master.md).
+> `frontend/` really contains, see [`master.md` §7](master.md).
 
 How the VERA / HORUS GUI (`LoDISA-GUI/vera-web/frontend`) is built, and which tools to
 use if you want a new GUI with the same look, feel, and structure.

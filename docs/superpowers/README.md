@@ -25,7 +25,9 @@ Every file carries a status banner directly under its title.
 | ✅ shipped | `plans/2026-07-17-a1-camera-source-backend.md` | titled "A1 Mini"; the same code now runs on an A1 |
 | ✅ shipped | `plans/2026-07-17-detection-frontend.md` | says no JS test runner exists; vitest was added later |
 | ✅ shipped | `plans/2026-07-17-print-queue.md` | queue schema predates `model_id` |
-| ✅ shipped | `specs/2026-07-21-reconnect-roi-editor-model-check-design.md` | reconnect, ROI drag editor, printer-model check. The most current file here |
+| ✅ shipped | `specs/2026-07-21-reconnect-roi-editor-model-check-design.md` | reconnect, ROI drag editor, printer-model check |
+| ✅ shipped | `specs/2026-07-22-auto-slicing-design.md` | automatic slicing: STL → sliced, uploaded, queued. The most current file here |
+| ✅ shipped | `plans/2026-07-22-auto-slicing.md` | Tasks 1–11 done; Task 12 (hardware gate) deliberately outstanding — see its own status line |
 
 ## Things that are wrong in most of these files
 
@@ -40,4 +42,4 @@ Rather than repeat these in every banner:
 - **Task checkboxes.** Never ticked during execution. The status banner is the
   truth, not the boxes.
 - **Duplication.** The three largest plans inline whole implementations that
-  `master.md` §3–§6 now documents properly. Read master.md first.
+  `master.md` §3–§7 now documents properly. Read master.md first.

@@ -23,8 +23,10 @@ detector watches the camera in its own process, and — when the operator arms
 it — the server will send a `stop` command to the printer if a failure class
 it is armed for is sustained for long enough. Alongside that it browses each
 printer's microSD over FTPS, plans a per-printer print queue with time and
-filament totals parsed out of `.gcode.3mf` files, and (separately) logs
-layer-indexed frames + telemetry for building training datasets.
+filament totals parsed out of `.gcode.3mf` files, slices an uploaded STL into
+a startable `.gcode.3mf` by shelling out to Bambu Studio (§6) and queues the
+result, and (separately) logs layer-indexed frames + telemetry for building
+training datasets.
 
 **Data-flow narrative.**
 
@@ -51,6 +53,14 @@ layer-indexed frames + telemetry for building training datasets.
    subscribes to MQTT itself and writes `runs/<ts>_<name>/frames/layer_NNNN.jpg`
    + `telemetry.jsonl` + `frames.csv`. The server *reads* those files
    (`server/runs.py`) to serve `/api/frame/latest`; it never opens a camera.
+9. Separately again, `POST /api/printers/{serial}/slice` hands an uploaded STL
+   to `server/slicejobs.py::SliceCoordinator`, which runs on its own worker
+   thread and shells out to `bambu-studio.exe` — **the only place in this repo
+   that launches a subprocess to do work on a model**, as opposed to reading
+   one. On success it reuses the existing `sdcard.upload_file` and
+   `PrintQueue.add` unchanged, so slicing is additive: it produces exactly the
+   kind of `.gcode.3mf` step 3's queue already knew how to plan and start. See
+   §6.
 
 ---
 
@@ -71,15 +81,22 @@ which machine it means.
 Verified on the **A1 mini**, and *not* re-checked on the A1: the
 `file:///sdcard/<filename>` start-print URL scheme (§5.4), `stop_print()`'s
 `PREPARE → FAILED` transition (§3.1), and the entire domain-adaptation dataset
-and checkpoint (§11 — all of it shot on the mini, in a different room).
+and checkpoint (§12 — all of it shot on the mini, in a different room).
 
 Verified on the **A1** (2026-07-21): MQTT connect + state, FTPS login/LIST, the
 camera stream, and the ROI geometry above. The FTPS **upload** is implemented
-and tested but has not written to a real card on either machine (§9).
+and tested but has not written to a real card on either machine (§10).
+
+**Not verified on any hardware:** that a CLI-sliced `.gcode.3mf` (§6) is
+accepted and printed by a real printer. The container's shape is verified —
+this repo's own `threemf.parse_slice_info` reads it, and the whole pipeline
+runs end to end over HTTP against a mock printer — but nobody has slid the
+result onto a real card and pressed Start. This is deliberate: there were
+people working near the printer while this was built, and it would move.
 
 Everything in `server/` is printer-model-agnostic — it never encodes a bed size
 or a frame geometry. The model-specific values are the ROI (§4.1) and the
-detection dataset (§11).
+detection dataset (§12).
 
 ---
 
@@ -96,7 +113,7 @@ camera, and it is never the server.
 | `capture.py` | A USB webcam + its own MQTT subscription, for dataset logging | Independent research tool, predates the server; writes files the server later reads |
 
 Because both `detect.py` and `capture.py` want a camera, you generally run one
-or the other against a given device — see §10.
+or the other against a given device — see §11.
 
 The interprocess contract is **files, not sockets**: `detect.py` writes
 `runs/_detect/{status.json,latest.jpg}` with atomic temp+`os.replace`, and the
@@ -261,11 +278,11 @@ clean/spaghetti into `manifest.csv`; `space` shoots immediately. Resumes
 numbering across sessions rather than overwriting. Finds the access code from
 `BAMBU_ACCESS_CODE`, then `printers.json`, then a prompt.
 
-Exists because of the domain gap in §11: the shipped model is effectively blind
+Exists because of the domain gap in §12: the shipped model is effectively blind
 on this camera, and closing that needs images from *this* camera. Competes for
 the camera with `detect.py` — stop the server before collecting.
 
-After the label-error finding in §11, it holds off **8 seconds** after any
+After the label-error finding in §12, it holds off **8 seconds** after any
 `c`/`s` label change before capturing again, so the operator's hands and a
 half-cleared plate can't land in a frame carrying the new label.
 
@@ -285,7 +302,7 @@ and a check that unreliable is worse than none.
 
 #### `split_source.py` — the disjoint split
 Partitions the collected frames into train/test halves **before** anything is
-synthesised. This exists because the first evaluation was circular (§11), and it
+synthesised. This exists because the first evaluation was circular (§12), and it
 splits in **blocks of consecutive frames, not at random**: frames captured
 seconds apart are near-duplicates, so a random split puts a frame in train and
 its twin in test, which leaks just as effectively as sharing the frame outright.
@@ -326,7 +343,7 @@ frames raise a false alarm. mAP hides both, and for auto-stop those two numbers
 > `collect_dataset.py`/`collect_backgrounds.py` → **`split_source.py`** →
 > `synth_dataset.py` (train half only) → fine-tune → `build_real_eval.py` +
 > `eval_real.py` (test half only). Skipping the split is what produced the
-> invalid 0.7123 in §11.
+> invalid 0.7123 in §12.
 
 ### 3.2 `server/` package
 
@@ -335,14 +352,17 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 
 | Module | Owns | Key names |
 |---|---|---|
-| `store.py` | `printers.json` persistence + the `PrinterConfig` dataclass | `PrinterConfig`, `PrinterStore`, `MemoryStore`, `DETECTION_CLASSES`, `CAMERA_SOURCES`, `MODEL_NAMES`, `guess_model_id`, `model_mismatch` |
+| `store.py` | `printers.json` persistence + the `PrinterConfig` dataclass | `PrinterConfig`, `PrinterStore`, `MemoryStore`, `DETECTION_CLASSES`, `CAMERA_SOURCES`, `MODEL_NAMES`, `guess_model_id`, `model_mismatch`, `NOZZLES`, `DEFAULT_NOZZLE` |
 | `printer.py` | One live printer's state | `PrinterService`, `MockPrinter`, `build_summary`, `SUMMARY_FIELDS`, `STALE_S` |
-| `registry.py` | The set of printers, keyed by serial | `PrinterRegistry`, `DuplicateSerial`, `.reconnect()`, `.printer_model()` |
+| `registry.py` | The set of printers, keyed by serial | `PrinterRegistry`, `DuplicateSerial`, `.reconnect()`, `.printer_model()`, `.printer_nozzle()` |
 | `main.py` | The FastAPI app + all routes | `create_app`, `AddPrinter`, `EditPrinter`, `DetectionUpdate`, `ArmBody`, `AddQueueJob`, `ReorderQueueJobs` |
 | `detection.py` | Reading detector status, deciding, actuating | `StatusReader`, `AutoStopController`, `DetectorSupervisor`, `DetectionCoordinator`, `MockDetectorRunner` |
 | `queue.py` | Per-printer job list + `queues.json` | `PrintQueue`, `QueueStore`, `MemoryQueueStore` |
 | `sdcard.py` | microSD over FTPS (read + upload) | `list_dir`, `fetch_file`, `upload_file`, `normalize_path`, `ImplicitFTP_TLS`, `SdError`, `parse_mlsd`, `parse_list_lines` |
 | `threemf.py` | Parsing a sliced `.gcode.3mf` | `parse_slice_info`, `SLICE_INFO_PATH` |
+| `slicer.py` | Locating Bambu Studio, resolving vendor profiles, running the CLI (§6) | `find_slicer`, `profiles_root`, `ProfileIndex`, `flatten_profile`, `build_argv`, `run_slice`, `SliceError`, `SlicerNotFound`, `SLICE_TIMEOUT_S`, `OUTPUT_NAME` |
+| `slicepresets.py` | Curated quality tiers + filament mapping (§6.3) | `TIERS`, `MACHINE_TOKENS`, `PROCESS_TOKENS`, `MATERIALS`, `machine_profile_name`, `resolve_preset`, `available_presets`, `filament_profile_name`, `available_filaments`, `detect_loaded_filament` |
+| `slicejobs.py` | Slice job records, states, the worker thread (§6.4) | `SliceCoordinator`, `output_name`, `MODEL_EXTS`, `MAX_FINISHED_JOBS`, `TICK_S` |
 | `runs.py` | Finding the newest captured frame | `find_active_run`, `newest_frame`, `ACTIVE_WINDOW_S` |
 | `__main__.py` | CLI entry, wiring, `--mock` seeding | `main`, `real_factory`, `mock_factory`, `MOCK_SEED` |
 
@@ -350,7 +370,10 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 (falls back to host), `capture`, `camera_source` (`"a1"`/`"webcam"`),
 `camera_index`, `conf`, `armed_classes`, `detect_enabled`, `roi` (§4.1;
 `normalize_roi()` degrades a malformed value to `None` = whole frame, the same
-rule as `detect.parse_roi`). `from_dict()` does
+rule as `detect.parse_roi`), `model_id` (§5.3), and `nozzle` (§6.4; one of
+`NOZZLES`, degrading to `DEFAULT_NOZZLE = "0.4"` on anything else — the
+printer never reports its installed nozzle any more than it reports its
+model, so like `model_id` it can only be configured). `from_dict()` does
 the type validation (the constructor does *not* — it only strips). `load()`
 never raises: a corrupt file logs a warning and yields no printers, because a
 server that refuses to boot leaves you with no UI to fix it from. Reads with
@@ -379,7 +402,11 @@ is registration order. Enforces "at most one capture printer" via
 `capture` attribute. Detection accessors: `capture_serial()`,
 `detection_config(serial)`, `detection_target()`, `update_detection(...)`.
 `fetch_sd_file(serial, path)` delegates to the service so the access code never
-appears in a queue route's signature.
+appears in a queue route's signature. `printer_nozzle(serial)` mirrors
+`printer_model()`: it never returns `""`, falling back to `store.DEFAULT_NOZZLE`
+for an unknown serial, because callers substitute it straight into a slicer
+profile name and an empty string would silently build a name that matches
+nothing (§6.3).
 
 **`main.py` routes.**
 
@@ -484,7 +511,7 @@ resets the counter.
 This matters more than it looks: ending the loop exits the process, the
 supervisor respawns it, and the respawn reopens the camera. Treating one dropped
 frame as fatal therefore made the device disconnect and reconnect every few
-seconds indefinitely. See §10 for the two other halves of that fix
+seconds indefinitely. See §11 for the two other halves of that fix
 (`WebcamSource` recovery and reaping the old process before respawning).
 
 **ROI cropping.** `--roi x,y,w,h` (fractions of the frame) restricts inference to
@@ -728,7 +755,219 @@ route claims to verify.
 
 ---
 
-## 6. Frontend
+## 6. Automatic slicing
+
+Upload an STL, pick a printer, and get a sliced `.gcode.3mf` uploaded to that
+printer's microSD and queued — with the filament detected from MQTT, a curated
+quality preset, and a tree-support toggle. Three new modules
+(`server/slicer.py`, `server/slicepresets.py`, `server/slicejobs.py`) do the
+new work; the last step of the pipeline is the **existing**
+`sdcard.upload_file` and `PrintQueue.add` from §5, unmodified. This feature
+never commands a printer — it stops at producing a file the existing start
+route (§5.4) can start.
+
+### 6.1 The engine is Bambu Studio, not OrcaSlicer
+
+Both are installed on the machine this was built on, and both are PrusaSlicer
+forks with near-identical CLIs. They are **not** interchangeable. Measured
+2026-07-22: OrcaSlicer slices fine but `--export-3mf` never produced a file
+across five argument orderings, and it needs `use_relative_e_distances`
+patched before it will slice at all. Bambu Studio has neither problem. This
+matters beyond convenience: a raw `.gcode` **cannot be started over MQTT** —
+§5.4's `project_file` command points at `Metadata/plate_N.gcode` *inside* a
+`.gcode.3mf` zip, and the upload route's table (§5.2) already records that raw
+`.gcode` is printer-screen-only. Orca's output was a file the printer could
+never be told to run. **Do not "simplify" this back to OrcaSlicer** — it looks
+like the more open choice and it is the one that doesn't work.
+
+### 6.2 Vendor profiles are `inherits` partials
+
+Bambu Studio ships **1,932** vendor presets under
+`resources/profiles/BBL/**/*.json`, none of them self-contained: the A1
+machine profile carries 39 keys and an `inherits` pointing at a parent that
+carries the other ~70, and passing the raw 39-key file to `--load-settings`
+fails validation. `ProfileIndex.load()` indexes every profile in the tree —
+by its `name` **field**, not its filename, because the two differ often
+enough that keying on the filename silently loses profiles — and
+`flatten_profile(name, index)` walks the `inherits` chain recursively (child
+keys win over parent keys), raising `SliceError` on an unknown name, a
+missing parent, or an inheritance cycle (never a bare `RecursionError`, which
+would otherwise take the whole server down on a vendor tree that ships a
+cycle). Both are pure functions tested with a fake index and no slicer
+installed.
+
+The invocation, verified by hand on this machine:
+
+```
+bambu-studio.exe <model.stl>
+  --load-settings  "<flat_machine.json>;<flat_process.json>"
+  --load-filaments "<flat_filament.json>"
+  --slice 0
+  --export-3mf     "<name>.gcode.3mf"
+  --outputdir      "<per-job temp dir>"
+```
+
+`--outputdir` is **mandatory** — without it the output lands nowhere
+findable and the slice appears to succeed while producing nothing. The model
+path comes first, before any option; that ordering is the one that was
+verified to work. `run_slice()` writes the three flattened configs into the
+job's own directory, runs this argv with a `SLICE_TIMEOUT_S` (900 s) timeout so
+a pathological model can't pin a core forever, and treats **any** nonzero exit
+as failure even when a `.gcode.3mf` is on disk — Bambu Studio exits 0 on
+success (measured on this machine), so a nonzero code with a file present is
+most likely a crash mid-export leaving a *truncated* file, and those bytes
+would otherwise get uploaded to a printer's microSD and queued. (OrcaSlicer
+exits nonzero on success, which is exactly why that "treat any file as
+success" shortcut is wrong — but Orca isn't the engine here; see §6.1.) Exit 0
+with **no** file is OrcaSlicer's exact failure mode from §6.1, and `run_slice`
+never lets it read as success either.
+
+### 6.3 Quality tiers, and why a preset can't be a literal profile name
+
+A preset is offered as one of three curated **tiers** — `standard` (vendor
+"Standard"), `fine` ("Optimal"), `draft` ("Extra Draft") — resolved against
+the profile index at request time, not looked up in a fixed table of profile
+names. That indirection exists because the profile-naming scheme has three
+traps, all measured on this install on 2026-07-22:
+
+| Trap | Reality |
+|---|---|
+| The model token differs by profile kind | the mini is `A1 mini` in **machine** profile names (`Bambu Lab A1 mini 0.4 nozzle`) but `A1M` in **process**/**filament** names (`0.20mm Standard @BBL A1M`) — one printer, two tokens, and neither is derivable from the other |
+| The nozzle suffix is conditional | omitted at 0.4 (`0.20mm Standard @BBL A1`), present otherwise (`0.30mm Standard @BBL A1 0.6 nozzle`) |
+| Layer height is not constant across nozzles | "Standard" is 0.20 mm at 0.4 and 0.30 mm at 0.6 — a hardcoded label would show a height the printer isn't using |
+
+So `resolve_preset(tier_id, model_id, nozzle, index)` builds a **fully
+anchored** regex (`^\d+\.\d+mm {tier} @BBL {token}{suffix}$`, `re.fullmatch`)
+and searches the index for the one name that satisfies it, then reads the
+displayed `label` back off whatever matched. Fully anchored, not
+`startswith`/`endswith` checked independently, because a name like
+`"0.20mm Silent Standard @BBL A1"` would satisfy a naive
+layer-height-prefix-plus-tier-suffix pair for tier `"standard"` — and because
+`"Silent Standard"` sorts before `"Standard"`, it would silently win over the
+real profile. One anchored pattern closes that gap. `resolve_preset` returns
+`None` when nothing resolves (not every tier exists for every nozzle);
+`available_presets()` filters those out, so an unavailable combination is a
+missing option in the UI rather than a slice that fails late. Filament
+profiles (`filament_profile_name`) use the same process token as above, not
+the machine one, for the same "Generic PLA @BBL A1" / "@BBL A1M" split.
+
+**Filament detection.** `detect_loaded_filament(state)` reads
+`ams.tray[].tray_type`, falling back to `vt_tray`, off the live MQTT state
+dict — the same deep-merged, partial-at-any-moment shape as everywhere else
+in this repo (§3.1), so it is deliberately paranoid about type at every level.
+Returns `None`, the normal case, for any spool the printer's RFID can't
+identify (most third-party filament) — the UI prefills the dropdown with the
+result and leaves it always editable, so an unidentifiable spool never blocks
+slicing. When an AMS has more than one tray loaded, it returns the **first**
+identifiable one in unit/slot order — there is no "active tray" signal to read
+instead — so on a mixed-material AMS this can report a material other than the
+one actually feeding the nozzle. Acceptable only because the field stays
+editable; never treat it as authoritative.
+
+**Tree supports** are a single key. The A1 process profile already ships
+`support_type = 'tree(auto)'`; the "Tree supports" checkbox patches only
+`enable_support` (into a **copy** of the process dict — the caller's cached
+profile is never mutated). Default is **off**, matching the vendor default.
+Measured on an overhanging test model: 485 s / 1.70 g off, 968 s / 2.84 g on —
+a support toggle that silently defaulted on would double a print's cost
+without the operator asking for it.
+
+### 6.4 Nozzle, and provenance instead of the file's own metadata
+
+Resolving a machine profile needs the installed nozzle, and the printer
+doesn't report it over MQTT any more than it reports its model (§5.3) — so,
+like `model_id`, it is a **configured** `PrinterConfig` field: `nozzle`, one of
+`NOZZLES = ("0.2", "0.4", "0.6", "0.8")`, degrading to `DEFAULT_NOZZLE = "0.4"`
+on anything unparseable rather than raising, the same rule `normalize_roi()`
+already applies — a wrong nozzle slices for the wrong hardware, so the default
+has to be the common case. `registry.printer_nozzle(serial)` never returns
+`""` for the same reason `printer_model()` doesn't: callers splice it straight
+into a profile name string, and an empty string would silently build a name
+that matches nothing.
+
+**The CLI omits `printer_model_id`.** A CLI-sliced `.gcode.3mf`'s
+`Metadata/slice_info.config` carries no `printer_model_id` key (measured
+2026-07-22), so if the model-mismatch guard (§5.3) read it off the file the
+way the upload route does for a human-sliced file, it would silently see
+"unknown" and never fire. `slicejobs._do()` sidesteps this by recording
+**provenance** instead of asking the file: the queue job's `model_id` is set
+from `registry.printer_model(serial)` — the printer we *sliced for*, known at
+submit time — not parsed back out of the bytes we just produced.
+
+### 6.5 The job coordinator: one worker, globally
+
+`SliceCoordinator` (`server/slicejobs.py`) owns the job list and a **single**
+background worker thread — not one per printer. Slicing pegs a CPU core, and
+this same server supervises a YOLO detector process that has to stay
+responsive (§2); a per-printer worker would let a multi-printer fleet start
+several slices at once and starve detection, which is the one thing on this
+box that must not stall. `run`, `parse`, and `clock` are injectable — the same
+seam pattern as `DetectorSupervisor`'s `spawn` and the registry's
+`service_factory` — so the whole state machine tests with no slicer, no
+printer, and no camera.
+
+A job moves `queued → slicing → uploading → done`, or to `failed` from any of
+those, or to `cancelled` while still `queued`. Each job gets its own
+directory, `runs/_slice/<job_id>/` (§9), removed with `shutil.rmtree` on
+**every** exit path including cancellation. **Any failure — slicing, or the
+upload after it — latches `failed` and leaves the queue completely
+untouched**, the same "a step that didn't happen must never leave a
+half-finished job behind" principle as §5.4's dequeue-only-on-confirmation. If
+`queue.add` itself raises *after* a successful upload, the file is already on
+the card with no queue entry for it — recoverable from the SD Files page, and
+the job reports `failed` even though the upload succeeded; this is a known,
+accepted gap rather than something the coordinator tries to paper over.
+
+Jobs are **runtime-only, never persisted** — the same reasoning as "arm is
+runtime-only" (§4.5): a half-finished slice pointing at a deleted temp
+directory must not survive a restart. The *result* is durable, because it
+lands on the microSD and in `queues.json`. Left unbounded, a server nobody
+clears the job list on would accumulate one record per slice ever submitted;
+`MAX_FINISHED_JOBS` (50) evicts the *oldest* **terminal** (`done`/`failed`/
+`cancelled`) records once the count is exceeded — a job still `queued`,
+`slicing`, or `uploading` is never touched by this regardless of how far past
+the cap the total grows.
+
+Two correctness details worth knowing if you touch this file:
+
+- **`stop()` deliberately does not clear `self._thread` when the join times
+  out.** `run_slice` allows the CLI up to `SLICE_TIMEOUT_S` (900 s), so a
+  `stop()` called mid-slice can easily outlive a short join. If it cleared the
+  thread reference anyway, a later `start()`'s liveness check would see `None`
+  and spawn a **second** worker on top of one still running a slice —
+  defeating the entire single-global-worker design in the first paragraph
+  above. `start()` therefore checks `self._thread.is_alive()`, not identity
+  with `None`, specifically so it catches this. Same class of bug
+  `DetectorSupervisor._stop_proc` guards against for its own subprocess: never
+  let go of a handle to something you only *asked* to stop, only to something
+  that actually did.
+- **`lifespan` stops only what it actually started, in reverse order.** With
+  two lifecycle components (`detection`, `slicer`), a raised exception from
+  the second `start()` must not skip past a `finally` that unconditionally
+  stops both — that would call `.stop()` on a `slicer` that never started. A
+  `started` list is appended to only after each `start()` succeeds, and
+  `finally` walks it in reverse.
+
+### 6.6 Routes
+
+| Method + path | Notes |
+|---|---|
+| `GET /api/printers/{serial}/slice/options` | Presets + filaments that actually resolve for this printer, plus the detected filament. 404 when no slicer. **No unknown-printer check** — an unresolvable serial degrades to empty presets/filaments, the same "unknown never blocks" convention as `printer_model`/`printer_nozzle`, not a 404 |
+| `POST /api/printers/{serial}/slice` | Multipart STL/3mf/STEP + preset + filament + supports → 202 `{job_id}`. Sync `def`, same reason as the FTPS routes (§3.2): reading a large model off the wire must not stall the event loop. 400 on a non-model extension or an empty body, 404 on an unknown printer |
+| `GET /api/slice/jobs?serial=` | Job list, newest first, for polling |
+| `DELETE /api/slice/jobs/{job_id}` | Cancels a still-queued job, **or** clears a finished one from the list; 404 if neither applies |
+
+All four 404 when `slicer=None`, the same "None means inert" convention as
+`queue=None`/`detection=None` — a machine with no Bambu Studio install still
+boots, still monitors, still prints files already on a card.
+`find_slicer(env, candidates)` checks `BAMBU_STUDIO_EXE` first (ignoring it if
+that path no longer exists, so a stale env var can't shadow a good default
+install), then the default Windows install paths, and returns `None` rather
+than raising — a supported outcome, not an error.
+
+---
+
+## 7. Frontend
 
 React 19 + Vite 6, plain JSX, one global `styles.css` of design tokens, a
 hand-rolled UI kit, and **no router** — see `FRONTEND-STACK-GUIDE.md`.
@@ -742,12 +981,14 @@ page gets the same `{printers, selected, onSelect}` props):
 | `dashboard` | `Dashboard.jsx` | Stat tiles, `CameraCard`, `AutoStopCard`, `PrintInfoCard`, `HmsCard` |
 | `detection` | `Detection.jsx` | Enable/disable, camera source, webcam index, conf slider, armed-class checkboxes, detector health, and the **draggable ROI editor** (`RoiEditor`) over the live view |
 | `sdfiles` | `SdFiles.jsx` | FTPS microSD browser with breadcrumbs + upload |
+| `slice` | `Slice.jsx` | STL upload, preset radio group, filament dropdown (prefilled from detection), tree-supports checkbox, polled job list (§6) |
 | `queue` | `Queue.jsx` | Job table, reorder, remove, "Add from SD" picker, totals bar |
 
 **Data layer.** `src/api/printer.js` is a set of plain `fetch` wrappers —
 `addPrinter`, `updatePrinter`, `removePrinter`, `fetchFiles`, `fetchQueue`,
 `addQueueJob`, `removeQueueJob`, `reorderQueue`, `uploadFile`, `fetchLatestFrame`,
-`updateDetection`, `armDetection`, `fetchDetectionFrame`. Its `detail(res)`
+`updateDetection`, `armDetection`, `fetchDetectionFrame`, `fetchSliceOptions`,
+`startSlice`, `fetchSliceJobs`, `cancelSliceJob` (§6.6). Its `detail(res)`
 helper flattens FastAPI's `{"detail": ...}` — which is a *list* of validation
 objects for a 422 — so no caller can ever surface `[object Object]`. The two
 frame fetchers return an object URL the caller must revoke, or `null`.
@@ -760,6 +1001,8 @@ frame fetchers return an object URL the caller must revoke, or `null`.
 | Camera frame (`CameraCard`) | Polling `fetchDetectionFrame` (live) or `fetchLatestFrame` | Every 5 s, matching the detector interval. The **last good frame stays on screen** until a new one arrives — a momentarily missing frame never blanks the view; the placeholder appears only before the first frame |
 | Queue | Polling `fetchQueue` + refetch after every mutation | 4 s |
 | SD listing | On navigation / Refresh only | Never polled — an FTPS handshake is not instant |
+| Slice options | On navigation only, like SD listing | Fetched once per printer; describes what's available *right now* |
+| Slice jobs | Polling `fetchSliceJobs`, plus an immediate refetch on submit | 2 s |
 
 `usePrinters` reconnects with exponential backoff to 10 s, guards against
 StrictMode double-mount teardown, and keeps the last-known-good list if a frame
@@ -796,7 +1039,7 @@ out-of-order response can never clobber a newer one.
 
 ---
 
-## 7. Running everything
+## 8. Running everything
 
 ### Prerequisites (on the printer, do these first)
 
@@ -885,7 +1128,7 @@ python eval_webcam_resolutions.py
 python run_camera_detection.py              # windowed live demo
 ```
 
-### Domain adaptation to the A1 camera (§11)
+### Domain adaptation to the A1 camera (§12)
 
 Stop the server first — these compete for the camera. Run the split **before**
 synthesising anything; that ordering is the whole point.
@@ -915,7 +1158,7 @@ python eval_real.py --models runs/train/failure_detector/weights/best.pt \
 
 Note the defaults on `build_real_eval.py` (`--out datasets/real_eval`) and
 `eval_real.py` (`--eval datasets/real_eval`) point at the **contaminated**
-first-run directories, which are kept as the record of §11.2. Pass the `_ho`
+first-run directories, which are kept as the record of §12.2. Pass the `_ho`
 paths explicitly; the bare `python build_real_eval.py` rebuilds the wrong thing.
 
 ### Tests
@@ -928,7 +1171,7 @@ cd frontend && npm test                 # ROI drag maths (vitest)
 
 ---
 
-## 8. Data and file layout
+## 9. Data and file layout
 
 ```
 GUI_UCDavis/
@@ -938,6 +1181,8 @@ GUI_UCDavis/
 │  ├─ _detect/
 │  │  ├─ status.json             detect.py → server: ts, fps, camera, conf, detections, error
 │  │  └─ latest.jpg              annotated frame, JPEG q85
+│  ├─ _slice/                    per-job temp dirs, deleted on every exit path (§6.5)
+│  │  └─ <job_id>/                machine.json, process.json, filament.json, sliced.gcode.3mf
 │  ├─ train/failure_detector/weights/best.pt      public-data detector ("best.pt")
 │  ├─ eval/                      per-tier eval plots + confusion matrices
 │  ├─ detect/runs/train/
@@ -966,10 +1211,13 @@ GUI_UCDavis/
 `runs/_detect` is a *sibling* of the capture run directories under the same
 `--runs-dir`, and its name starts with `_` so it can never be mistaken for a run
 (`server/runs.py` only considers directories containing a `frames/` subdir).
+`runs/_slice` is a sibling with the same load-bearing underscore prefix, one
+directory per slice job, always removed by the coordinator when the job
+finishes or is cancelled (§6.5) — nothing here is meant to outlive its job.
 
 ---
 
-## 9. Testing
+## 10. Testing
 
 ```bash
 python -m pytest              # server + root modules, from the repo root
@@ -997,6 +1245,9 @@ worth knowing:
 | `test_threemf.py` | Slice-info parsing, `printer_model_id`, tolerance of garbage |
 | `test_runs.py` | Active-run discovery and newest-frame selection |
 | `test_queue.py` | `PrintQueue` mutation, ordering, totals |
+| `test_slicer.py` | Profile flattening + cycle detection, `ProfileIndex`, `find_slicer`, `build_argv`, `run_slice` against an injected fake subprocess |
+| `test_slicepresets.py` | Tier resolution (the `A1`/`A1M` token split, the anchored regex, the decoy-name trap), filament detection off a fake MQTT state |
+| `test_slicejobs.py` | The full `SliceCoordinator` state machine against a fake registry/queue and an injected fake `run_slice` — success chains to upload+queue, each failure step latches and leaves the queue untouched, the finished-job cap |
 | `test_docs.py` | The documentation itself — see below |
 
 **Frontend** (`vitest`, added 2026-07-21): `roiGeometry.test.js` covers the ROI
@@ -1024,7 +1275,7 @@ against real hardware (the note below), and the dataset scripts (§3.1).
 
 The dataset/training scripts (§3.1) are **not** unit-tested — they are one-shot
 research tools whose output is checked by looking at it, and their real
-correctness gate is the disjoint-split evaluation in §11.
+correctness gate is the disjoint-split evaluation in §12.
 
 The design that makes this possible: everything that touches hardware is behind
 an injectable seam — `service_factory` in the registry, `spawn`/`clock` in
@@ -1041,9 +1292,22 @@ filesystem it streams gcode from was not worth the risk. The *read* half
 2026-07-21, and STOR reuses exactly that connection machinery. Verify it before
 relying on it.
 
+**Also not covered: a CLI-sliced `.gcode.3mf` actually starting and printing on
+real hardware (§6).** What *is* verified: the CLI produces a `.gcode.3mf`
+whose `Metadata/plate_1.gcode` and `slice_info.config` this repo's own
+`threemf.parse_slice_info` reads correctly, and the whole pipeline — slice →
+upload → queue, with the right provenance `model_id` — runs end to end over
+HTTP against a mock printer. What is **not** verified: that the printer
+accepts and prints the result. This is the first thing that makes STOR (above)
+load-bearing rather than theoretical — a slice job's upload step is the first
+real caller of it. Nobody has started one; the printer was in active use near
+people while this was built, and running the hardware gate would have moved
+it. Per §1.1, treat this as unverified until someone runs it and updates that
+table.
+
 ---
 
-## 10. Gotchas and design decisions
+## 11. Gotchas and design decisions
 
 - **One process per camera (Windows).** This is why `detect.py` is a separate
   process, why the server serves *files* rather than opening a device, and why
@@ -1111,7 +1375,7 @@ relying on it.
 - **The detector is a prototype, and auto-stop is not validated.** The shipped
   public-data model is blind on the A1's built-in camera, and the fine-tuned
   replacement is measured on 9 positives from a single physical tangle in a
-  single room. §11 is the whole story; do not arm auto-stop on the strength of
+  single room. §12 is the whole story; do not arm auto-stop on the strength of
   the headline numbers. `README.md`'s exit criterion — print-level FPR < 1% over
   ≥30 successful prints, time-to-detection < 5 min over ≥20 induced failures —
   has not been met.
@@ -1121,20 +1385,32 @@ relying on it.
   instead of waiting out the window, and rebuild a wedged client. It cannot
   help when the IP changed — that needs Edit, which rebuilds on a host change.
   It sends no command, so it can never disturb a running print.
-- **Split the data before you derive anything from it.** §11.2. An md5 check
+- **Split the data before you derive anything from it.** §12.2. An md5 check
   will not catch a leak, and a random split is not a split when consecutive
   frames are near-duplicates.
+- **The engine is Bambu Studio, not OrcaSlicer.** §6.1. Measured, not a
+  preference: OrcaSlicer's `--export-3mf` never produced a file across five
+  argument orderings, and a raw `.gcode` can't be started over MQTT anyway
+  (§5.4). Do not "simplify" `slicer.py` back to Orca — it looks like the more
+  open choice and it is the one that doesn't work.
+- **Preset names are not stable strings.** §6.3. The model token differs
+  between machine profiles (`A1 mini`) and process/filament profiles (`A1M`);
+  the nozzle suffix is omitted at 0.4 and present otherwise; layer height for
+  the same tier word varies by nozzle. A preset must be resolved against the
+  live profile index with a fully anchored regex and its label read back off
+  whatever matched — never hardcoded, and never matched with independent
+  `startswith`/`endswith` checks, which a decoy profile name can fool.
 
 ---
 
-## 11. The camera-angle domain gap (measured 2026-07-19, first fix measured 2026-07-21)
+## 12. The camera-angle domain gap (measured 2026-07-19, first fix measured 2026-07-21)
 
 The most important open problem, and the thing that governs the next phase of
 work. **The public-data detector does not work on the A1's built-in camera.**
-A first domain-adaptation pass (§11.3) fixes that measurably but is **not yet
-deployable for auto-stop** — read §11.4 before quoting any of it.
+A first domain-adaptation pass (§12.3) fixes that measurably but is **not yet
+deployable for auto-stop** — read §12.4 before quoting any of it.
 
-### 11.1 The gap, measured
+### 12.1 The gap, measured
 
 The public dataset it was trained on is shot at roughly 30–70° looking down at
 the print. The A1 mini's built-in camera is a wide fisheye mounted low and
@@ -1171,7 +1447,7 @@ clean frames as negatives. The shipped public-data model scores:
 
 Not weak on this camera -- blind.
 
-### 11.2 The eval that was circular (worth internalising)
+### 12.2 The eval that was circular (worth internalising)
 
 The first fine-tune scored **mAP50 0.7123, 100% recall, 0% false alarms** — and
 the number was meaningless. All 49 clean frames used as eval negatives were
@@ -1193,7 +1469,7 @@ Two things made this easy to miss, and both generalise:
 Cost of honesty: 10 usable cutouts instead of 31, and 9 test positives instead of
 29. The re-run on the disjoint split is the only number worth quoting.
 
-### 11.3 What the fix achieved (disjoint split, 2026-07-21)
+### 12.3 What the fix achieved (disjoint split, 2026-07-21)
 
 Training: 517 composites from 10 cutouts and 32 clean backgrounds (train half).
 Evaluation: 9 real spaghetti frames + 17 real clean frames (test half), disjoint.
@@ -1216,7 +1492,7 @@ metric that surprises you is often a data-collection bug.
 
 Full method and numbers: `FAILURE_DETECTOR_REPORT.md` §8.
 
-### 11.4 What this does NOT establish
+### 12.4 What this does NOT establish
 
 Read this before the checkpoint gets used for anything.
 
@@ -1247,7 +1523,7 @@ Read this before the checkpoint gets used for anything.
 `README.md`'s exit criterion — print-level FPR < 1% over ≥30 successful prints,
 time-to-detection < 5 min over ≥20 induced failures — remains unmet.
 
-### 11.5 The alternative that sidesteps all of this
+### 12.5 The alternative that sidesteps all of this
 
 A USB webcam at 30–70° puts the model back in its training domain for near-zero
 effort — `camera_source: webcam` is already built and tested, and the resolution

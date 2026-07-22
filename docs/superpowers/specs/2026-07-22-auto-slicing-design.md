@@ -1,14 +1,52 @@
 # Automatic slicing: printer + filament + preset → startable gcode — design
 
-> **STATUS: PROPOSED (2026-07-22).** Agreed in brainstorming; **not implemented**.
-> Written in the future tense. Nothing in `server/` implements any of this yet.
+> **STATUS: SHIPPED (2026-07-22).** Written in the future tense before
+> implementation; the feature now exists — `server/{slicer,slicepresets,
+> slicejobs}.py`, four routes on `main.py`, `PrinterConfig.nozzle`, and the
+> `slice` frontend page. See `master.md` §6 for the as-built reference.
 >
-> The feasibility findings in §2 **are** verified — they were measured on this
-> machine on 2026-07-22 against Bambu Studio and OrcaSlicer as installed. Treat
-> §2 as fact and the rest as intent.
+> The feasibility findings in §2 were verified in advance and held up exactly
+> as measured. Six things elsewhere in this design were wrong in advance and
+> got fixed during implementation:
+>
+> - §2.3's `run_slice` treated a nonzero exit with a file already on disk as
+>   success. Bambu Studio exits 0 on success (measured 2026-07-22), so a
+>   nonzero code with a file present is a crash mid-export leaving a
+>   *truncated* `.gcode.3mf` — now always a failure regardless of what's on
+>   disk.
+> - §4.3's `resolve_preset` matched on `endswith` and would have been fooled by
+>   a decoy profile name (e.g. `"0.20mm Silent Standard @BBL A1"`) that sorts
+>   before the real one for tier `"standard"`. Fixed with one fully anchored
+>   (`re.fullmatch`) pattern.
+> - `slicejobs._do`'s model-path fallback (`work / basename(...) or work /
+>   "model.stl"`) was dead code: `/` binds tighter than `or`, so the left side
+>   is always a truthy `Path` and the fallback never ran. Fixed by computing
+>   the basename (with its own fallback) before the one `/` join.
+> - `SliceCoordinator.stop()` cleared `self._thread` as soon as the join
+>   timed out, so a `start()` called after a timed-out `stop()` could spawn a
+>   **second** worker on top of one still running a slice — defeating the
+>   single-global-worker design in §5. Fixed: the reference is left in place
+>   until the thread is confirmed dead; `start()` checks `.is_alive()`, not
+>   identity with `None`.
+> - `lifespan` called `.stop()` on every component unconditionally in
+>   `finally`, so a `slicer.start()` that raised would still get a `.stop()`
+>   call it never earned, and — worse — a `detection.start()` that had
+>   already succeeded could be skipped entirely if the later `slicer.start()`
+>   raised before reaching it. Fixed: a `started` list records only components
+>   whose `start()` actually returned, and `finally` stops just those, in
+>   reverse order.
+> - The `slice_options` route as drafted 404'd on an unknown printer serial,
+>   which contradicted its own test (`slice/options` is meant to degrade to
+>   empty presets/filaments for an unresolvable printer, the same
+>   "unknown never blocks" convention as `printer_model`/`printer_nozzle` —
+>   not a 404). Fixed by dropping the check; only `slicer is None` 404s.
 >
 > Historical record, not maintained. **`master.md` is authoritative wherever
 > this file disagrees with it.**
+>
+> Task checkboxes in the companion plan were followed in order; see
+> `plans/2026-07-22-auto-slicing.md` for its own status line, including the
+> one task deliberately left undone.
 
 Date: 2026-07-22
 

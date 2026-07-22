@@ -149,7 +149,7 @@ internet-scraped dataset, and on the A1's own fisheye camera that model scores
 data built from real frames of this printer recovers it to 0.4539 with 100%
 recall, but on 9 test positives from a single physical tangle in a single room.
 That is enough to say the approach works and nowhere near enough to arm
-auto-stop. [`master.md` §11](master.md) has the full story, including how the
+auto-stop. [`master.md` §12](master.md) has the full story, including how the
 first evaluation of it turned out to be circular; the exit criterion below is
 still the bar.
 
@@ -166,7 +166,7 @@ python -m pytest -q          # server + root modules; no hardware required
 cd frontend && npm test      # ROI drag maths (vitest)
 ```
 
-Counts are deliberately not quoted here — see [`master.md` §9](master.md) for
+Counts are deliberately not quoted here — see [`master.md` §10](master.md) for
 what each test file covers, and run the commands for the number.
 
 Design specs and implementation plans live in `docs/superpowers/`.
