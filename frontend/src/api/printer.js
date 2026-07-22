@@ -185,3 +185,46 @@ export async function fetchDetectionFrame(serial) {
     return null;
   }
 }
+
+// Presets/filaments valid for this printer's configured model+nozzle, plus
+// the filament detected from live MQTT state. -> { model_id, nozzle,
+// presets: [{id, label, process, machine}], filaments: [{material, profile}],
+// detected_filament }. 404s (via detail()) when the server has no slicer.
+export async function fetchSliceOptions(serial) {
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/slice/options`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// Uploads a model file to be sliced for `serial` and queued once it's done.
+// -> { job_id }. 400 on a non-model extension or an empty file, 404 for an
+// unknown printer or when the server has no slicer.
+export async function startSlice(serial, file, { preset, material, supports }) {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("preset", preset);
+  body.append("material", material);
+  body.append("supports", supports ? "true" : "false");
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/slice`,
+    { method: "POST", body });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// -> [{id, serial, state, name, source_name, preset, preset_label, material,
+//      supports, created, error, seconds, grams, sd_path}], newest first.
+export async function fetchSliceJobs(serial) {
+  const res = await fetch(
+    `/api/slice/jobs?serial=${encodeURIComponent(serial)}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return (await res.json()).jobs;
+}
+
+// Cancels a queued slice job, or clears a finished/failed/cancelled one.
+export async function cancelSliceJob(id) {
+  const res = await fetch(
+    `/api/slice/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}

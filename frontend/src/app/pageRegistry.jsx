@@ -3,6 +3,7 @@ import Detection from "../pages/Detection.jsx";
 import Overview from "../pages/Overview.jsx";
 import Queue from "../pages/Queue.jsx";
 import SdFiles from "../pages/SdFiles.jsx";
+import Slice from "../pages/Slice.jsx";
 
 // Every page: key -> { title, group, component }. The sidebar and topbar
 // are derived from this — add future pages (runs browser, print control)
@@ -14,6 +15,8 @@ export const pages = {
   dashboard: { title: "Dashboard", group: "Monitor", component: Dashboard },
   detection: { title: "Detection", group: "Monitor", component: Detection },
   sdfiles: { title: "SD Files", group: "Monitor", component: SdFiles },
+  // Before queue: slicing feeds the queue.
+  slice: { title: "Slice", group: "Monitor", component: Slice },
   queue: { title: "Queue", group: "Monitor", component: Queue },
 };
 
