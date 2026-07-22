@@ -1,4 +1,6 @@
 import json
+import pathlib
+import subprocess
 
 import pytest
 
@@ -121,3 +123,78 @@ def test_build_argv_always_passes_outputdir():
     argv = build_argv("bs.exe", "m.stl", "m.json", "p.json", "f.json",
                       "o.gcode.3mf", "workdir")
     assert argv[argv.index("--outputdir") + 1] == "workdir"
+
+
+from server.slicer import run_slice
+
+MACHINE = {"name": "m", "nozzle_diameter": ["0.4"]}
+PROCESS = {"name": "p", "enable_support": "0"}
+FILAMENT = {"name": "f"}
+
+
+def _fake_runner(out_dir, name, *, returncode=0, stderr=""):
+    """A subprocess.run stand-in that 'produces' the 3mf the real CLI would."""
+    def run(argv, **kw):
+        if returncode == 0:
+            (pathlib.Path(out_dir) / name).write_bytes(b"PK\x03\x04fake")
+        return subprocess.CompletedProcess(argv, returncode, "", stderr)
+    return run
+
+
+def test_run_slice_returns_the_produced_3mf(tmp_path):
+    out = run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+                    tmp_path, runner=_fake_runner(tmp_path, "sliced.gcode.3mf"))
+    assert out.name == "sliced.gcode.3mf"
+    assert out.read_bytes() == b"PK\x03\x04fake"
+
+
+def test_run_slice_writes_the_flattened_configs_next_to_the_output(tmp_path):
+    run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+              tmp_path, runner=_fake_runner(tmp_path, "sliced.gcode.3mf"))
+    assert json.loads((tmp_path / "machine.json").read_text(
+        encoding="utf-8")) == MACHINE
+
+
+def test_run_slice_patches_enable_support_on(tmp_path):
+    # The whole supports feature is this one key; support_type is already
+    # tree(auto) in the vendor profile.
+    run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+              tmp_path, supports=True,
+              runner=_fake_runner(tmp_path, "sliced.gcode.3mf"))
+    written = json.loads((tmp_path / "process.json").read_text(encoding="utf-8"))
+    assert written["enable_support"] == "1"
+    assert written["support_type"] == "tree(auto)"
+    assert PROCESS["enable_support"] == "0"   # caller's dict not mutated
+
+
+def test_run_slice_leaves_supports_off_by_default(tmp_path):
+    run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+              tmp_path, runner=_fake_runner(tmp_path, "sliced.gcode.3mf"))
+    written = json.loads((tmp_path / "process.json").read_text(encoding="utf-8"))
+    assert written["enable_support"] == "0"
+
+
+def test_run_slice_raises_with_stderr_when_the_slicer_fails(tmp_path):
+    runner = _fake_runner(tmp_path, "sliced.gcode.3mf", returncode=2,
+                          stderr="got error when validate: boom")
+    with pytest.raises(SliceError, match="boom"):
+        run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+                  tmp_path, runner=runner)
+
+
+def test_run_slice_raises_when_exit_0_but_no_file_appeared(tmp_path):
+    # Exactly the OrcaSlicer failure mode: "success" with no 3mf. A silent
+    # empty success would queue a job pointing at nothing.
+    def runner(argv, **kw):
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    with pytest.raises(SliceError, match="produced no"):
+        run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+                  tmp_path, runner=runner)
+
+
+def test_run_slice_turns_a_timeout_into_a_slice_error(tmp_path):
+    def runner(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, 1.0)
+    with pytest.raises(SliceError, match="timed out"):
+        run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+                  tmp_path, runner=runner)

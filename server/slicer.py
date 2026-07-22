@@ -145,3 +145,69 @@ def build_argv(exe, model_path, machine_json, process_json, filament_json,
         "--export-3mf", str(out_name),
         "--outputdir", str(out_dir),
     ]
+
+
+# A pathological model can slice for a very long time. The subprocess is
+# killed at this point and the job fails normally rather than pinning a core
+# forever.
+SLICE_TIMEOUT_S = 900.0
+
+# The CLI always names the gcode plate_1.gcode inside out_dir, so every job
+# gets its own directory and two slices can never collide.
+OUTPUT_NAME = "sliced.gcode.3mf"
+
+
+def run_slice(exe, model_path, machine: dict, process: dict, filament: dict,
+              out_dir, *, supports: bool = False,
+              timeout_s: float = SLICE_TIMEOUT_S,
+              runner=subprocess.run) -> pathlib.Path:
+    """Slice `model_path` into out_dir/sliced.gcode.3mf and return its path.
+
+    `machine`/`process`/`filament` are already-FLATTENED configs (see
+    flatten_profile). `runner` is injectable so the whole path tests without a
+    slicer installed.
+
+    Always raises SliceError on failure, and the message carries the slicer's
+    own stderr, because that is the only thing that explains a bad model.
+    """
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    process = dict(process)  # never mutate the caller's cached profile
+    process["enable_support"] = "1" if supports else "0"
+    # Pinned rather than assumed: the A1 vendor profile already defaults to
+    # tree(auto), but a future profile might not, and the UI promises trees.
+    process["support_type"] = "tree(auto)"
+
+    paths = {}
+    for kind, cfg in (("machine", machine), ("process", process),
+                      ("filament", filament)):
+        p = out_dir / f"{kind}.json"
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+        paths[kind] = p
+
+    argv = build_argv(exe, model_path, paths["machine"], paths["process"],
+                      paths["filament"], OUTPUT_NAME, out_dir)
+    try:
+        proc = runner(argv, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        raise SliceError(
+            f"slicing timed out after {timeout_s:.0f}s") from None
+    except OSError as e:
+        raise SliceError(f"could not run the slicer: {e}") from None
+
+    produced = out_dir / OUTPUT_NAME
+    if proc.returncode != 0 and not produced.exists():
+        raise SliceError(_tail(proc.stderr) or
+                         f"slicer exited {proc.returncode}")
+    if not produced.exists():
+        # OrcaSlicer's exact failure mode. Never let it read as success.
+        raise SliceError("the slicer produced no .gcode.3mf")
+    return produced
+
+
+def _tail(text: str, limit: int = 2000) -> str:
+    """Last `limit` characters of the slicer's stderr. Bounded because it is
+    surfaced in a job record and polled by the browser."""
+    text = (text or "").strip()
+    return text[-limit:]
