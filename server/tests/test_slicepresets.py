@@ -22,6 +22,24 @@ def test_machine_name_uses_the_machine_token_and_always_has_the_suffix():
     assert machine_profile_name("N1", "0.4") == "Bambu Lab A1 mini 0.4 nozzle"
 
 
+def test_machine_name_is_empty_for_an_unknown_model():
+    assert machine_profile_name("N9X", "0.4") == ""
+
+
+def test_resolve_preset_is_not_fooled_by_a_prefixed_decoy_name():
+    # "0.20mm Silent Standard @BBL A1" satisfies a naive start-anchor +
+    # end-anchor check for tier "standard", and sorts BEFORE the real
+    # "0.20mm Standard @BBL A1" ('i' < 't'), so an unanchored match would
+    # silently return the decoy instead of the real profile. No such profile
+    # exists in the installed tree today, but nothing stops a vendor update
+    # from introducing one.
+    decoy_index = dict(INDEX, **{
+        "0.20mm Silent Standard @BBL A1": {"name": "0.20mm Silent Standard @BBL A1"},
+    })
+    got = resolve_preset("standard", "N2S", "0.4", decoy_index)
+    assert got["process"] == "0.20mm Standard @BBL A1"
+
+
 def test_resolve_preset_finds_the_standard_tier_for_an_a1():
     got = resolve_preset("standard", "N2S", "0.4", INDEX)
     assert got["process"] == "0.20mm Standard @BBL A1"

@@ -30,9 +30,6 @@ MACHINE_TOKENS = {"N2S": "A1", "N1": "A1 mini"}
 # Not derivable from MACHINE_TOKENS: the mini is "A1M" here, "A1 mini" there.
 PROCESS_TOKENS = {"N2S": "A1", "N1": "A1M"}
 
-# Layer height prefix on a process profile name, e.g. "0.20mm Standard @...".
-_LAYER_RE = re.compile(r"^(\d+\.\d+)mm ")
-
 
 def machine_profile_name(model_id: str, nozzle: str) -> str:
     """Machine profile name for a printer, or "" when the model is unknown.
@@ -65,11 +62,17 @@ def resolve_preset(tier_id: str, model_id: str, nozzle: str,
     token = PROCESS_TOKENS.get(model_id)
     if not tier or not machine or not token or machine not in index:
         return None
-    ending = f"{tier} @BBL {token}{_process_suffix(nozzle)}"
+    # Fully anchored end-to-end (not just start+end independently): a name
+    # like "0.20mm Silent Standard @BBL A1" would satisfy a naive
+    # startswith-layer-height / endswith-tier-suffix pair for tier
+    # "standard", and -- because "Silent Standard" sorts before "Standard"
+    # -- would silently win over the real profile. fullmatch on one pattern
+    # closes that gap; nothing can hide between the two anchors.
+    pattern = re.compile(
+        rf"^(\d+\.\d+)mm {re.escape(tier)} @BBL "
+        rf"{re.escape(token)}{re.escape(_process_suffix(nozzle))}$")
     for name in sorted(index):
-        if not name.endswith(ending):
-            continue
-        m = _LAYER_RE.match(name)
+        m = pattern.fullmatch(name)
         if not m:
             continue
         return {"id": tier_id, "process": name, "machine": machine,
@@ -88,6 +91,13 @@ def available_presets(model_id: str, nozzle: str, index: dict) -> list:
 # Materials offered, in menu order. Generic rather than Bambu-branded profiles
 # because a spool the printer could not identify is, by definition, not a
 # tagged Bambu spool -- and that is the common case.
+#
+# Deliberately doing double duty: this is both the offered-menu list (here,
+# available_filaments) AND the detection whitelist (_material, below) --
+# anything the MQTT state reports that isn't in this tuple is treated as
+# unidentifiable. That coupling is intentional, not an oversight: it keeps
+# "materials we can slice for" and "materials we'll recognize" from ever
+# drifting apart.
 MATERIALS = ("PLA", "PETG", "ABS", "TPU")
 
 
@@ -118,6 +128,13 @@ def detect_loaded_filament(state) -> str | None:
     The UI prefills with this and stays editable, so an unidentifiable spool
     never blocks slicing.
 
+    Returns the FIRST identifiable tray in AMS unit/slot traversal order --
+    there is no "active tray" signal in this state to read instead. On a
+    mixed-material AMS (e.g. PLA in slot 1, PETG in slot 2) this can return
+    a material other than the one actually feeding the nozzle. That is
+    acceptable because the UI keeps the field editable, but it means this
+    value must never be treated as authoritative.
+
     Pure, and deliberately paranoid about shape: state is deep-merged from
     partial MQTT reports (master.md 3.1), so any node can be missing or be
     the wrong type at any moment.
@@ -140,8 +157,8 @@ def detect_loaded_filament(state) -> str | None:
                     found = _material(tray.get("tray_type"))
                     if found:
                         return found
-    return _material((state.get("vt_tray") or {}).get("tray_type")
-                     if isinstance(state.get("vt_tray"), dict) else None)
+    vt_tray = state.get("vt_tray")
+    return _material(vt_tray.get("tray_type")) if isinstance(vt_tray, dict) else None
 
 
 def _material(value) -> str | None:
