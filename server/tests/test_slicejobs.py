@@ -1,4 +1,6 @@
+import logging
 import pathlib
+import threading
 
 import pytest
 
@@ -45,15 +47,19 @@ class FakeQueue:
         self.jobs.append((serial, job))
 
 
-def make(tmp_path, *, run=None, registry=None, queue=None):
+def make(tmp_path, *, run=None, registry=None, queue=None,
+         max_finished_jobs=None):
     def ok_run(exe, model, machine, process, filament, out_dir, **kw):
         out = pathlib.Path(out_dir) / "sliced.gcode.3mf"
         out.write_bytes(b"PK\x03\x04fake")
         return out
+    kwargs = {}
+    if max_finished_jobs is not None:
+        kwargs["max_finished_jobs"] = max_finished_jobs
     return SliceCoordinator(
         registry or FakeRegistry(), queue if queue is not None else FakeQueue(),
         "bs.exe", INDEX, work_dir=tmp_path,
-        run=run or ok_run, parse=lambda data: dict(FAKE_META))
+        run=run or ok_run, parse=lambda data: dict(FAKE_META), **kwargs)
 
 
 def test_a_submitted_job_starts_queued(tmp_path):
@@ -177,3 +183,132 @@ def test_cancelling_a_queued_job_stops_it_running(tmp_path):
 
 def test_run_once_is_a_noop_with_nothing_queued(tmp_path):
     make(tmp_path).run_once()
+
+
+# -- Issue 1: stop()/start() thread lifecycle --------------------------------
+#
+# Nothing above touches start()/stop() at all -- that's exactly why the
+# double-worker bug was invisible. run_slice allows the CLI subprocess up to
+# SLICE_TIMEOUT_S (900s), so a stop() called mid-slice can reliably outlive
+# any short join timeout; if stop() clears self._thread anyway, a later
+# start() sees None and spawns a SECOND worker on top of one still alive
+# inside _do() -- two slices (two Bambu Studio subprocesses) running at once,
+# defeating the entire point of the single global worker (module docstring).
+
+def test_start_twice_creates_only_one_thread(tmp_path):
+    c = make(tmp_path)
+    try:
+        c.start()
+        first = c._thread
+        c.start()                      # must be a no-op: already running
+        assert c._thread is first
+    finally:
+        c.stop()
+
+
+def test_stop_then_start_after_a_clean_stop_yields_one_new_thread(tmp_path):
+    c = make(tmp_path)
+    try:
+        c.start()
+        first = c._thread
+        c.stop()
+        assert c._thread is None       # a clean stop DOES clear the reference
+        c.start()
+        second = c._thread
+        assert second is not None and second is not first
+        assert second.is_alive()
+    finally:
+        c.stop()
+
+
+def test_stop_on_a_wedged_worker_leaves_it_running_and_start_does_not_spawn_a_second(
+        tmp_path):
+    # Deterministic despite the blocking runner: `unblock` is set in a
+    # `finally` so this test cannot hang the suite even if an assertion
+    # above it fails.
+    entered = threading.Event()
+    unblock = threading.Event()
+
+    def wedged_run(exe, model, machine, process, filament, out_dir, **kw):
+        entered.set()
+        unblock.wait(5.0)
+        out = pathlib.Path(out_dir) / "sliced.gcode.3mf"
+        out.write_bytes(b"x")
+        return out
+
+    c = make(tmp_path, run=wedged_run)
+    c.submit("AAA", "p.stl", b"x", "standard", "PLA", False)
+    c.start()
+    first_thread = None
+    try:
+        assert entered.wait(2.0), "worker never picked up the job"
+        first_thread = c._thread
+
+        # timeout=0.2: short so the test runs fast. The worker is still
+        # blocked inside wedged_run(), so this join always times out.
+        c.stop(timeout=0.2)
+
+        # The wedged worker is still alive -- stop() must not let go of its
+        # reference to it just because the join timed out.
+        assert c._thread is first_thread
+        assert first_thread.is_alive()
+
+        # A second start() while the first worker is still alive must be a
+        # no-op, not a second worker spawned on top of it.
+        c.start()
+        assert c._thread is first_thread
+    finally:
+        unblock.set()
+        if first_thread is not None:
+            first_thread.join(timeout=5.0)
+            assert not first_thread.is_alive()
+
+
+# -- Issue 2: a failure's traceback must survive into the log ----------------
+
+def test_a_slice_failure_is_logged_with_a_traceback_not_just_a_message(
+        tmp_path, caplog):
+    def boom(*a, **kw):
+        raise SliceError("got error when validate: boom")
+    c = make(tmp_path, run=boom)
+    job_id = c.submit("AAA", "p.stl", b"x", "standard", "PLA", False)
+    with caplog.at_level(logging.WARNING, logger="server.slicejobs"):
+        c.run_once()
+    records = [r for r in caplog.records if job_id in r.getMessage()]
+    assert records, "no log record mentioned the failed job"
+    # exc_info is what log.exception (vs. log.warning) attaches -- its
+    # presence is what lets a real bug's traceback survive into the log
+    # instead of being indistinguishable from an ordinary, expected
+    # SliceError like this one.
+    assert records[0].exc_info is not None
+
+
+# -- Issue 3: bounded job history ---------------------------------------------
+
+def test_finished_jobs_beyond_the_cap_evict_the_oldest_first(tmp_path):
+    c = make(tmp_path, max_finished_jobs=2)
+    ids = []
+    for i in range(3):
+        ids.append(c.submit("AAA", f"p{i}.stl", b"x", "standard", "PLA", False))
+        c.run_once()
+    assert c.get(ids[0]) is None                 # oldest finished -- evicted
+    assert c.get(ids[1]) is not None
+    assert c.get(ids[2]) is not None
+    assert [j["id"] for j in c.list("AAA")] == [ids[2], ids[1]]
+
+
+def test_an_active_job_is_never_evicted_by_the_cap(tmp_path):
+    # A cap-oblivious "keep only the N most recent job records" would wrongly
+    # sweep up a still-queued job the moment the total job count passes the
+    # cap. Only TERMINAL (done/failed/cancelled) jobs are history; an active
+    # one must never be evicted, however far past the cap the total grows.
+    c = make(tmp_path, max_finished_jobs=1)
+    a = c.submit("AAA", "a.stl", b"x", "standard", "PLA", False)
+    c.run_once()                                  # a -> done
+    b = c.submit("AAA", "b.stl", b"x", "standard", "PLA", False)
+    active = c.submit("AAA", "active.stl", b"x", "standard", "PLA", False)
+    c.run_once()                                  # b -> done; evicts a (cap=1)
+    # `active` is still queued behind nothing else -- never run_once()'d.
+    assert c.get(a) is None
+    assert c.get(b) is not None
+    assert c.get(active)["state"] == "queued"

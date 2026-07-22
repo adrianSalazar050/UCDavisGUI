@@ -30,6 +30,18 @@ TICK_S = 0.25
 # Extensions the slicer can load. Anything else is refused at the boundary.
 MODEL_EXTS = (".stl", ".3mf", ".step", ".stp", ".obj")
 
+# Jobs are runtime-only (module docstring) and nothing here ever clears one
+# except cancel()'s "clear a finished job" path -- so a server nobody touches
+# the job list on accumulates one record per slice ever submitted, forever.
+# Bounded here: once a job reaches a TERMINAL state, the oldest terminal
+# records beyond this cap are evicted. A queued/slicing/uploading job is
+# never touched by this regardless of the cap -- see _evict_excess_finished.
+MAX_FINISHED_JOBS = 50
+
+# States a job can be evicted from once the cap is exceeded. Anything else
+# (queued/slicing/uploading) is live work, not history.
+_TERMINAL_STATES = ("done", "failed", "cancelled")
+
 
 def output_name(filename: str) -> str:
     """An uploaded model filename -> the .gcode.3mf name to write to the card.
@@ -59,7 +71,7 @@ class SliceCoordinator:
 
     def __init__(self, registry, queue, slicer_exe, index, *, work_dir,
                  run=run_slice, parse=threemf.parse_slice_info,
-                 clock=time.time):
+                 clock=time.time, max_finished_jobs=MAX_FINISHED_JOBS):
         self._registry = registry
         self._queue = queue
         self._exe = slicer_exe
@@ -68,6 +80,7 @@ class SliceCoordinator:
         self._run = run
         self._parse = parse
         self._clock = clock
+        self._max_finished_jobs = max_finished_jobs
         self._lock = threading.Lock()
         self._jobs: dict = {}
         self._order: list = []
@@ -78,18 +91,51 @@ class SliceCoordinator:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        if self._thread is not None:
+        # Liveness, not identity with None: stop() can deliberately leave
+        # self._thread pointing at a thread that is still alive (see stop()'s
+        # comment below) specifically so THIS check catches it. Comparing to
+        # None instead would let a start() called after a timed-out stop()
+        # spawn a SECOND worker on top of one still running a slice --
+        # exactly the "starves the YOLO detector" scenario the module
+        # docstring's single-global-worker design exists to prevent.
+        if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="slice-worker")
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 5.0) -> None:
+        """Signal the worker to stop and wait up to `timeout` seconds for it
+        to actually exit. `timeout` is a parameter (not a bare constant) so
+        tests can drive this deterministically fast without waiting out the
+        real default.
+        """
         self._stop.set()
-        thread, self._thread = self._thread, None
-        if thread is not None:
-            thread.join(timeout=5.0)
+        thread = self._thread
+        if thread is None:
+            return
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            # run_slice allows the CLI subprocess up to SLICE_TIMEOUT_S
+            # (900s), so a stop() called mid-slice can easily outlive this
+            # join -- the worker is still inside _do(), running a subprocess
+            # there is no safe way to interrupt (killing it mid-write is how
+            # you get a truncated file on a printer's microSD, the same
+            # reasoning cancel() already applies to a job that's already
+            # slicing). Do NOT clear self._thread here: doing so would make
+            # start()'s liveness check see None and spawn a second worker
+            # while this one is still alive -- two slices running at once,
+            # defeating the entire point of the single global worker. Same
+            # class of bug DetectorSupervisor._stop_proc guards against for
+            # its own subprocess: never let go of a handle to something you
+            # only ASKED to stop, only to something that actually did.
+            log.warning(
+                "slice worker did not stop within %.0fs (a slice is likely "
+                "still running); leaving the reference in place so a later "
+                "start() cannot spawn a second worker on top of it", timeout)
+            return
+        self._thread = None
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -174,8 +220,9 @@ class SliceCoordinator:
             if job["state"] == "queued":
                 job["state"] = "cancelled"
                 self._pending = [p for p in self._pending if p[0] != job_id]
+                self._evict_excess_finished()   # cancelled is terminal too
                 return True
-            if job["state"] in ("done", "failed", "cancelled"):
+            if job["state"] in _TERMINAL_STATES:
                 self._jobs.pop(job_id, None)
                 self._order.remove(job_id)
                 return True
@@ -202,7 +249,26 @@ class SliceCoordinator:
             self._do(job_id, serial, name, source_name, preset, filament_name,
                      data, supports, work)
         except Exception as e:
-            log.warning("slice job %s failed: %s", job_id, e)
+            # log.exception (not log.warning) so the traceback always lands
+            # in the log, not just a bare "%s" of the message. The catch-all
+            # here has to cover both an ORDINARY, expected failure (a bad
+            # model -> SliceError) and a genuine bug in this code
+            # (AttributeError, KeyError) -- without the traceback the two are
+            # indistinguishable and a real defect reads as just another
+            # unslicable model.
+            #
+            # Deliberately NOT split into "known-domain" vs "unexpected"
+            # exception types: the upload step's failure shape isn't a fixed
+            # set to whitelist against -- svc.upload_file/FTPS can raise
+            # SdError, but also a bare socket/OSError or anything else the
+            # underlying ftplib throws (this module's own tests stand a bare
+            # RuntimeError in for it, on purpose). A hand-maintained
+            # whitelist would either miss a real category -- silently
+            # downgrading a genuine bug back to "just a slice failure" and
+            # losing its traceback anyway -- or need constant upkeep as the
+            # printer link changes. log.exception costs only log verbosity
+            # and never throws away the one clue that might explain a bug.
+            log.exception("slice job %s failed", job_id)
             self._finish(job_id, "failed", error=str(e))
         finally:
             # Always: a work directory left behind holds a whole gcode file,
@@ -262,3 +328,27 @@ class SliceCoordinator:
 
     def _finish(self, job_id, state, **fields) -> None:
         self._set(job_id, state=state, **fields)
+        with self._lock:
+            self._evict_excess_finished()
+
+    def _evict_excess_finished(self) -> None:
+        """Must be called with self._lock already held (same convention as
+        registry.py's `_clear_capture`).
+
+        Keeps at most `self._max_finished_jobs` TERMINAL (done/failed/
+        cancelled) records, evicting the OLDEST ones first. `self._order` is
+        append order, i.e. oldest first, so a single left-to-right filter
+        finds the terminal ones in eviction order already -- no sort needed.
+        A queued/slicing/uploading job never appears in `finished_ids` at
+        all, so it can never be evicted here no matter how far past the cap
+        the total job count grows -- only history is bounded, never live
+        work.
+        """
+        finished_ids = [jid for jid in self._order
+                        if self._jobs[jid]["state"] in _TERMINAL_STATES]
+        excess = len(finished_ids) - self._max_finished_jobs
+        if excess <= 0:
+            return
+        for jid in finished_ids[:excess]:
+            self._jobs.pop(jid, None)
+            self._order.remove(jid)
