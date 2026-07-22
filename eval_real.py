@@ -1,7 +1,12 @@
 """Compare detector checkpoints on the REAL A1 evaluation set.
 
     python eval_real.py --models runs/train/failure_detector/weights/best.pt \
-                                 runs/detect/runs/train/a1_synth/weights/best.pt
+                                 runs/detect/runs/train/a1_holdout/weights/best.pt \
+                        --eval datasets/real_ho
+
+Use the a1_holdout checkpoint against datasets/real_ho. The earlier a1_synth
+checkpoint and datasets/{synth,real_eval} come from the UNSPLIT frames and score
+against data they were trained on -- kept only as the record of that mistake.
 
 Reports mAP on real camera frames, and -- more usefully for this application --
 the operating point that actually matters: at the deployed confidence threshold,

@@ -528,6 +528,86 @@ a { color: var(--primary); }
 }
 .state-error .ui-btn { margin-left: auto; }
 
+/* Transient result lines, e.g. after an SD upload. Same shape as
+   .state-error so all three can swap places without the layout shifting.
+   .state-warn is for "it worked, but not the way you probably wanted" --
+   a raw .gcode landing on the card that the queue cannot start. */
+.state-ok,
+.state-warn {
+  padding: var(--sp-4);
+  border-radius: var(--r-control);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.state-ok   { background: var(--ok-bg);   color: var(--ok-text); }
+.state-warn { background: var(--warn-bg); color: var(--warn-text); }
+
+/* ================= detection ROI editor =================
+   The draggable box is deliberately a DIFFERENT colour from the outline
+   detect.py burns into the JPEG: that one is what the detector is using now,
+   this one is what you are about to apply. */
+.roi {
+  position: relative;
+  width: 100%;
+  line-height: 0;
+  border-radius: var(--r-control);
+  overflow: hidden;
+  background: var(--surface-2);
+  touch-action: none;          /* let a drag pan the box, not the page */
+  user-select: none;
+}
+.roi__img { display: block; width: 100%; height: auto; }
+.roi__placeholder {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 10;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: normal;
+}
+.roi__veil { position: absolute; background: rgb(15 23 42 / 55%); }
+.roi__box {
+  position: absolute;
+  border: 2px solid var(--accent, #4f9e76);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 55%);
+  cursor: move;
+}
+.roi__box.is-dragging { border-style: dashed; }
+.roi__handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border: 2px solid var(--accent, #4f9e76);
+  border-radius: 3px;
+  background: #fff;
+}
+/* corners */
+.roi__handle--nw { left: 0;    top: 0;    cursor: nwse-resize; }
+.roi__handle--ne { left: 100%; top: 0;    cursor: nesw-resize; }
+.roi__handle--sw { left: 0;    top: 100%; cursor: nesw-resize; }
+.roi__handle--se { left: 100%; top: 100%; cursor: nwse-resize; }
+/* edges */
+.roi__handle--n  { left: 50%;  top: 0;    cursor: ns-resize; }
+.roi__handle--s  { left: 50%;  top: 100%; cursor: ns-resize; }
+.roi__handle--w  { left: 0;    top: 50%;  cursor: ew-resize; }
+.roi__handle--e  { left: 100%; top: 50%;  cursor: ew-resize; }
+
+/* Printer-model mismatch on a queued job: the server will refuse to start it,
+   so say why before the user clicks Print. */
+.queue-table__warn {
+  margin-left: var(--sp-2);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* ================= printer card overlay (Task 10) =================
    The card is a <div>, not a <button> — it contains the Remove button, and
    nested interactive elements are invalid HTML. The name button's ::after

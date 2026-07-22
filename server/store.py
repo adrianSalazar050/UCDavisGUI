@@ -28,6 +28,75 @@ DETECTION_CLASSES = ("blobs", "cracks", "over_extrusion", "spaghetti",
 # camera, or a USB webcam. Anything else is dropped back to the default.
 CAMERA_SOURCES = ("a1", "webcam")
 
+# Bambu's own model ids, as they appear in a sliced .gcode.3mf at
+# Metadata/slice_info.config -> <metadata key="printer_model_id" value="..."/>.
+# Used only to show a friendly name; the mismatch check compares raw ids, so
+# an id missing from this table still works, it just displays as itself.
+#
+# VERIFIED here: "N2S" = A1. This repo's printer is serial 03919D531805572 and
+# a file sliced for it in Bambu Studio carries printer_model_id N2S
+# (2026-07-21). Everything else below is COMMUNITY KNOWLEDGE and has not been
+# confirmed against hardware -- correct them as they are observed, and do not
+# let an unverified entry become the reason a print is refused.
+MODEL_NAMES = {
+    "N2S": "A1",            # verified 2026-07-21
+    "N1": "A1 mini",        # unverified
+    "C11": "P1P",           # unverified
+    "C12": "P1S",           # unverified
+    "BL-P001": "X1 Carbon",  # unverified
+    "BL-P002": "X1",        # unverified
+}
+
+# Serial-number prefix -> model id, used only to PREFILL the dropdown on the
+# Add/Edit printer form. Same verification caveat as above: 039 is confirmed,
+# 030 is inferred from the A1 mini this project previously used.
+SERIAL_PREFIX_MODELS = {
+    "039": "N2S",           # verified 2026-07-21
+    "030": "N1",            # unverified
+}
+
+
+def model_name(model_id: str) -> str:
+    """Friendly name for a model id, or the id itself when unknown. Never
+    raises and never returns None, so it is safe to drop straight into a
+    user-facing message."""
+    if not model_id:
+        return ""
+    return MODEL_NAMES.get(model_id, model_id)
+
+
+def model_mismatch(printer_model_id, file_model_id) -> str | None:
+    """-> a user-facing explanation when a file is confidently sliced for a
+    different printer, else None.
+
+    UNKNOWN NEVER BLOCKS. If either side is empty/None the answer is None.
+    That is the whole safety property of this feature: the printer never
+    reports its own model, so an unset model is normal, and every raw .gcode
+    lacks one too. Only a *confirmed* difference between two known ids is
+    allowed to refuse anything.
+    """
+    if not printer_model_id or not file_model_id:
+        return None
+    if printer_model_id == file_model_id:
+        return None
+    return (f"sliced for {model_name(file_model_id)}, "
+            f"but this printer is {model_name(printer_model_id)}")
+
+
+def guess_model_id(serial) -> str:
+    """Serial -> a model id, or "" when the prefix isn't recognised.
+
+    Only ever a PREFILL for the form. "" means unknown, and unknown must never
+    block a print -- a confidently wrong guess here would refuse a file that
+    is actually fine, which is worse than not guessing at all.
+    """
+    if not isinstance(serial, str):
+        return ""
+    for prefix, model_id in SERIAL_PREFIX_MODELS.items():
+        if serial.startswith(prefix):
+            return model_id
+    return ""
+
 
 def normalize_roi(value):
     """Anything -> a valid [x, y, w, h] fraction list, or None.
@@ -68,6 +137,11 @@ class PrinterConfig:
     # change. On the A1's wide, low view the frame is mostly room, and the
     # model finds "failures" in furniture -- this is what excludes it.
     roi: list | None = None
+    # Bambu model id (e.g. "N2S" = A1), used to refuse a .gcode.3mf sliced for
+    # a different printer. "" means unknown, which never blocks anything --
+    # the printer does not report its own model over MQTT (all 64 published
+    # keys were checked, 2026-07-21), so this can only ever be configured.
+    model_id: str = ""
 
     def __post_init__(self) -> None:
         self.serial = (self.serial or "").strip()
@@ -120,11 +194,19 @@ class PrinterConfig:
         camera_source = d.get("camera_source", "a1")
         if camera_source not in CAMERA_SOURCES:
             camera_source = "a1"
+        # Not validated against MODEL_NAMES on purpose: that table is not
+        # exhaustive, and dropping an id it hasn't heard of would silently
+        # disable the check for a printer the user configured correctly.
+        model_id = d.get("model_id", "")
+        if not isinstance(model_id, str):
+            model_id = ""
+        model_id = model_id.strip()
         return cls(serial=d["serial"], host=d["host"],
                    access_code=d["access_code"], name=name, capture=capture,
                    camera_source=camera_source, camera_index=camera_index,
                    conf=conf, armed_classes=armed_classes,
-                   detect_enabled=detect_enabled, roi=normalize_roi(d.get("roi")))
+                   detect_enabled=detect_enabled, roi=normalize_roi(d.get("roi")),
+                   model_id=model_id)
 
 
 class PrinterStore:

@@ -14,11 +14,16 @@ from server.threemf import SLICE_INFO_PATH
 _SECRET_ACCESS_CODE = "FAKE-ACCESS-CODE-MUST-NEVER-LEAK"
 
 
-def _fixture_3mf(seconds=917, grams=1.69):
+def _fixture_3mf(seconds=917, grams=1.69, model_id=None):
     """A tiny in-memory .gcode.3mf, same shape as the real confirmed sample
-    (smallCylinderPLA15m17s -> 917s / 1.69g) -- see server/tests/test_threemf.py."""
+    (smallCylinderPLA15m17s -> 917s / 1.69g) -- see server/tests/test_threemf.py.
+    `model_id` writes printer_model_id (e.g. "N2S" = A1); None omits it, which
+    is what an older slicer's output looks like."""
+    model = (f'<metadata key="printer_model_id" value="{model_id}"/>'
+             if model_id else "")
     xml = (f'<?xml version="1.0" encoding="UTF-8"?>'
            f'<config><plate>'
+           f'{model}'
            f'<metadata key="prediction" value="{seconds}"/>'
            f'<metadata key="weight" value="{grams}"/>'
            f'</plate></config>')
@@ -55,7 +60,7 @@ class FakeService:
 
 class FakeRegistry:
     def __init__(self, services=None, duplicate=False, sd_file=None,
-                 sd_file_error=None):
+                 sd_file_error=None, sd_upload_error=None, model_id=""):
         self._services = {s.serial: s for s in (services or [])}
         self.duplicate = duplicate
         self.added = []
@@ -63,7 +68,18 @@ class FakeRegistry:
         self.updated = []
         self._sd_file = sd_file
         self._sd_file_error = sd_file_error
+        self._sd_upload_error = sd_upload_error
         self.fetch_sd_file_calls = []
+        self.upload_sd_file_calls = []
+        self.reconnect_calls = []
+        self._model_id = model_id
+
+    def printer_model(self, serial):
+        # Mirrors PrinterRegistry.printer_model: "" for unknown printer or
+        # unset model. "" means unknown, which never blocks.
+        if serial not in self._services:
+            return ""
+        return self._model_id
 
     def summaries(self):
         return [s.summary() for s in self._services.values()]
@@ -71,7 +87,8 @@ class FakeRegistry:
     def get(self, serial):
         return self._services.get(serial)
 
-    def add(self, host, serial, access_code, name="", capture=False):
+    def add(self, host, serial, access_code, name="", capture=False,
+            model_id=None):
         if self.duplicate:
             raise DuplicateSerial(serial)
         if not (host and serial and access_code):
@@ -88,12 +105,15 @@ class FakeRegistry:
         self.removed.append(serial)
         return True
 
-    def update(self, serial, host=None, access_code=None, name="", capture=False):
+    def update(self, serial, host=None, access_code=None, name="",
+               capture=False, model_id=None):
         if serial not in self._services:
             return None
         if not (host and host.strip()):
             raise ValueError("host must not be empty")
         svc = self._services[serial]
+        if model_id is not None:
+            self._model_id = model_id
         self.updated.append((serial, host, access_code, name, capture))
         return svc.summary()
 
@@ -106,6 +126,22 @@ class FakeRegistry:
         if self._sd_file_error is not None:
             raise self._sd_file_error
         return self._sd_file if self._sd_file is not None else b""
+
+    def reconnect(self, serial):
+        # Mirrors PrinterRegistry.reconnect: new summary, or None if unknown.
+        if serial not in self._services:
+            return None
+        self.reconnect_calls.append(serial)
+        return self._services[serial].summary()
+
+    def upload_sd_file(self, serial, path, data):
+        # Same contract as fetch_sd_file: always SdError on failure, unknown
+        # serial included, and the access code never appears in the signature.
+        if serial not in self._services:
+            raise SdError(f"unknown printer {serial}")
+        if self._sd_upload_error is not None:
+            raise SdError(self._sd_upload_error)
+        self.upload_sd_file_calls.append((serial, path, data))
 
 
 class FakeQueue:
@@ -325,6 +361,230 @@ def test_list_files_traversal_400_when_percent_encoded(tmp_path):
     r = client(tmp_path).get("/api/printers/S1/files?path=%2F..%2Fetc")
     assert r.status_code == 400
     assert ".." in r.json()["detail"]
+
+
+# ---------- printer-model mismatch ----------
+#
+# The safety rule under all of these: UNKNOWN NEVER BLOCKS. A confirmed
+# difference between two known model ids may refuse a start; anything else
+# must proceed untouched.
+
+_A1_3MF = _fixture_3mf(model_id="N2S")
+_MINI_3MF = _fixture_3mf(model_id="N1")
+
+
+def test_upload_warns_when_the_file_is_for_another_model(tmp_path):
+    reg = FakeRegistry([FakeService("S1")], model_id="N2S")
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("mini.gcode.3mf", _MINI_3MF, "application/octet-stream")})
+    assert r.status_code == 201
+    assert "A1 mini" in r.json()["warning"]
+
+
+def test_upload_is_silent_when_the_model_matches(tmp_path):
+    reg = FakeRegistry([FakeService("S1")], model_id="N2S")
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("ok.gcode.3mf", _A1_3MF, "application/octet-stream")})
+    assert r.json()["warning"] is None
+
+
+def test_upload_is_silent_when_the_printer_model_is_unset(tmp_path):
+    reg = FakeRegistry([FakeService("S1")], model_id="")
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("mini.gcode.3mf", _MINI_3MF, "application/octet-stream")})
+    assert r.json()["warning"] is None
+
+
+def test_queue_job_records_the_file_model(tmp_path):
+    q = FakeQueue()
+    reg = FakeRegistry([FakeService("S1")], sd_file=_MINI_3MF, model_id="N2S")
+    c, _ = queue_client(tmp_path, q, registry=reg)
+    r = c.post("/api/printers/S1/queue", json={"sd_path": "/mini.gcode.3mf"})
+    assert r.status_code == 201
+    assert r.json()["model_id"] == "N1"
+    # ...and it must survive into the stored job, since start() reads it back
+    # from the queue rather than re-fetching the file over FTPS.
+    assert q.get("S1")[0]["model_id"] == "N1"
+
+
+def _model_start(tmp_path, monkeypatch, *, printer_model, job_model):
+    """Queue one job with `job_model` against a printer of `printer_model`,
+    then try to start it. -> (response, queue)"""
+    _fast_verify(monkeypatch)
+    q = FakeQueue()
+    reg = FakeRegistry([StartableService()], model_id=printer_model)
+    c, _ = queue_client(tmp_path, q, registry=reg)
+    _queued(q, model_id=job_model)
+    return c.post("/api/printers/S1/queue/J1/start"), q
+
+
+def test_start_refuses_a_confirmed_model_mismatch_and_keeps_the_job(
+        tmp_path, monkeypatch):
+    r, q = _model_start(tmp_path, monkeypatch, printer_model="N2S",
+                        job_model="N1")
+    assert r.status_code == 409
+    assert "A1 mini" in r.json()["detail"]
+    # The job must survive a refusal -- a refused start is not a consumed job.
+    assert len(q.get("S1")) == 1
+
+
+def test_start_allows_a_matching_model(tmp_path, monkeypatch):
+    r, _ = _model_start(tmp_path, monkeypatch, printer_model="N2S",
+                        job_model="N2S")
+    assert r.status_code == 200
+
+
+def test_start_allows_when_the_printer_model_is_unset(tmp_path, monkeypatch):
+    r, _ = _model_start(tmp_path, monkeypatch, printer_model="",
+                        job_model="N1")
+    assert r.status_code == 200
+
+
+def test_start_allows_when_the_file_model_is_unknown(tmp_path, monkeypatch):
+    # Raw .gcode, and any 3mf whose slicer didn't write printer_model_id.
+    r, _ = _model_start(tmp_path, monkeypatch, printer_model="N2S",
+                        job_model=None)
+    assert r.status_code == 200
+
+
+# ---------- POST /api/printers/{serial}/reconnect ----------
+
+def test_reconnect_returns_the_new_summary(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post("/api/printers/S1/reconnect")
+    assert r.status_code == 200
+    assert r.json()["serial"] == "S1"
+    assert reg.reconnect_calls == ["S1"]
+
+
+def test_reconnect_unknown_printer_404(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post("/api/printers/nope/reconnect")
+    assert r.status_code == 404
+    assert reg.reconnect_calls == []
+
+
+def test_reconnect_response_never_contains_the_access_code(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post("/api/printers/S1/reconnect")
+    assert _SECRET_ACCESS_CODE not in r.text
+
+
+# ---------- POST /api/printers/{serial}/files (upload) ----------
+
+def test_upload_file_stores_to_sd_root(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("Benchy.gcode.3mf", b"PK\x03\x04zip", "application/octet-stream")})
+    assert r.status_code == 201
+    assert r.json()["path"] == "/Benchy.gcode.3mf"
+    assert reg.upload_sd_file_calls == [("S1", "/Benchy.gcode.3mf", b"PK\x03\x04zip")]
+
+
+def test_upload_file_accepts_sliced_3mf_without_a_warning(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("Benchy.gcode.3mf", b"PK\x03\x04", "application/octet-stream")})
+    assert r.status_code == 201
+    assert r.json()["warning"] is None
+
+
+def test_upload_file_accepts_raw_gcode_but_warns_it_is_not_queue_startable(tmp_path):
+    # Real A1 cards are full of raw .gcode (verified against the hardware
+    # 2026-07-21), so rejecting it would break the way the card is actually
+    # used. But it cannot be launched by the queue: the verified project_file
+    # command points at Metadata/plate_N.gcode INSIDE a 3mf container
+    # (master.md 5.4), which a raw .gcode has no equivalent of. So: upload it,
+    # and say plainly that it is screen-startable only.
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("part.gcode", b"G1 X0 Y0", "text/plain")})
+    assert r.status_code == 201
+    assert reg.upload_sd_file_calls == [("S1", "/part.gcode", b"G1 X0 Y0")]
+    warning = r.json()["warning"]
+    assert "printer" in warning.lower() and "queue" in warning.lower()
+
+
+def test_upload_file_rejects_a_file_the_printer_could_never_print(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("notes.txt", b"hello", "text/plain")})
+    assert r.status_code == 400
+    assert ".gcode" in r.json()["detail"]
+    assert reg.upload_sd_file_calls == []
+
+
+def test_upload_file_strips_any_directory_from_the_filename(tmp_path):
+    # Browsers send a bare name, but a scripted client can send anything. The
+    # route takes the basename and writes to the card ROOT, so a traversal
+    # attempt lands harmlessly at /evil.gcode.3mf -- it can never escape, and
+    # it can never hide in a subdirectory where it would be unstartable.
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("../../evil.gcode.3mf", b"x", "application/octet-stream")})
+    assert r.status_code == 201
+    assert r.json()["path"] == "/evil.gcode.3mf"
+    assert reg.upload_sd_file_calls == [("S1", "/evil.gcode.3mf", b"x")]
+
+
+def test_upload_file_strips_windows_directory_separators(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": (r"C:\Users\me\Benchy.gcode.3mf", b"x",
+                        "application/octet-stream")})
+    assert r.status_code == 201
+    assert r.json()["path"] == "/Benchy.gcode.3mf"
+
+
+def test_upload_file_rejects_empty_body(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("a.gcode.3mf", b"", "application/octet-stream")})
+    assert r.status_code == 400
+    assert reg.upload_sd_file_calls == []
+
+
+def test_upload_file_unknown_printer_404(tmp_path):
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).post(
+        "/api/printers/nope/files",
+        files={"file": ("a.gcode.3mf", b"x", "application/octet-stream")})
+    assert r.status_code == 404
+
+
+def test_upload_file_ftps_failure_502(tmp_path):
+    reg = FakeRegistry([FakeService("S1")], sd_upload_error="552 Disk full.")
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("a.gcode.3mf", b"x", "application/octet-stream")})
+    assert r.status_code == 502
+    assert "Disk full" in r.json()["detail"]
+
+
+def test_upload_file_502_does_not_leak_access_code(tmp_path):
+    # Same convention as test_list_files_502_does_not_leak_access_code: the
+    # "never interpolate the code" guarantee lives in sdcard.py (and is tested
+    # there). What this checks is that main.py doesn't introduce a SECOND path
+    # -- e.g. echoing the printer config back alongside the error detail.
+    reg = FakeRegistry([FakeService("S1")],
+                       sd_upload_error="Could not upload /a.gcode.3mf to "
+                                       "1.2.3.4: 530 Login incorrect.")
+    r = client(tmp_path, reg).post(
+        "/api/printers/S1/files",
+        files={"file": ("a.gcode.3mf", b"x", "application/octet-stream")})
+    assert r.status_code == 502
+    assert "530 Login incorrect" in r.json()["detail"]
+    assert _SECRET_ACCESS_CODE not in r.text
 
 
 def test_list_files_ftps_failure_502(tmp_path):

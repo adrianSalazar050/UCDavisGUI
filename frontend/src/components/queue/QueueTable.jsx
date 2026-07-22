@@ -1,3 +1,4 @@
+import { modelName } from "../printers/printerModels.js";
 import { formatDuration, formatGrams } from "./format.js";
 
 // jobs: [{id, sd_path, name, seconds, grams, source}]. busyId disables every
@@ -10,8 +11,17 @@ import { formatDuration, formatGrams } from "./format.js";
 // Reorder with ↑↓ to choose what prints next. `canStart` is false whenever the
 // printer is disconnected or already printing.
 export default function QueueTable({ jobs, busyId, onRemove, onMove, onStart,
-                                     canStart, startBlockedReason }) {
+                                     canStart, startBlockedReason,
+                                     printerModelId }) {
   const busy = busyId != null;
+  // Mirrors server/store.py's model_mismatch, including the rule that
+  // matters most: unknown on EITHER side is not a mismatch. The server is
+  // still the one that refuses the start; this only explains it up front.
+  const mismatch = (job) =>
+    printerModelId && job.model_id && printerModelId !== job.model_id
+      ? `Sliced for ${modelName(job.model_id)}, but this printer is `
+        + `${modelName(printerModelId)}. It cannot be started here.`
+      : null;
   return (
     <table className="queue-table">
       <thead>
@@ -25,7 +35,14 @@ export default function QueueTable({ jobs, busyId, onRemove, onMove, onStart,
       <tbody>
         {jobs.map((job, i) => (
           <tr key={job.id}>
-            <td>{job.name}</td>
+            <td>
+              {job.name}
+              {mismatch(job) && (
+                <span className="queue-table__warn" title={mismatch(job)}>
+                  ⚠ {modelName(job.model_id)}
+                </span>
+              )}
+            </td>
             <td className="queue-table__num">{formatDuration(job.seconds)}</td>
             <td className="queue-table__num">{formatGrams(job.grams)}</td>
             <td>

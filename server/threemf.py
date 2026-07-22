@@ -14,7 +14,8 @@ import zipfile
 
 SLICE_INFO_PATH = "Metadata/slice_info.config"
 
-_EMPTY = {"seconds": None, "grams": None, "filaments": []}
+_EMPTY = {"seconds": None, "grams": None, "filaments": [],
+          "printer_model_id": None}
 
 
 def _num(v, cast):
@@ -26,7 +27,8 @@ def _num(v, cast):
 
 def parse_slice_info(data: bytes) -> dict:
     """bytes of a .gcode.3mf -> {seconds:int|None, grams:float|None,
-    filaments:[{type,color,used_g}]}. Never raises."""
+    filaments:[{type,color,used_g}], printer_model_id:str|None}.
+    Never raises."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             raw = z.read(SLICE_INFO_PATH)
@@ -37,11 +39,18 @@ def parse_slice_info(data: bytes) -> dict:
     except ET.ParseError:
         return dict(_EMPTY)
 
-    seconds, grams, filaments = None, None, []
+    seconds, grams, filaments, model_id = None, None, [], None
     for plate in root.iter("plate"):
         for md in plate.findall("metadata"):
             key, val = md.get("key"), md.get("value")
-            if key == "prediction":
+            if key == "printer_model_id":
+                # Every plate in one file is sliced for the same printer, so
+                # the first non-empty value wins and later plates can't blank
+                # it. None (not "") means "unknown", which the model check
+                # treats as "do not block".
+                if model_id is None and val:
+                    model_id = val
+            elif key == "prediction":
                 s = _num(val, int)
                 if s is not None:
                     seconds = (seconds or 0) + s
@@ -54,4 +63,5 @@ def parse_slice_info(data: bytes) -> dict:
                               "used_g": _num(f.get("used_g"), float)})
     if grams is not None:
         grams = round(grams, 2)
-    return {"seconds": seconds, "grams": grams, "filaments": filaments}
+    return {"seconds": seconds, "grams": grams, "filaments": filaments,
+            "printer_model_id": model_id}

@@ -2,6 +2,7 @@ import pytest
 
 import server.sdcard as sdcard
 from server.printer import STALE_S, MockPrinter, PrinterService
+from server.store import PrinterConfig
 from server.sdcard import SdError
 from server.threemf import parse_slice_info
 
@@ -229,3 +230,46 @@ def test_mock_fetch_file_same_fixture_regardless_of_path(tmp_path):
 def test_mock_fetch_file_rejects_traversal(tmp_path):
     with pytest.raises(SdError):
         MockPrinter(tmp_path).fetch_file("/../etc/passwd")
+
+
+def test_mock_upload_file_appears_in_the_listing(tmp_path):
+    # --mock must exercise the whole upload -> appears on card -> queue it
+    # flow with no hardware, so the mock card has to actually remember the
+    # write rather than accepting it into the void.
+    mp = MockPrinter(tmp_path)
+    mp.upload_file("/NewPart.gcode.3mf", b"PK\x03\x04zip")
+    assert "NewPart.gcode.3mf" in [e["name"] for e in mp.list_files("/")]
+
+
+# ---------- the service factories ----------
+#
+# Untested until 2026-07-21, and that gap cost a real bug: real_factory and
+# mock_factory each rebuild a service from a PrinterConfig, so any field they
+# forget is silently reset every time the registry rebuilds (a host or
+# access-code edit). model_id was dropped by both, so setting the printer
+# model and then editing the host quietly disabled the model check.
+
+def test_real_factory_carries_model_id():
+    from server.__main__ import real_factory
+    cfg = PrinterConfig(serial="S1", host="h", access_code="c", model_id="N2S")
+    assert real_factory(cfg).model_id == "N2S"
+
+
+def test_mock_factory_carries_model_id_for_a_seeded_serial(tmp_path):
+    from server.__main__ import MOCK_SEED, mock_factory
+    cfg = PrinterConfig(serial=MOCK_SEED[0][0], host="h", access_code="c",
+                        model_id="N2S")
+    assert mock_factory(tmp_path)(cfg).model_id == "N2S"
+
+
+def test_factories_carry_name_and_capture_too(tmp_path):
+    from server.__main__ import MOCK_SEED, mock_factory, real_factory
+    cfg = PrinterConfig(serial=MOCK_SEED[0][0], host="h", access_code="c",
+                        name="Bench", capture=True, model_id="N1")
+    for svc in (real_factory(cfg), mock_factory(tmp_path)(cfg)):
+        assert (svc.name, svc.capture, svc.model_id) == ("Bench", True, "N1")
+
+
+def test_mock_upload_file_rejects_traversal(tmp_path):
+    with pytest.raises(SdError):
+        MockPrinter(tmp_path).upload_file("/../etc/passwd", b"x")

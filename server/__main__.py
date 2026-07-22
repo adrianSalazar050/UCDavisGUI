@@ -43,7 +43,8 @@ DEFAULT_PRINTERS_FILE = pathlib.Path("printers.json")
 
 def real_factory(cfg):
     return PrinterService(cfg.host, cfg.serial, cfg.access_code,
-                           name=cfg.name, capture=cfg.capture)
+                           name=cfg.name, capture=cfg.capture,
+                           model_id=cfg.model_id)
 
 
 def mock_factory(runs_dir: pathlib.Path):
@@ -56,8 +57,12 @@ def mock_factory(runs_dir: pathlib.Path):
         mode = modes.get(cfg.serial)
         if mode is None:
             return real_factory(cfg)
+        # Every field here must mirror real_factory: the registry rebuilds a
+        # service from the config on any host/access-code edit, so a field
+        # this forgets is silently reset on every such edit.
         return MockPrinter(runs_dir, serial=cfg.serial, host=cfg.host,
-                            name=cfg.name, capture=cfg.capture, mode=mode)
+                            name=cfg.name, capture=cfg.capture, mode=mode,
+                            model_id=cfg.model_id)
 
     return make
 

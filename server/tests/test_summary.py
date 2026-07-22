@@ -1,6 +1,17 @@
 from server.printer import STALE_S, build_summary
 
 
+def test_summary_carries_the_model_id():
+    # The Edit form needs it to prefill the dropdown, and the queue UI needs
+    # it to explain a mismatch.
+    out = build_summary({}, 1.0, True, "1.2.3.4", serial="S", model_id="N2S")
+    assert out["model_id"] == "N2S"
+
+
+def test_summary_model_id_defaults_blank():
+    assert build_summary({}, 1.0, True, "1.2.3.4", serial="S")["model_id"] == ""
+
+
 def test_empty_state_disconnected():
     s = build_summary({}, None, False, "MOCK")
     assert s["connection"] == "disconnected"
@@ -83,7 +94,7 @@ def test_summary_key_set_matches_design_spec_payload():
                       last_error=None)
     assert set(s.keys()) == {
         "serial", "name", "printer", "capture", "connection",
-        "report_age_s", "last_error",
+        "report_age_s", "last_error", "model_id",
         "gcode_state", "layer_num", "total_layer_num", "mc_percent",
         "mc_remaining_time", "nozzle_temper", "nozzle_target_temper",
         "bed_temper", "bed_target_temper", "spd_lvl", "spd_mag",

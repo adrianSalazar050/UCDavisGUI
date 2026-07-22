@@ -48,7 +48,7 @@ from typing import Any, Callable
 
 from .sdcard import SdError
 from .store import (CAMERA_SOURCES, DETECTION_CLASSES, PrinterConfig,
-                    normalize_roi)
+                    guess_model_id, normalize_roi)
 
 log = logging.getLogger("server.registry")
 
@@ -123,7 +123,8 @@ class PrinterRegistry:
     # ---------------- mutation ----------------
 
     def add(self, host: str, serial: str, access_code: str,
-            name: str = "", capture: bool = False) -> dict:
+            name: str = "", capture: bool = False,
+            model_id: str | None = None) -> dict:
         # Required fields: reject non-string types outright, before they
         # ever reach PrinterConfig. __post_init__ does `(x or "").strip()`,
         # which happily coerces a *falsy* non-string (None, 0) to "" --
@@ -142,8 +143,15 @@ class PrinterRegistry:
         if not isinstance(capture, bool):
             capture = False  # gates the webcam; wrong type defaults safe
 
+        # None means "work it out from the serial"; "" is a deliberate
+        # "unknown", which disables the model check for this printer.
+        if model_id is None:
+            model_id = guess_model_id(serial)
+        elif not isinstance(model_id, str):
+            model_id = ""
+
         cfg = PrinterConfig(serial=serial, host=host, access_code=access_code,
-                           name=name, capture=capture)
+                           name=name, capture=capture, model_id=model_id)
         # __post_init__ already strips whitespace (so host="   " -> ""),
         # which is exactly what makes this emptiness check catch
         # whitespace-only fields too, not just outright-missing ones.
@@ -186,7 +194,7 @@ class PrinterRegistry:
         return True
 
     def update(self, serial, *, host=None, access_code=None, name=None,
-               capture=None) -> dict | None:
+               capture=None, model_id=None) -> dict | None:
         """Edit a registered printer's connection info. Returns the new summary
         dict, or None if the serial is unknown. The serial is NOT changeable.
         A blank/None access_code KEEPS the current one. Changing host or
@@ -226,6 +234,10 @@ class PrinterRegistry:
                 cfg.access_code = new_code
             if name is not None:
                 cfg.name = name.strip() or cfg.host
+            # None = "not submitted, keep what's there"; "" = the user chose
+            # Unknown, which disables the check. Distinct on purpose.
+            if model_id is not None:
+                cfg.model_id = model_id.strip() if isinstance(model_id, str) else ""
             if capture is not None:
                 if capture:
                     self._clear_capture()
@@ -240,12 +252,15 @@ class PrinterRegistry:
                 svc = self._factory(cfg)
                 self._services[serial] = svc
             else:
-                # PrinterService/MockPrinter each keep their own name/capture
-                # copy independent of cfg (see _clear_capture()'s docstring),
-                # so the live service must be told explicitly.
+                # PrinterService/MockPrinter each keep their own
+                # name/capture/model_id copy independent of cfg (see
+                # _clear_capture()'s docstring), so the live service must be
+                # told explicitly. Miss one and the config is right while
+                # every summary keeps reporting the old value.
                 svc = self._services[serial]
                 svc.name = cfg.name
                 svc.capture = cfg.capture
+                svc.model_id = cfg.model_id
 
         if reconnect:
             if old_svc is not None:
@@ -298,6 +313,56 @@ class PrinterRegistry:
         if svc is None:
             raise SdError(f"unknown printer {serial}")
         return svc.fetch_file(path)
+
+    def printer_model(self, serial: str) -> str:
+        """`serial`'s configured Bambu model id, or "" when the printer is
+        unknown or its model was never set. "" means unknown, and unknown
+        never blocks a print -- see store.model_mismatch."""
+        with self._lock:
+            cfg = self._configs.get(serial)
+            return cfg.model_id if cfg is not None else ""
+
+    def reconnect(self, serial: str) -> dict | None:
+        """Rebuild `serial`'s connection using the config already stored.
+        Returns the new summary, or None if the serial is unknown.
+
+        NOT an edit: nothing about the printer changes, so this never
+        persists. It exists because the automatic paths cannot do two things
+        -- retry *now* rather than waiting out RETRY_S, and tear down a client
+        that has wedged. It does not help when the IP has changed; that needs
+        update(), which already rebuilds on a host change.
+
+        Locking follows update()'s shape exactly: the factory runs under the
+        lock (it only builds an in-memory object), while stop()/start() run
+        OUTSIDE it, because summaries() is called from the event loop on every
+        WS tick and must never block behind a connect.
+
+        Sends no command to the printer -- MQTT here is telemetry only, so
+        this cannot disturb a running print.
+        """
+        with self._lock:
+            cfg = self._configs.get(serial)
+            if cfg is None:
+                return None
+            old_svc = self._services.get(serial)
+            svc = self._factory(cfg)
+            self._services[serial] = svc
+
+        if old_svc is not None:
+            old_svc.stop()
+        svc.start()
+        return svc.summary()
+
+    def upload_sd_file(self, serial: str, path: str, data: bytes) -> None:
+        """Upload one file to `serial`'s SD card. Write counterpart of
+        fetch_sd_file and identical in posture: the access code stays behind
+        the service, the lock is never held across the blocking FTPS call,
+        and every failure (unknown serial included) is an SdError.
+        """
+        svc = self.get(serial)
+        if svc is None:
+            raise SdError(f"unknown printer {serial}")
+        svc.upload_file(path, data)
 
     # ---------------- detection accessors ----------------
 

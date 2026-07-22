@@ -4,13 +4,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import pathlib
 import posixpath
 import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (FastAPI, File, HTTPException, UploadFile, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -20,7 +22,7 @@ from .detection import CLASSES  # the 6 valid armed classes
 from .printer import PrinterBusy
 from .registry import DuplicateSerial
 from .sdcard import SdError
-from .store import CAMERA_SOURCES
+from .store import CAMERA_SOURCES, model_mismatch
 
 # How long to wait for a started print to show up in gcode_state before
 # reporting it as not-started. The A1 goes FAILED/IDLE -> PREPARE within a
@@ -66,6 +68,9 @@ class AddPrinter(BaseModel):
     access_code: str
     name: str = ""
     capture: bool = False
+    # None = "work it out from the serial"; "" = a deliberate Unknown, which
+    # disables the printer-model check for this printer.
+    model_id: str | None = None
 
 
 class EditPrinter(BaseModel):
@@ -79,6 +84,9 @@ class EditPrinter(BaseModel):
     access_code: str = ""     # blank = keep the current code
     name: str = ""
     capture: bool = False
+    # None = not submitted, keep the stored model. "" = the user picked
+    # Unknown. Distinct, so an old client omitting the field can't wipe it.
+    model_id: str | None = None
 
 
 class DetectionUpdate(BaseModel):
@@ -158,7 +166,8 @@ def create_app(registry, runs_dir: pathlib.Path,
         try:
             return registry.add(host=body.host, serial=body.serial,
                                 access_code=body.access_code,
-                                name=body.name, capture=body.capture)
+                                name=body.name, capture=body.capture,
+                                model_id=body.model_id)
         except DuplicateSerial:
             raise HTTPException(409, "that serial is already registered")
         except ValueError as e:
@@ -169,7 +178,8 @@ def create_app(registry, runs_dir: pathlib.Path,
         try:
             result = registry.update(serial, host=body.host,
                                      access_code=body.access_code,
-                                     name=body.name, capture=body.capture)
+                                     name=body.name, capture=body.capture,
+                                     model_id=body.model_id)
         except ValueError as e:
             raise HTTPException(400, str(e))
         if result is None:
@@ -198,6 +208,73 @@ def create_app(registry, runs_dir: pathlib.Path,
             return {"path": target, "entries": svc.list_files(target)}
         except SdError as e:
             raise HTTPException(502, str(e))  # the printer/FTPS failed us
+
+    @app.post("/api/printers/{serial}/reconnect")
+    def reconnect_printer(serial: str):
+        # Rebuilds the MQTT connection with the config already stored. Sends
+        # no command to the printer, so it cannot disturb a running print.
+        # SYNC def: the rebuild calls stop()/start(), which join a thread.
+        summary = registry.reconnect(serial)
+        if summary is None:
+            raise HTTPException(404, "unknown printer")
+        return summary
+
+    @app.post("/api/printers/{serial}/files", status_code=201)
+    def upload_file(serial: str, file: UploadFile = File(...)):
+        # SYNC def for the same reason as list_files: the FTPS STOR blocks,
+        # and must run on the threadpool rather than stalling every WebSocket.
+        #
+        # The only mutating SD route. It writes to the card ROOT and takes the
+        # name from the upload, discarding any directory component the client
+        # sent -- file:///sdcard/<filename> (master.md 5.4) has no path
+        # component, so a file parked in a subdirectory could be listed but
+        # never started.
+        if registry.get(serial) is None:
+            raise HTTPException(404, "unknown printer")
+        name = os.path.basename((file.filename or "").replace("\\", "/")).strip()
+        if not name:
+            raise HTTPException(400, "no filename")
+        lowered = name.lower()
+        # Two printable shapes, and they are NOT equivalent:
+        #   .gcode.3mf -- the queue can start it (project_file points at
+        #                 Metadata/plate_N.gcode inside the zip, master.md 5.4)
+        #   .gcode     -- real cards are full of these, and the printer's own
+        #                 screen prints them, but there is no verified MQTT
+        #                 command to launch one, so the queue cannot.
+        # Anything else the printer cannot print at all, so it is refused
+        # rather than left on the card as clutter the UI has to explain.
+        warning = None
+        if lowered.endswith(".gcode.3mf"):
+            pass
+        elif lowered.endswith(".gcode"):
+            warning = (f"{name} uploaded, but raw .gcode can only be started "
+                       "from the printer's own screen, not from the queue "
+                       "here. Export a sliced .gcode.3mf to queue it.")
+        else:
+            raise HTTPException(
+                400, f"{name}: the printer can only print .gcode.3mf or "
+                     ".gcode files. Use 'Export plate sliced file' for a "
+                     ".gcode.3mf the queue can start.")
+        try:
+            target = sdcard.normalize_path("/" + name)
+        except SdError as e:
+            raise HTTPException(400, str(e))  # bad input, not a printer fault
+        data = file.file.read()
+        if not data:
+            raise HTTPException(400, "empty file")
+        # Model check is a WARNING here, never a refusal: parking a file for
+        # another printer in the fleet is legitimate. The hard stop is at
+        # start (the only genuinely risky step).
+        if warning is None:
+            mismatch = model_mismatch(registry.printer_model(serial),
+                                      threemf.parse_slice_info(data)["printer_model_id"])
+            if mismatch is not None:
+                warning = f"{name} uploaded, but it is {mismatch}."
+        try:
+            registry.upload_sd_file(serial, target, data)
+        except SdError as e:
+            raise HTTPException(502, str(e))  # the printer/FTPS failed us
+        return {"path": target, "bytes": len(data), "warning": warning}
 
     def _require_queue() -> None:
         if queue is None:
@@ -231,7 +308,8 @@ def create_app(registry, runs_dir: pathlib.Path,
             data = registry.fetch_sd_file(serial, target)
             meta = threemf.parse_slice_info(data)
         except SdError:
-            meta = {"seconds": None, "grams": None, "filaments": []}
+            meta = {"seconds": None, "grams": None, "filaments": [],
+                    "printer_model_id": None}
         seconds, grams = meta.get("seconds"), meta.get("grams")
         job = {
             "id": uuid.uuid4().hex,
@@ -240,6 +318,9 @@ def create_app(registry, runs_dir: pathlib.Path,
             "seconds": seconds,
             "grams": grams,
             "source": "3mf" if (seconds or grams) else "manual",
+            # Recorded at queue time so start can refuse a mismatch without
+            # a second FTPS round trip. None = unknown = never blocks.
+            "model_id": meta.get("printer_model_id"),
         }
         queue.add(serial, job)
         return job
@@ -285,6 +366,15 @@ def create_app(registry, runs_dir: pathlib.Path,
             raise HTTPException(409, "only the first job in the queue can be "
                                      "started; reorder it to the top first")
         job = jobs[0]
+        # The hard stop. Refusing here (rather than at upload) means a file
+        # for another printer can still be parked on the card, but cannot be
+        # printed by mistake. Unknown on either side never reaches this.
+        mismatch = model_mismatch(registry.printer_model(serial),
+                                  job.get("model_id"))
+        if mismatch is not None:
+            raise HTTPException(
+                409, f"{job['name']} is {mismatch}. Re-slice it for this "
+                     "printer, or remove it from the queue.")
         try:
             svc.start_print(job["sd_path"], plate=job.get("plate") or 1)
         except PrinterBusy as e:

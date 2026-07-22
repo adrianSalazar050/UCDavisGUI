@@ -155,7 +155,8 @@ function QueuePanel({ printer }) {
         <QueueTable jobs={jobs} busyId={busyId}
                     onRemove={handleRemove} onMove={handleMove}
                     onStart={handleStart} canStart={canStart}
-                    startBlockedReason={startBlockedReason} />
+                    startBlockedReason={startBlockedReason}
+                    printerModelId={printer.model_id} />
       )}
       <TotalsBar totals={totals} count={jobs.length} />
     </Card>

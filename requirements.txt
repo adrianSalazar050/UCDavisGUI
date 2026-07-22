@@ -4,6 +4,8 @@ opencv-python>=4.9
 numpy>=1.26
 fastapi>=0.110
 uvicorn[standard]>=0.29
+# multipart form parsing -- required by the SD upload route (POST .../files)
+python-multipart>=0.0.9
 
 # training (failure-detection classifier)
 # torch/torchvision need a CUDA build for GPU training:

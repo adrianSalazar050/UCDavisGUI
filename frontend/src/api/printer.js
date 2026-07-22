@@ -52,6 +52,29 @@ export async function fetchFiles(serial, path = "/") {
   return res.json();
 }
 
+// Rebuild the MQTT connection using the stored config. Sends no command to
+// the printer, so it cannot disturb a running print. -> the new summary
+export async function reconnectPrinter(serial) {
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/reconnect`,
+    { method: "POST" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// Upload one sliced .gcode.3mf to the card root. -> { path, bytes }
+// No Content-Type header on purpose: the browser must set it itself so the
+// multipart boundary is included, and setting it by hand breaks the parse.
+export async function uploadFile(serial, file) {
+  const body = new FormData();
+  body.append("file", file);
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/files`,
+    { method: "POST", body });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 // { jobs: [{id, sd_path, name, seconds, grams, source}],
 //   totals: {seconds, grams, finish_epoch} }
 export async function fetchQueue(serial) {

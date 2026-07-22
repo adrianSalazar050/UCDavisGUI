@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import datetime as dt
 import ftplib
+import io
 import logging
 import posixpath
 import re
@@ -261,6 +262,42 @@ def list_dir(host: str, access_code: str, path: str = "/") -> list[dict]:
         try:
             ftp.close()
         except Exception:  # close() must never mask the real error above
+            pass
+
+
+def upload_file(host: str, access_code: str, path: str, data: bytes) -> None:
+    """Upload one file to the card over FTPS (STOR). Same contract as
+    fetch_file: always raises SdError on failure, and the message never
+    contains the access code. Path is traversal-guarded via normalize_path.
+
+    This is the only function in this package that WRITES to the card. It
+    overwrites silently if the name already exists, because that is what STOR
+    does and the printer offers no rename -- callers that care must list first.
+
+    Uploading to a subdirectory is allowed by normalize_path but is usually a
+    mistake: the verified start_print URL scheme is file:///sdcard/<filename>
+    with no path component (master.md 5.4), so a file parked in a subdirectory
+    can be listed but not started.
+    """
+    target = normalize_path(path)
+    ftp = ImplicitFTP_TLS(context=_ssl_context(), timeout=TIMEOUT_S)
+    try:
+        ftp.connect(host, FTPS_PORT)
+        ftp.login(FTP_USER, access_code)
+        ftp.prot_p()
+        ftp.set_pasv(True)
+        ftp.storbinary(f"STOR {target}", io.BytesIO(data))
+    except SdError:
+        raise
+    except ftplib.all_errors as e:
+        raise SdError(f"Could not upload {target} to {host}: {e}") from e
+    except Exception as e:  # putline ValueError etc. -> clean SdError
+        raise SdError(f"Could not upload {target} to {host}: unexpected "
+                      f"error ({type(e).__name__})") from e
+    finally:
+        try:
+            ftp.close()
+        except Exception:
             pass
 
 

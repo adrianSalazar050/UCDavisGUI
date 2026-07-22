@@ -290,3 +290,88 @@ def test_fetch_file_rejects_traversal():
     import pytest
     with pytest.raises(sd.SdError):
         sd.fetch_file("h", "code", "/../etc/passwd")
+
+
+# ---------- upload_file ----------
+#
+# The write counterpart of fetch_file, and the only route in this package that
+# mutates the card. Same fake-FTP approach: no socket, no printer.
+
+def test_upload_file_sends_stor_with_the_payload(monkeypatch):
+    import server.sdcard as sd
+
+    seen = {}
+
+    class FakeFTP:
+        def __init__(self, *a, **k): pass
+        def connect(self, *a, **k): pass
+        def login(self, *a, **k): pass
+        def prot_p(self): pass
+        def set_pasv(self, *a, **k): pass
+        def storbinary(self, cmd, fp):
+            seen["cmd"] = cmd
+            seen["data"] = fp.read()
+        def close(self): pass
+
+    monkeypatch.setattr(sd, "ImplicitFTP_TLS", FakeFTP)
+    sd.upload_file("h", "code", "/Benchy.gcode.3mf", b"PK\x03\x04zipbytes")
+    assert seen["cmd"] == "STOR /Benchy.gcode.3mf"
+    assert seen["data"] == b"PK\x03\x04zipbytes"
+
+
+def test_upload_file_rejects_traversal():
+    import server.sdcard as sd
+    with pytest.raises(SdError):
+        sd.upload_file("h", "code", "/../etc/passwd", b"x")
+
+
+def test_upload_file_rejects_control_characters_in_name():
+    # A \r or \n would otherwise reach ftplib.putline as a bare ValueError,
+    # which is not an ftplib error subclass -- and on a STOR it is also a
+    # command-injection shape. Guarded at the boundary, same as list_dir.
+    import server.sdcard as sd
+    with pytest.raises(SdError):
+        sd.upload_file("h", "code", "/ok.3mf\r\nDELE important", b"x")
+
+
+def test_upload_file_failure_does_not_leak_access_code_and_closes(monkeypatch):
+    import server.sdcard as sd
+    secret = "S3CR3T-ACCESS-CODE"
+    state = {"closed": False}
+
+    class FakeFTP:
+        def __init__(self, *a, **k): pass
+        def connect(self, *a, **k): pass
+        def login(self, user, passwd):
+            raise ftplib.error_perm("530 Login incorrect.")
+        def prot_p(self): pass
+        def set_pasv(self, *a, **k): pass
+        def storbinary(self, *a, **k): pass
+        def close(self): state["closed"] = True
+
+    monkeypatch.setattr(sd, "ImplicitFTP_TLS", FakeFTP)
+    with pytest.raises(SdError) as ei:
+        sd.upload_file("h", secret, "/a.3mf", b"x")
+    assert secret not in str(ei.value)
+    assert state["closed"]
+
+
+def test_upload_file_disk_full_becomes_sderror(monkeypatch):
+    # The card fills up mid-STOR. Must surface as SdError like every other
+    # failure, not as a raw ftplib exception escaping into a 500.
+    import server.sdcard as sd
+
+    class FakeFTP:
+        def __init__(self, *a, **k): pass
+        def connect(self, *a, **k): pass
+        def login(self, *a, **k): pass
+        def prot_p(self): pass
+        def set_pasv(self, *a, **k): pass
+        def storbinary(self, cmd, fp):
+            raise ftplib.error_perm("552 Disk full.")
+        def close(self): pass
+
+    monkeypatch.setattr(sd, "ImplicitFTP_TLS", FakeFTP)
+    with pytest.raises(SdError) as ei:
+        sd.upload_file("h", "code", "/big.gcode.3mf", b"x" * 10)
+    assert "552" in str(ei.value)

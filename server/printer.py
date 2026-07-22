@@ -110,7 +110,7 @@ MOCK_3MF_BYTES = _build_mock_3mf()
 def build_summary(state: dict, report_age: float | None,
                   connected: bool, printer: str, *,
                   serial: str = "", name: str = "", capture: bool = False,
-                  last_error: str | None = None) -> dict:
+                  last_error: str | None = None, model_id: str = "") -> dict:
     """Curate the merged printer state into the payload the UI consumes.
 
     Fields the printer hasn't reported yet are null — it sends partial
@@ -146,6 +146,10 @@ def build_summary(state: dict, report_age: float | None,
     out["name"] = name
     out["capture"] = capture
     out["last_error"] = last_error
+    # Configured Bambu model id ("" = unknown). Not a secret and not reported
+    # by the printer -- it exists so the UI can prefill the Edit dropdown and
+    # explain a queue mismatch.
+    out["model_id"] = model_id
     return out
 
 
@@ -158,12 +162,13 @@ class PrinterService:
     """
 
     def __init__(self, host: str, serial: str, access_code: str,
-                 name: str = "", capture: bool = False):
+                 name: str = "", capture: bool = False, model_id: str = ""):
         self.host = host
         self.serial = serial
         self.access_code = access_code
         self.name = name or host
         self.capture = capture
+        self.model_id = model_id
         self.link = BambuLink(host, serial, access_code,
                               on_state=self._on_state)
         self._last_report: float | None = None
@@ -227,6 +232,12 @@ class PrinterService:
         never leaves this method, exactly like list_files."""
         return sdcard.fetch_file(self.host, self.access_code, path)
 
+    def upload_file(self, path: str, data: bytes) -> None:
+        """Blocking FTPS write, same posture as fetch_file: MUST NOT be
+        called from the event loop. Thin delegation only -- access_code
+        never leaves this method."""
+        sdcard.upload_file(self.host, self.access_code, path, data)
+
     def summary(self) -> dict:
         age = (None if self._last_report is None
                else time.time() - self._last_report)
@@ -234,7 +245,8 @@ class PrinterService:
         return build_summary(
             self._snapshot, age, connected, self.host,
             serial=self.serial, name=self.name, capture=self.capture,
-            last_error=None if connected else self._last_error)
+            last_error=None if connected else self._last_error,
+            model_id=self.model_id)
 
     def stop_print(self) -> None:
         """Fire-and-verify: publishing can't fail loudly (no ack), so callers
@@ -277,15 +289,17 @@ class MockPrinter:
 
     def __init__(self, runs_dir: pathlib.Path, serial: str = "MOCK0000000000",
                  host: str = "MOCK", name: str = "", capture: bool = False,
-                 mode: str = "running"):
+                 mode: str = "running", model_id: str = ""):
         self.runs_dir = runs_dir
         self.serial = serial
         self.host = host
         self.name = name or host
         self.capture = capture
+        self.model_id = model_id
         self.mode = mode
         self.state: dict = {"gcode_state": "IDLE"}
         self._last_report: float | None = None
+        self._uploaded: dict[str, list[dict]] = {}  # path -> entries, see upload_file
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
@@ -312,7 +326,8 @@ class MockPrinter:
         return build_summary(
             self.state, age, connected, self.host,
             serial=self.serial, name=self.name, capture=self.capture,
-            last_error=None if connected else ERR_UNREACHABLE)
+            last_error=None if connected else ERR_UNREACHABLE,
+            model_id=self.model_id)
 
     def stop_print(self) -> None:
         self._touch({"gcode_state": "FAILED"})
@@ -342,7 +357,20 @@ class MockPrinter:
         # module-level constant, and a caller mutating a returned dict must
         # not corrupt it for every other printer/instance for the rest of the
         # process's life.
-        return sdcard.sort_entries([dict(e) for e in entries])
+        entries = [dict(e) for e in entries] + self._uploaded.get(target, [])
+        return sdcard.sort_entries(entries)
+
+    def upload_file(self, path: str, data: bytes) -> None:
+        """Remember the write per-instance so --mock exercises the real flow:
+        upload -> the file appears in the listing -> queue it. Deliberately
+        NOT written into MOCK_TREE, which is a shared module-level constant."""
+        target = sdcard.normalize_path(path)  # traversal guard, as fetch_file
+        parent = target.rsplit("/", 1)[0] or "/"
+        name = target.rsplit("/", 1)[-1]
+        siblings = self._uploaded.setdefault(parent, [])
+        siblings[:] = [e for e in siblings if e["name"] != name]  # STOR overwrites
+        siblings.append({"name": name, "is_dir": False, "size": len(data),
+                         "modified": None})
 
     def fetch_file(self, path: str) -> bytes:
         """No per-file mock data -- every mock SD path fetches the same

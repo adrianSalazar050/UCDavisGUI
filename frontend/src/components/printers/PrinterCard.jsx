@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { removePrinter } from "../../api/printer.js";
+import { reconnectPrinter, removePrinter } from "../../api/printer.js";
 import Button from "../ui/Button.jsx";
 import StatusPill from "../ui/StatusPill.jsx";
 import EditPrinterForm from "./EditPrinterForm.jsx";
@@ -13,9 +13,27 @@ function pill(p) {
 
 export default function PrinterCard({ printer, selected, onSelect }) {
   const [busy, setBusy] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   const [err, setErr] = useState(null);
   const [editing, setEditing] = useState(false);
   const { status, label } = pill(printer);
+
+  // Forces an immediate reconnect. The service already retries on its own
+  // every 10s, so this is for "I just fixed it, don't make me wait" and for
+  // rebuilding a wedged client. It will NOT help if the IP changed -- that
+  // needs Edit, which rebuilds on a host change.
+  const reconnect = async () => {
+    setReconnecting(true);
+    setErr(null);
+    try {
+      await reconnectPrinter(printer.serial);
+      // No refetch: /ws pushes the new summary within ~250 ms.
+    } catch (e2) {
+      setErr(e2.message);
+    } finally {
+      setReconnecting(false);
+    }
+  };
 
   const remove = async () => {
     if (!window.confirm(`Remove ${printer.name}? It will stop being monitored.`))
@@ -67,6 +85,9 @@ export default function PrinterCard({ printer, selected, onSelect }) {
       {err && <div className="printer-card__error">{err}</div>}
       <div className="printer-card__foot">
         {printer.capture && <span className="ui-stattile__sub">camera</span>}
+        <Button variant="ghost" size="sm" busy={reconnecting} onClick={reconnect}>
+          Reconnect
+        </Button>
         <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
           Edit
         </Button>

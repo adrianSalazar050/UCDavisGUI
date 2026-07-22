@@ -5,7 +5,9 @@ import Columns from "../components/ui/Columns.jsx";
 import Field from "../components/ui/Field.jsx";
 import PageFrame from "../components/ui/PageFrame.jsx";
 import StatusPill from "../components/ui/StatusPill.jsx";
-import CameraCard from "../components/dashboard/CameraCard.jsx";
+import RoiEditor from "../components/detection/RoiEditor.jsx";
+import { pctToRoi, roiToPct } from "../components/detection/roiGeometry.js";
+import useCameraFrame from "../hooks/useCameraFrame.js";
 
 const CLASSES = ["blobs", "cracks", "over_extrusion", "spaghetti",
                  "stringing", "under_extrusion"];
@@ -14,22 +16,27 @@ const ROI_FIELDS = [
   { key: "x", label: "Left %" }, { key: "y", label: "Top %" },
   { key: "w", label: "Width %" }, { key: "h", label: "Height %" },
 ];
-// Measured off real A1 mini frames taken DURING A PRINT (1680x1080).
+// THE ROI IS PER PRINTER MODEL. Do not copy one between machines -- measured
+// 2026-07-21 the A1 mini and the A1 are close to inverted:
 //
-// The earlier default (0,40,65,60) was measured from an IDLE frame and was
-// completely wrong: while printing, the bed rides high in the view and that box
-// contained only the printer's front panel and sticker -- no bed whatsoever. An
-// idle frame is not representative, because the bed parks somewhere quite
-// different from where it prints. Always measure from a frame mid-print.
+//   A1 mini (1680x1080): bed in the TOP half     -> 0,0,100,50
+//   A1      (1536x1080): bed in the BOTTOM ~60%  -> 8,32,88,68
 //
-// Full width, top half: the bed spans the upper portion nearly edge-on, and the
-// A1 is a bed-slinger so it sweeps through frame as it prints. Generous on
-// purpose -- a too-small ROI crops the failure out of view, which is a silent
-// false negative and far worse than including some background.
-const DEFAULT_ROI_PCT = ["0", "0", "100", "50"];
+// Applying the mini's box to an A1 crops the bed out of frame ENTIRELY and
+// leaves the detector looking at the room. This default is the A1's, because
+// that is the hardware in use; on a mini, set it by hand on this page.
+//
+// The A1 numbers come from an IDLE frame and are provisional. The earlier mini
+// default (0,40,65,60) was also measured idle and was completely wrong: while
+// printing the bed rides high and that box held only the front panel -- no bed
+// at all. An idle frame is not representative, because the bed parks somewhere
+// quite different from where it prints. Always confirm from a frame mid-print.
+//
+// Generous on purpose -- a too-small ROI crops the failure out of view, which
+// is a silent false negative and far worse than including some background.
+const DEFAULT_ROI_PCT = ["8", "32", "88", "68"];
 
-const roiToPct = (roi) =>
-  roi ? roi.map((v) => String(Math.round(v * 100))) : DEFAULT_ROI_PCT;
+
 
 export default function Detection({ printers, selected }) {
   const s = printers.find((p) => p.serial === selected) ?? null;
@@ -38,8 +45,16 @@ export default function Detection({ printers, selected }) {
   const [err, setErr] = useState(null);
   // Held as strings while editing so a half-typed value doesn't fight the
   // input; converted and validated only on Apply.
-  const [roiPct, setRoiPct] = useState(() => roiToPct(d?.roi));
+  const [roiPct, setRoiPct] = useState(() => roiToPct(d?.roi, DEFAULT_ROI_PCT));
   const [roiError, setRoiError] = useState(null);
+  const frame = useCameraFrame(s?.serial ?? null, !!d?.running);
+
+  // The draggable box and the four % inputs are two views of ONE value, kept
+  // in roiPct (strings, so a half-typed "1" doesn't fight the input). The
+  // editor writes fractions; the fields write strings; both land here.
+  const roiDraft = pctToRoi(roiPct);
+  const setRoiFromEditor = (next) =>
+    setRoiPct(roiToPct(next, roiPct));
 
   const save = async (patch) => {
     setBusy(true);
@@ -56,11 +71,11 @@ export default function Detection({ printers, selected }) {
   // Validate here as well as server-side: the server clamps a bad ROI to "whole
   // frame", which would look like the setting silently not taking.
   const saveRoi = () => {
-    const nums = roiPct.map(Number);
-    if (nums.some((n) => !Number.isFinite(n))) {
+    const nums = pctToRoi(roiPct);
+    if (nums === null) {
       return setRoiError("All four values must be numbers.");
     }
-    const [x, y, w, h] = nums.map((n) => n / 100);
+    const [x, y, w, h] = nums;
     if (w <= 0 || h <= 0) return setRoiError("Width and height must be above 0.");
     if (x < 0 || y < 0 || x + w > 1 || y + h > 1) {
       return setRoiError("The region must fit inside the frame.");
@@ -131,8 +146,10 @@ export default function Detection({ printers, selected }) {
               Run detection on the bed only. Everything outside the box is
               ignored — on the A1's wide, low view the rest of the frame is the
               room, and the model will happily find "failures" in furniture.
-              Values are percentages of the frame; the region is outlined in the
-              live view so you can tune it by eye.
+              Drag the box or its handles on the view to the right — it moves
+              as you drag, before anything is saved. The dimmer outline burned
+              into the picture is what the detector is using right now; they
+              match once you hit Apply.
             </p>
             <div className="detect-roi">
               {ROI_FIELDS.map(({ key, label }, i) => (
@@ -177,7 +194,15 @@ export default function Detection({ printers, selected }) {
           </div>
         </Card>
 
-        <CameraCard serial={s.serial} live={!!d.running} />
+        <Card title="Detection region">
+          <RoiEditor src={frame?.url ?? null}
+                     roi={roiDraft ?? [0, 0, 1, 1]}
+                     onChange={setRoiFromEditor}
+                     disabled={busy || roiDraft === null} />
+          <div className="camera-caption">
+            {d.running ? "Live detection feed" : "Detector not running"}
+          </div>
+        </Card>
       </Columns>
     </PageFrame>
   );

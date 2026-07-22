@@ -2,6 +2,7 @@ import { useState } from "react";
 import { updatePrinter } from "../../api/printer.js";
 import Button from "../ui/Button.jsx";
 import Field from "../ui/Field.jsx";
+import { PRINTER_MODELS, guessModelId } from "./printerModels.js";
 
 // Prefilled from the printer summary, which never carries the access code
 // (see EditPrinter in server/main.py) -- that field always starts blank.
@@ -11,6 +12,10 @@ export default function EditPrinterForm({ printer, onDone }) {
     access_code: "",
     name: printer.name ?? "",
     capture: !!printer.capture,
+    // Fall back to the serial-prefix guess only when nothing is stored, so
+    // an existing printer gets a sensible preselection without ever having
+    // its deliberate choice overwritten.
+    model_id: printer.model_id || guessModelId(printer.serial),
   });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -33,6 +38,7 @@ export default function EditPrinterForm({ printer, onDone }) {
         access_code: form.access_code.trim(),
         name: form.name.trim(),
         capture: form.capture,
+        model_id: form.model_id,
       });
       onDone(); // /ws pushes the refreshed card in on its own
     } catch (e2) {
@@ -59,6 +65,16 @@ export default function EditPrinterForm({ printer, onDone }) {
                help="Leave blank to keep the current code" />
         <Field label="Name (optional)" value={form.name} onChange={set("name")}
                placeholder="A1-bench" help="Defaults to the IP address" />
+      </div>
+      <div className="add-form__row">
+        <Field label="Printer model"
+               help="Refuses starting a file sliced for another model. “Unknown” disables the check.">
+          <select value={form.model_id} onChange={set("model_id")}>
+            {PRINTER_MODELS.map((m) => (
+              <option key={m.id} value={m.id}>{m.name}</option>
+            ))}
+          </select>
+        </Field>
       </div>
       <label className="add-form__check">
         <input type="checkbox" checked={form.capture} onChange={set("capture")} />

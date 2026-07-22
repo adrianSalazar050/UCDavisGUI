@@ -13,6 +13,15 @@ class FakeService:
 
     def __init__(self, cfg: PrinterConfig):
         self.cfg = cfg
+        # COPY the identity fields at construction, exactly like the real
+        # PrinterService does. Reading them back off self.cfg would make this
+        # fake more permissive than the thing it stands in for: cfg is the
+        # very object update() mutates, so a registry that forgot to push a
+        # change onto the live service would still look correct here and be
+        # wrong in production.
+        self.name = cfg.name
+        self.capture = cfg.capture
+        self.model_id = cfg.model_id
         self.started = False
         self.stopped = False
         self.fetch_result = b"fake-3mf-bytes"
@@ -26,9 +35,9 @@ class FakeService:
         self.stopped = True
 
     def summary(self):
-        return {"serial": self.cfg.serial, "name": self.cfg.name,
-                "printer": self.cfg.host, "capture": self.cfg.capture,
-                "connection": "ok"}
+        return {"serial": self.cfg.serial, "name": self.name,
+                "printer": self.cfg.host, "capture": self.capture,
+                "model_id": self.model_id, "connection": "ok"}
 
     def fetch_file(self, path):
         self.fetch_calls.append(path)
@@ -417,6 +426,139 @@ def test_update_no_reconnect_when_host_resubmitted_unchanged():
     r.update("S1", host="1.2.3.4", name="renamed")
     assert r.get("S1") is old_svc
     assert old_svc.stopped is False
+
+
+# ---------------- model id ----------------
+
+def test_add_guesses_the_model_from_the_serial():
+    r = reg()
+    r.add(host="h", serial="03919D531805572", access_code="c")
+    assert r.printer_model("03919D531805572") == "N2S"
+
+
+def test_add_accepts_an_explicit_model_overriding_the_guess():
+    r = reg()
+    r.add(host="h", serial="03919D531805572", access_code="c", model_id="C11")
+    assert r.printer_model("03919D531805572") == "C11"
+
+
+def test_add_leaves_the_model_blank_for_an_unknown_serial_prefix():
+    r = reg()
+    r.add(host="h", serial="ZZZ999", access_code="c")
+    assert r.printer_model("ZZZ999") == ""
+
+
+def test_update_sets_the_model():
+    r = reg()
+    r.add(host="h", serial="S1", access_code="c")
+    r.update("S1", host="h", model_id="N1")
+    assert r.printer_model("S1") == "N1"
+
+
+def test_update_without_model_id_keeps_the_current_one():
+    # The edit form round-trips every field; omitting model_id must not wipe
+    # a model the user set deliberately.
+    r = reg()
+    r.add(host="h", serial="S1", access_code="c", model_id="N2S")
+    r.update("S1", host="h", name="renamed")
+    assert r.printer_model("S1") == "N2S"
+
+
+def test_update_model_id_reaches_the_live_service_summary():
+    # PrinterService keeps its OWN copy of the identity fields (same as
+    # name/capture, see _clear_capture), so setting cfg.model_id alone leaves
+    # the running service — and therefore every summary and the Edit form —
+    # reporting the old value. Caught by a smoke test against --mock, where
+    # the PUT returned model_id "" right after setting it to N2S.
+    r = reg()
+    r.add(host="h", serial="S1", access_code="c")
+    r.update("S1", host="h", model_id="N2S")
+    assert r.get("S1").summary()["model_id"] == "N2S"
+
+
+def test_update_can_clear_the_model_back_to_unknown():
+    # "Unknown" is a legitimate choice -- it disables the check for a printer
+    # whose model the user isn't sure of.
+    r = reg()
+    r.add(host="h", serial="S1", access_code="c", model_id="N2S")
+    r.update("S1", host="h", model_id="")
+    assert r.printer_model("S1") == ""
+
+
+def test_printer_model_unknown_serial_is_blank():
+    assert reg().printer_model("nope") == ""
+
+
+def test_model_id_survives_persistence():
+    store = MemoryStore()
+    r = reg(store)
+    r.add(host="h", serial="S1", access_code="c", model_id="N2S")
+    assert store.load()[0].model_id == "N2S"
+
+
+# ---------------- reconnect ----------------
+
+def test_reconnect_swaps_service_starts_new_and_stops_old():
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="code")
+    old_svc = r.get("S1")
+    result = r.reconnect("S1")
+    new_svc = r.get("S1")
+    assert new_svc is not old_svc
+    assert old_svc.stopped is True
+    assert new_svc.started is True
+    assert result["serial"] == "S1"
+
+
+def test_reconnect_unknown_serial_returns_none():
+    assert reg().reconnect("nope") is None
+
+
+def test_reconnect_keeps_host_access_code_name_and_capture():
+    # Reconnect is NOT an edit -- it rebuilds the connection with exactly the
+    # config already stored. A reconnect that quietly dropped `capture` would
+    # tear down detection as a side effect.
+    r = reg()
+    r.add(host="1.2.3.4", serial="S1", access_code="code", name="Bench",
+          capture=True)
+    r.update_detection("S1", detect_enabled=True)
+    r.reconnect("S1")
+    # detection_target() needs BOTH capture and detect_enabled, so this also
+    # proves the reconnect didn't silently disarm the detector.
+    cfg = r.detection_target()
+    assert cfg is not None
+    assert cfg["serial"] == "S1"
+    assert cfg["access_code"] == "code"
+    svc = r.get("S1")
+    assert svc.cfg.host == "1.2.3.4"
+    assert svc.cfg.name == "Bench"
+    assert svc.cfg.capture is True
+
+
+def test_reconnect_does_not_hold_the_lock_across_start():
+    # summaries() runs on the asyncio event loop for every WS tick. If
+    # reconnect held _lock across start(), a slow connect would freeze every
+    # connected client. Proven by having start() re-enter the registry: it
+    # deadlocks if the lock is still held.
+    seen = {}
+
+    class ReentrantService(FakeService):
+        def start(self):
+            seen["summaries"] = len(registry.summaries())
+            super().start()
+
+    registry = PrinterRegistry(MemoryStore(), ReentrantService)
+    registry.add(host="1.2.3.4", serial="S1", access_code="code")
+    registry.reconnect("S1")
+    assert seen["summaries"] == 1
+
+
+def test_reconnect_persists_nothing_new_but_keeps_the_printer():
+    store = MemoryStore()
+    r = reg(store)
+    r.add(host="1.2.3.4", serial="S1", access_code="code")
+    r.reconnect("S1")
+    assert [c.serial for c in store.load()] == ["S1"]
 
 
 def test_update_blank_access_code_keeps_old_code():

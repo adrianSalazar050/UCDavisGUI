@@ -7,13 +7,85 @@ import tempfile
 
 import pytest
 
-from server.store import MemoryStore, PrinterConfig, PrinterStore
+from server.store import (MemoryStore, PrinterConfig, PrinterStore,
+                          guess_model_id, model_mismatch)
 
 
 def cfg(serial="0300CA633005010", host="192.168.137.2", code="test-access-code",
         name="", capture=False):
     return PrinterConfig(serial=serial, host=host, access_code=code,
                          name=name, capture=capture)
+
+
+def test_guess_model_id_from_a_verified_serial_prefix():
+    # 039 -> N2S (A1). VERIFIED: this repo's printer is serial
+    # 03919D531805572 and its slicer output carries printer_model_id N2S.
+    assert guess_model_id("03919D531805572") == "N2S"
+
+
+def test_guess_model_id_from_the_a1_mini_prefix():
+    assert guess_model_id("0300CA633005010") == "N1"
+
+
+def test_guess_model_id_unknown_prefix_is_blank_not_a_guess():
+    # A wrong guess can only cost the user a refused print, so an unrecognised
+    # prefix must yield "" (= unknown = never block), never a plausible default.
+    assert guess_model_id("ZZZ123") == ""
+    assert guess_model_id("") == ""
+    assert guess_model_id(None) == ""
+
+
+def test_config_model_id_defaults_blank():
+    assert cfg().model_id == ""
+
+
+def test_from_dict_keeps_a_known_model_id():
+    c = PrinterConfig.from_dict({"serial": "S", "host": "h",
+                                 "access_code": "c", "model_id": "N2S"})
+    assert c.model_id == "N2S"
+
+
+def test_from_dict_rejects_a_non_string_model_id():
+    c = PrinterConfig.from_dict({"serial": "S", "host": "h",
+                                 "access_code": "c", "model_id": 42})
+    assert c.model_id == ""
+
+
+def test_from_dict_keeps_an_unrecognised_model_id_verbatim():
+    # The id table is not exhaustive -- Bambu ships models this code has never
+    # heard of. Storing an unknown id is fine and still enables the check (it
+    # compares ids, not names); only the friendly NAME is unavailable.
+    c = PrinterConfig.from_dict({"serial": "S", "host": "h",
+                                 "access_code": "c", "model_id": "C99"})
+    assert c.model_id == "C99"
+
+
+def test_model_mismatch_names_both_sides():
+    msg = model_mismatch("N2S", "N1")
+    assert "A1 mini" in msg and "A1" in msg
+
+
+def test_model_mismatch_none_when_they_match():
+    assert model_mismatch("N2S", "N2S") is None
+
+
+def test_model_mismatch_none_when_printer_model_unknown():
+    # THE load-bearing rule: unknown never blocks. The printer's model can
+    # only ever be configured by hand, so an unset one is the common case and
+    # must not refuse a perfectly good file.
+    assert model_mismatch("", "N2S") is None
+    assert model_mismatch(None, "N2S") is None
+
+
+def test_model_mismatch_none_when_file_model_unknown():
+    # Every raw .gcode, and any 3mf whose slicer didn't write the key.
+    assert model_mismatch("N2S", "") is None
+    assert model_mismatch("N2S", None) is None
+
+
+def test_model_mismatch_uses_raw_ids_when_not_in_the_name_table():
+    msg = model_mismatch("C99", "D77")
+    assert "C99" in msg and "D77" in msg
 
 
 def test_name_defaults_to_host():

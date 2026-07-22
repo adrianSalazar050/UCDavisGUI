@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { fetchFiles } from "../api/printer.js";
+import { fetchFiles, uploadFile } from "../api/printer.js";
 import FileTable from "../components/sd/FileTable.jsx";
 import Button from "../components/ui/Button.jsx";
 import Card from "../components/ui/Card.jsx";
@@ -56,6 +56,10 @@ function SdBrowser({ printer }) {
   const [entries, setEntries] = useState([]);
   const [err, setErr] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const [noticeKind, setNoticeKind] = useState("ok");
+  const fileInput = useRef(null);
 
   // Same-printer race: open folder A, then quickly folder B, before A's
   // response lands. Only the response matching the most recently issued
@@ -84,14 +88,53 @@ function SdBrowser({ printer }) {
   // navigation and on Refresh only.
   useEffect(() => { load(path); }, [load, path]);
 
+  // Uploads always land in the card ROOT, whatever folder is being browsed:
+  // the printer's start command is file:///sdcard/<name> with no path
+  // component, so a file in a subfolder could be listed but never started.
+  // After a successful STOR we reload the root so the new file is visible
+  // where it actually went, not where the user happened to be standing.
+  const onPick = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";              // so picking the same file twice refires
+    if (!file) return;
+    setUploading(true);
+    setErr(null);
+    setNotice(null);
+    try {
+      const res = await uploadFile(printer.serial, file);
+      // A raw .gcode uploads fine but the queue can't start it. That's a
+      // warning, not an error -- the file IS on the card -- so it gets the
+      // notice slot with its own styling rather than the error slot.
+      setNotice(res.warning
+        ?? `Uploaded ${res.path} (${Math.round(res.bytes / 1024)} kB)`);
+      setNoticeKind(res.warning ? "warn" : "ok");
+      if (path === "/") await load("/"); else setPath("/");
+    } catch (ex) {
+      setErr(ex.message);
+    } finally {
+      setUploading(false);
+    }
+  };
+
   return (
     <Card title={`microSD — ${printer.name}`}>
       <div className="sd-toolbar">
         <Crumbs path={path} onGo={setPath} />
+        <input ref={fileInput} type="file" accept=".3mf,.gcode"
+               style={{ display: "none" }} onChange={onPick} />
+        <Button size="sm" busy={uploading}
+                onClick={() => fileInput.current?.click()}>
+          Upload…
+        </Button>
         <Button size="sm" busy={loading} onClick={() => load(path)}>
           Refresh
         </Button>
       </div>
+      {notice ? (
+        <div className={noticeKind === "warn" ? "state-warn" : "state-ok"}>
+          {notice}
+        </div>
+      ) : null}
       {err ? (
         <div className="state-error">
           <span>{err}</span>
