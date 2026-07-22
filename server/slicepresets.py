@@ -83,3 +83,70 @@ def available_presets(model_id: str, nozzle: str, index: dict) -> list:
     """Every tier that actually resolves, in TIERS order."""
     out = [resolve_preset(t, model_id, nozzle, index) for t in TIERS]
     return [p for p in out if p is not None]
+
+
+# Materials offered, in menu order. Generic rather than Bambu-branded profiles
+# because a spool the printer could not identify is, by definition, not a
+# tagged Bambu spool -- and that is the common case.
+MATERIALS = ("PLA", "PETG", "ABS", "TPU")
+
+
+def filament_profile_name(material: str, model_id: str) -> str:
+    """Filament profile name, or "" when unavailable. Filament profiles use
+    the same token as process profiles (A1 / A1M), not the machine one."""
+    token = PROCESS_TOKENS.get(model_id)
+    if not token or material not in MATERIALS:
+        return ""
+    return f"Generic {material} @BBL {token}"
+
+
+def available_filaments(model_id: str, index: dict) -> list:
+    """Every material whose profile this slicer actually ships."""
+    out = []
+    for material in MATERIALS:
+        name = filament_profile_name(material, model_id)
+        if name and name in index:
+            out.append({"material": material, "profile": name})
+    return out
+
+
+def detect_loaded_filament(state) -> str | None:
+    """Material currently loaded, read off the live MQTT state, or None.
+
+    None is the NORMAL case, not an error: the printer only knows the material
+    when an RFID-tagged Bambu spool is loaded, and most filament is not that.
+    The UI prefills with this and stays editable, so an unidentifiable spool
+    never blocks slicing.
+
+    Pure, and deliberately paranoid about shape: state is deep-merged from
+    partial MQTT reports (master.md 3.1), so any node can be missing or be
+    the wrong type at any moment.
+    """
+    if not isinstance(state, dict):
+        return None
+    ams = state.get("ams")
+    if isinstance(ams, dict):
+        units = ams.get("ams")
+        if isinstance(units, list):
+            for unit in units:
+                if not isinstance(unit, dict):
+                    continue
+                trays = unit.get("tray")
+                if not isinstance(trays, list):
+                    continue
+                for tray in trays:
+                    if not isinstance(tray, dict):
+                        continue
+                    found = _material(tray.get("tray_type"))
+                    if found:
+                        return found
+    return _material((state.get("vt_tray") or {}).get("tray_type")
+                     if isinstance(state.get("vt_tray"), dict) else None)
+
+
+def _material(value) -> str | None:
+    """A tray_type string -> a material we have a profile for, else None."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip().upper()
+    return value if value in MATERIALS else None

@@ -1,5 +1,7 @@
-from server.slicepresets import (TIERS, available_presets,
-                                 machine_profile_name, resolve_preset)
+from server.slicepresets import (TIERS, available_filaments,
+                                 available_presets, detect_loaded_filament,
+                                 filament_profile_name, machine_profile_name,
+                                 resolve_preset)
 
 # A miniature stand-in for the real 1,932-preset index.
 INDEX = {
@@ -61,3 +63,54 @@ def test_available_presets_lists_only_what_resolves():
 
 def test_every_tier_is_exercised_by_the_table():
     assert set(TIERS) == {"standard", "fine", "draft"}
+
+
+FIL_INDEX = dict(INDEX, **{
+    "Generic PLA @BBL A1": {"name": "Generic PLA @BBL A1"},
+    "Generic PETG @BBL A1": {"name": "Generic PETG @BBL A1"},
+    "Generic PLA @BBL A1M": {"name": "Generic PLA @BBL A1M"},
+})
+
+
+def test_detects_the_material_from_an_ams_tray():
+    state = {"ams": {"ams": [{"tray": [{"tray_type": "PLA"}]}]}}
+    assert detect_loaded_filament(state) == "PLA"
+
+
+def test_falls_back_to_the_external_spool():
+    # An A1 with no AMS reports vt_tray instead.
+    assert detect_loaded_filament({"vt_tray": {"tray_type": "PETG"}}) == "PETG"
+
+
+def test_prefers_a_loaded_ams_tray_over_an_empty_one():
+    state = {"ams": {"ams": [{"tray": [{"tray_type": ""},
+                                       {"tray_type": "ABS"}]}]}}
+    assert detect_loaded_filament(state) == "ABS"
+
+
+def test_returns_none_for_an_unidentifiable_spool():
+    # The normal case for third-party filament with no RFID tag. Must not
+    # block slicing -- the UI just leaves the dropdown on its default.
+    assert detect_loaded_filament({}) is None
+    assert detect_loaded_filament({"vt_tray": {"tray_type": ""}}) is None
+    assert detect_loaded_filament({"ams": {"ams": []}}) is None
+    assert detect_loaded_filament(None) is None
+
+
+def test_tolerates_a_malformed_state_without_raising():
+    # MQTT state is merged from partial reports; anything can be any shape.
+    assert detect_loaded_filament({"ams": "nope"}) is None
+    assert detect_loaded_filament({"ams": {"ams": [{"tray": "nope"}]}}) is None
+    assert detect_loaded_filament({"vt_tray": ["nope"]}) is None
+
+
+def test_filament_profile_name_uses_the_process_token():
+    assert filament_profile_name("PLA", "N2S") == "Generic PLA @BBL A1"
+    assert filament_profile_name("PLA", "N1") == "Generic PLA @BBL A1M"
+    assert filament_profile_name("NOSUCH", "N2S") == ""
+
+
+def test_available_filaments_lists_only_what_resolves():
+    got = available_filaments("N2S", FIL_INDEX)
+    assert [f["material"] for f in got] == ["PLA", "PETG"]
+    assert got[0]["profile"] == "Generic PLA @BBL A1"
