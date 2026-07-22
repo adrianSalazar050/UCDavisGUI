@@ -496,6 +496,24 @@ def test_model_id_survives_persistence():
     assert store.load()[0].model_id == "N2S"
 
 
+# ---------------- nozzle ----------------
+# add()/update() don't take a nozzle kwarg (not part of this task), so these
+# seed the config the same way test_load_restores_and_starts_from_store does:
+# through the store, then r.load().
+
+def test_printer_nozzle_returns_the_configured_value():
+    store = MemoryStore()
+    store.save([PrinterConfig(serial="S1", host="h", access_code="c",
+                              nozzle="0.6")])
+    r = reg(store)
+    r.load()
+    assert r.printer_nozzle("S1") == "0.6"
+
+
+def test_printer_nozzle_unknown_serial_defaults_to_04():
+    assert reg().printer_nozzle("nope") == "0.4"
+
+
 # ---------------- reconnect ----------------
 
 def test_reconnect_swaps_service_starts_new_and_stops_old():
