@@ -1,5 +1,17 @@
 # Multi-Printer Connection Manager + SD Card Browser (v2) — Design
 
+> **STATUS: SHIPPED (2026-07-16).**
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever this file disagrees with it.**
+>
+> Task checkboxes below were never ticked during execution; read the status line above, not the boxes.
+>
+> Since extended: `PrinterConfig` gained `camera_source`, `camera_index`, `conf`, `armed_classes`, `detect_enabled`, `roi` and `model_id`, so the `printers.json` schema shown here is a subset. The SD card is **no longer read-only** — `sdcard.upload_file()` does an FTPS STOR behind `POST /api/printers/{serial}/files`. `POST .../reconnect` also postdates this file.
+>
+> Stale throughout, and not corrected in place:
+> - any **test count** (this tree quotes 194, 228, 316, ~100 — run `python -m pytest -q` instead)
+> - the printer: an **A1 mini** (`0300CA633005010`, `192.168.137.2`) until 2026-07-19, an **A1** (`03919D531805572`) since 2026-07-21
+
 **Date:** 2026-07-16
 **Status:** Approved by user (conversation, 2026-07-16)
 **Supersedes parts of:** `2026-07-16-bambu-dashboard-design.md` (v1). v1's single

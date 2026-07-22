@@ -1,5 +1,19 @@
 # Live Failure Detection + Auto-Stop + Print Queue — Design
 
+> **STATUS: SHIPPED (2026-07-17), both phases.**
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever this file disagrees with it.**
+>
+> Task checkboxes below were never ticked during execution; read the status line above, not the boxes.
+>
+> Biggest gap: this design has **no ROI concept at all**, and the ROI turned out to be the single most consequential per-printer-model setting — a wrong one crops the bed out of frame and silently disables detection. See `master.md` §4.1 and §1.1.
+>
+> The "~0.43 fps measured" figure was measured on the A1 mini and has not been re-measured on the A1.
+>
+> Stale throughout, and not corrected in place:
+> - any **test count** (this tree quotes 194, 228, 316, ~100 — run `python -m pytest -q` instead)
+> - the printer: an **A1 mini** (`0300CA633005010`, `192.168.137.2`) until 2026-07-19, an **A1** (`03919D531805572`) since 2026-07-21
+
 **Date:** 2026-07-17
 **Status:** Approved by user (conversation, 2026-07-17)
 **Branch:** `dashboard`

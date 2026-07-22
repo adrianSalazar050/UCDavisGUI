@@ -1,7 +1,12 @@
-# Bambu Lab A1 mini — LAN Connection Notes
+# Bambu Lab A1 / A1 mini — LAN Connection Notes
 
 How the LAN connection to the printer works, the exact values it needs, and what
 to check when it doesn't.
+
+> Originally written against an A1 mini. Re-confirmed on an **A1** (serial
+> `03919D531805572`) on 2026-07-21: MQTT over TLS 8883, FTPS 990 implicit, and
+> the TCP 6000 camera stream all behave identically. The connection layer is
+> not model-specific. What *is* model-specific lives in `master.md` §1.1.
 
 > **On the scripts named below.** The connection was originally proven by two
 > throwaway diagnostics, `testing.py` (full MQTT diagnostic, strict TLS) and
@@ -27,8 +32,8 @@ you can double-check.
 
 | Value | Used here | Where to find it on the printer |
 |---|---|---|
-| IP | `192.168.137.2` | Settings -> WLAN |
-| Serial | `0300CA633005010` | Also the TLS certificate's common name |
+| IP | `192.168.137.134` (A1, 2026-07-21; **volatile** — re-check this first when nothing works) | Settings -> WLAN |
+| Serial | `03919D531805572` (A1) / `0300CA633005010` (the older A1 mini) | Also the TLS certificate's common name |
 | LAN Access Code | `<read from printer screen>` | Shown on the printer screen; **rotates on some firmware updates** |
 | Port | `8883` (fixed) | MQTT over TLS |
 | Username | `bblp` (fixed) | Same for every printer |
@@ -121,8 +126,8 @@ Then open http://localhost:8000, go to **Overview → Add printer**, and type:
 
 | Field | Value |
 |---|---|
-| IP address | `192.168.137.2` |
-| Serial | `0300CA633005010` |
+| IP address | `192.168.137.134` (read yours off the printer — it changes) |
+| Serial | `03919D531805572` |
 | LAN access code | `<your 8-digit code>` |
 | Name (optional) | anything, e.g. `A1-bench` |
 | Camera checkbox | tick it if the webcam points at this printer |

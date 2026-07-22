@@ -1,5 +1,19 @@
 # Detection Frontend (Phase 1b) Implementation Plan
 
+> **STATUS: SHIPPED (2026-07-17).**
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever this file disagrees with it.**
+>
+> Task checkboxes below were never ticked during execution; read the status line above, not the boxes.
+>
+> "No JS test runner exists in this project" is no longer true — vitest was added 2026-07-21 for `roiGeometry.js`.
+>
+> The `detection` object gained `roi`, and the page now has a draggable ROI editor (`master.md` §6). The "~0.4 fps" assertion was measured on the A1 mini.
+>
+> Stale throughout, and not corrected in place:
+> - any **test count** (this tree quotes 194, 228, 316, ~100 — run `python -m pytest -q` instead)
+> - the printer: an **A1 mini** (`0300CA633005010`, `192.168.137.2`) until 2026-07-19, an **A1** (`03919D531805572`) since 2026-07-21
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Make the (already-built, hardware-verified) detection + auto-stop backend usable in the browser: a Dashboard **Auto-stop card** (armed state, Arm toggle, live detection, countdown) and a new **Detection page** (camera source selector, threshold, per-class arming, enable toggle, detector health + live preview).

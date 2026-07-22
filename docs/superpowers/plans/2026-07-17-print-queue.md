@@ -1,5 +1,17 @@
 # Print Queue (Phase 2) Implementation Plan
 
+> **STATUS: SHIPPED (2026-07-17).**
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever this file disagrees with it.**
+>
+> Task checkboxes below were never ticked during execution; read the status line above, not the boxes.
+>
+> The queue job schema here is incomplete: jobs now also carry `model_id`, and starting a job whose model conflicts with the printer's is refused with a 409 (`master.md` §5.3).
+>
+> Stale throughout, and not corrected in place:
+> - any **test count** (this tree quotes 194, 228, 316, ~100 — run `python -m pytest -q` instead)
+> - the printer: an **A1 mini** (`0300CA633005010`, `192.168.137.2`) until 2026-07-19, an **A1** (`03919D531805572`) since 2026-07-21
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** A per-printer **planner** queue: order SD-card jobs, show each file's estimated print time + filament grams (read from the sliced `.gcode.3mf`), running totals, and a projected finish time. **Planner only** — it does not command the printer.

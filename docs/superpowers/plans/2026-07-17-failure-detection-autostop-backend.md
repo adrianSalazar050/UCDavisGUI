@@ -1,5 +1,19 @@
 # Live Failure Detection + Auto-Stop (Backend) Implementation Plan
 
+> **STATUS: SHIPPED (2026-07-17).**
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever this file disagrees with it.**
+>
+> Task checkboxes below were never ticked during execution; read the status line above, not the boxes.
+>
+> The `"UNVERIFIED against real A1 mini hardware"` comment this plan tells you to write is out of date twice over: `stop_print()` was verified on 2026-07-19 (`PREPARE → FAILED`), and on the mini, not the A1 now in use.
+>
+> `detection_target()` has since gained `camera_source`, `host`, `access_code` and `roi`. No ROI appears anywhere in this plan.
+>
+> Stale throughout, and not corrected in place:
+> - any **test count** (this tree quotes 194, 228, 316, ~100 — run `python -m pytest -q` instead)
+> - the printer: an **A1 mini** (`0300CA633005010`, `192.168.137.2`) until 2026-07-19, an **A1** (`03919D531805572`) since 2026-07-21
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Wire the trained YOLO failure detector into the server as a supervised camera process, and stop the print over MQTT when an *armed* failure class persists for 10 continuous seconds — all headless and fully testable under `--mock`, with no browser required.

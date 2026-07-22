@@ -1,5 +1,17 @@
 # Bambu Monitor Dashboard (v1) — Design
 
+> **STATUS: SHIPPED (2026-07-16), then SUPERSEDED** by `2026-07-16-multi-printer-sd-browser-design.md`.
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever this file disagrees with it.**
+>
+> Task checkboxes below were never ticked during execution; read the status line above, not the boxes.
+>
+> Specifically obsolete: the single-printer model and the `--host/--serial/--access-code` CLI flags, both removed in v2 — printers are added in the browser now.
+>
+> Stale throughout, and not corrected in place:
+> - any **test count** (this tree quotes 194, 228, 316, ~100 — run `python -m pytest -q` instead)
+> - the printer: an **A1 mini** (`0300CA633005010`, `192.168.137.2`) until 2026-07-19, an **A1** (`03919D531805572`) since 2026-07-21
+
 **Date:** 2026-07-16
 **Status:** Approved by user (conversation, 2026-07-16)
 

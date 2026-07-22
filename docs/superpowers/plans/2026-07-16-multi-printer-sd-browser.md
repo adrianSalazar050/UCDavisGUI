@@ -1,5 +1,19 @@
 # Multi-Printer Connection Manager + SD Card Browser Implementation Plan
 
+> **STATUS: SHIPPED (2026-07-16).**
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever this file disagrees with it.**
+>
+> Task checkboxes below were never ticked during execution; read the status line above, not the boxes.
+>
+> Flatly wrong now: every "the SD page is read-only" / "read-only over FTPS" statement. Upload shipped 2026-07-21 (`sdcard.upload_file()`, `POST /api/printers/{serial}/files`).
+>
+> The `CONNECTION.md` rewrite prescribed near the end was applied, but that file has since been updated again for the A1.
+>
+> Stale throughout, and not corrected in place:
+> - any **test count** (this tree quotes 194, 228, 316, ~100 — run `python -m pytest -q` instead)
+> - the printer: an **A1 mini** (`0300CA633005010`, `192.168.137.2`) until 2026-07-19, an **A1** (`03919D531805572`) since 2026-07-21
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let the user add Bambu printers at runtime by typing IP + serial + LAN access code in the browser, see every printer's live status on an Overview grid, and browse each printer's microSD filenames — per the approved spec in `docs/superpowers/specs/2026-07-16-multi-printer-sd-browser-design.md`.

@@ -1,5 +1,19 @@
 # A1 Mini Camera Source (backend) Implementation Plan
 
+> **STATUS: SHIPPED (2026-07-17).**
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever this file disagrees with it.**
+>
+> Task checkboxes below were never ticked during execution; read the status line above, not the boxes.
+>
+> The title says "A1 Mini"; the same camera code now runs against an **A1**. The wire protocol is unchanged — only the hardware attribution is wrong. Frame size differs: 1680x1080 on the mini, 1536x1080 on the A1.
+>
+> `detect.py` has since gained `--roi`, which is absent from the argv contract here. Hardware-verification steps hardcode `192.168.137.108`, which is not the current IP.
+>
+> Stale throughout, and not corrected in place:
+> - any **test count** (this tree quotes 194, 228, 316, ~100 — run `python -m pytest -q` instead)
+> - the printer: an **A1 mini** (`0300CA633005010`, `192.168.137.2`) until 2026-07-19, an **A1** (`03919D531805572`) since 2026-07-21
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let the detector read frames from the A1 mini's built-in camera (not just a USB webcam), selectable per printer, with the printer's access code handed to the detector process **only via an environment variable** — never argv, logs, or the API.

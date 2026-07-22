@@ -1,6 +1,6 @@
 # 3D-Printing Failure Detector — Training & Resolution-Robustness Report
 
-Date: 2026-07-17
+Sections 1–7: 2026-07-17. Section 8 (A1-camera domain adaptation): 2026-07-21.
 
 ## 1. What this is
 
@@ -154,7 +154,12 @@ python run_camera_detection.py                     # live webcam demo
 
 ---
 
-## 8. A1 built-in camera: domain adaptation (2026-07-19)
+## 8. A1 **mini** built-in camera: domain adaptation (2026-07-19)
+
+> All data, training, and numbers in this section come from the **A1 mini**.
+> The hardware in use changed to an **A1** on 2026-07-21 — different camera
+> geometry, different room. See §8.6 and `master.md` §1.1 before quoting any of
+> this for the current printer.
 
 ### 8.1 The problem
 
@@ -221,12 +226,17 @@ label change.
   This measures "can it find THIS tangle, in frames and positions it has not
   seen", not "can it find spaghetti". Different prints fail differently.
 * **Tiny evaluation.** 9 positives and 17 negatives. Wide confidence intervals.
-* **Scene-specific.** Copy-paste bakes in the backgrounds it pastes onto. All
-  49 came from one printer in one room; a second A1 in a different room measures
-  a scene difference of 72 (same-scene frames differ by 1-3), so this checkpoint
-  should not be expected to transfer. The *cutouts* transfer; the backgrounds do
-  not. Re-running `synth_dataset.py` with clean frames from the new scene and
-  the existing cutouts is the cheap path.
+* **Scene-specific, and the scene has since changed.** Copy-paste bakes in the
+  backgrounds it pastes onto. All 49 came from **the A1 mini in one room**; a
+  second A1 in a different room measures a scene difference of 72 (same-scene
+  frames differ by 1-3), so this checkpoint should not be expected to transfer.
+  As of 2026-07-21 the hardware in use *is* that other machine, whose camera
+  geometry is close to inverted (bed in the bottom ~60% of a 1536x1080 frame,
+  vs the top half of the mini's 1680x1080). **Treat every number in this
+  section as belonging to the A1 mini.** The *cutouts* transfer; the backgrounds
+  do not. Re-running `collect_backgrounds.py` on the A1 and then
+  `synth_dataset.py` with the existing cutouts is the cheap path -- no new
+  failures need to be induced.
 * **Not deployable for auto-stop yet.** Even at the measured 11.8%, three
   consecutive frames are needed to fire, which works out to roughly 1 spurious
   stop per hour of printing. That must be verified as near-zero on genuinely

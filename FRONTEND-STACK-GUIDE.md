@@ -1,5 +1,27 @@
 # Frontend Stack & Design Guide
 
+> ## ⚠ This describes a DIFFERENT project
+>
+> This is an imported reference document about the **VERA / HORUS** GUI
+> (`LoDISA-GUI/vera-web/frontend`). It is kept here because `frontend/` was
+> built by copying its conventions — the design tokens, the hand-rolled UI kit,
+> the page-registry-instead-of-router pattern.
+>
+> **Every path and every file it names belongs to that other repo, not this
+> one.** Nothing here is runnable against `frontend/`, and none of the paths
+> resolve. `LoDISA-GUI/COLORS.md`, linked twice below, is not in this
+> repository at all.
+>
+> | It mentions | This project actually has |
+> |---|---|
+> | `AuthContext`, `CellContext`, `PreferencesContext`, `useCells` | no contexts at all; one `usePrinters` hook over a WebSocket |
+> | Supabase JS for auth | no auth, no Supabase — the server is LAN-only |
+> | `LoDISA-GUI/vera-web/frontend/src/...` | `frontend/src/...` |
+> | no test setup | `vitest`, over `roiGeometry.js` (see `master.md` §9) |
+>
+> Read it for **conventions**, not for facts about this codebase. For what
+> `frontend/` really contains, see [`master.md` §6](master.md).
+
 How the VERA / HORUS GUI (`LoDISA-GUI/vera-web/frontend`) is built, and which tools to
 use if you want a new GUI with the same look, feel, and structure.
 
@@ -107,7 +129,7 @@ Copy this block as your starting point (it is the "Slate Daylight" light theme):
 
 The full palette for both themes (including the dark **HORUS** theme: amber phosphor
 `#FFB000` on near-black, cyan `#36E0D0` as a rare second channel) is documented in
-[`LoDISA-GUI/COLORS.md`](LoDISA-GUI/COLORS.md) — read that file before choosing any
+`LoDISA-GUI/COLORS.md` *(in the VERA repo, not this one)* — read that file before choosing any
 color in a new project.
 
 ### 3.2 Design rules the project follows
@@ -195,4 +217,4 @@ Pattern to copy (from `Button.jsx`): props map to modifier classes like
 6. Build pages out of `PageFrame > Section > Card / Field / Stack` — never raw divs
    with ad-hoc styles.
 7. When you add a dark theme, do it only via `:root[data-theme="dark"]` token swaps,
-   following [`LoDISA-GUI/COLORS.md`](LoDISA-GUI/COLORS.md).
+   following `LoDISA-GUI/COLORS.md` *(in the VERA repo, not this one)*.

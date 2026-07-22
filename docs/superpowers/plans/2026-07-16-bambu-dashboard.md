@@ -1,5 +1,17 @@
 # Bambu Monitor Dashboard Implementation Plan
 
+> **STATUS: SHIPPED (2026-07-16), then SUPERSEDED** by the multi-printer plan.
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever this file disagrees with it.**
+>
+> Task checkboxes below were never ticked during execution; read the status line above, not the boxes.
+>
+> The `--host/--serial/--access-code` invocation near the end no longer exists; printers are added in the browser.
+>
+> Stale throughout, and not corrected in place:
+> - any **test count** (this tree quotes 194, 228, 316, ~100 — run `python -m pytest -q` instead)
+> - the printer: an **A1 mini** (`0300CA633005010`, `192.168.137.2`) until 2026-07-19, an **A1** (`03919D531805572`) since 2026-07-21
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A live browser dashboard for the Bambu A1 mini rig — printer state, temps, layer/progress, HMS errors, and the newest captured frame — per the approved spec in `docs/superpowers/specs/2026-07-16-bambu-dashboard-design.md`.

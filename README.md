@@ -1,8 +1,13 @@
 # bambu_monitor
 
-Failure detection and monitoring for a Bambu Lab A1 mini: a layer-indexed
-capture logger, a YOLO failure detector that can stop a print by itself, and a
-web dashboard for a fleet of printers.
+Failure detection and monitoring for Bambu Lab A1 / A1 mini printers: a
+layer-indexed capture logger, a YOLO failure detector that can stop a print by
+itself, and a web dashboard for a fleet of printers.
+
+Developed against an A1 mini through 2026-07-19 and an A1 from 2026-07-21. The
+server code is model-agnostic, but the **detection ROI** and the **training
+data** are not — see [`master.md` §1.1](master.md) for exactly which claims were
+verified on which machine.
 
 **New here? Read [`master.md`](master.md)** — it explains the whole system end to
 end: architecture, every module, the auto-stop state machine, and how to run it.
@@ -39,8 +44,11 @@ Full connection details, TLS specifics, and troubleshooting:
 | `capture.py` | Layer-indexed capture logger (the training-data collector) |
 | `check_registration.py` | The gate that decides whether the fixture is good enough to build a detector on |
 | `probe_gcode.py` | The CAXTON self-labelling question |
-| `train_failure_detector.py` | Fine-tune YOLOv8 on the failure dataset |
-| [`FAILURE_DETECTOR_REPORT.md`](FAILURE_DETECTOR_REPORT.md) | Training results + webcam-resolution robustness study |
+| `train_failure_detector.py` | Fine-tune YOLOv8 on the public failure dataset |
+| `collect_dataset.py`, `collect_backgrounds.py` | Collect real frames from *this* printer's camera (failures by hand, clean backgrounds unattended) |
+| `split_source.py`, `synth_dataset.py` | Disjoint train/test split, then copy-paste augmentation into a trainable dataset |
+| `build_real_eval.py`, `eval_real.py` | Evaluate on untouched real frames, at the operating point that matters |
+| [`FAILURE_DETECTOR_REPORT.md`](FAILURE_DETECTOR_REPORT.md) | Training results, webcam-resolution study, and the A1-camera domain adaptation |
 | [`FRONTEND-STACK-GUIDE.md`](FRONTEND-STACK-GUIDE.md) | Look & feel (Slate Daylight tokens) |
 
 Printers are added in the browser (**Overview → Add printer**) by typing IP,
@@ -135,10 +143,15 @@ See [`master.md` §4](master.md) for the state machine and
 actually scores (mAP50 0.835, and essentially unaffected down to a simulated
 320×320 sensor).
 
-**The caveat that has not changed:** those numbers come from a generic
-internet-scraped dataset, not from this printer's camera angle, lighting, and
-mount. They say "the pipeline works," not "this is the false-positive rate you
-will get." That is what the exit criterion below is for.
+**The caveat is now a measurement.** Those numbers come from a generic
+internet-scraped dataset, and on the A1's own fisheye camera that model scores
+**mAP50 0.0016** — blind, not merely weaker. Fine-tuning on copy-paste synthetic
+data built from real frames of this printer recovers it to 0.4539 with 100%
+recall, but on 9 test positives from a single physical tangle in a single room.
+That is enough to say the approach works and nowhere near enough to arm
+auto-stop. [`master.md` §11](master.md) has the full story, including how the
+first evaluation of it turned out to be circular; the exit criterion below is
+still the bar.
 
 ## Exit criterion
 
@@ -149,7 +162,11 @@ methods**. Then stop. Anything past that is polishing a commodity.
 ## Tests
 
 ```bash
-python -m pytest -q          # 270 tests, no hardware required
+python -m pytest -q          # server + root modules; no hardware required
+cd frontend && npm test      # ROI drag maths (vitest)
 ```
+
+Counts are deliberately not quoted here — see [`master.md` §9](master.md) for
+what each test file covers, and run the commands for the number.
 
 Design specs and implementation plans live in `docs/superpowers/`.

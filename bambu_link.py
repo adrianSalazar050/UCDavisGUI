@@ -37,9 +37,13 @@ MQTT_USER = "bblp"
 
 # Where the printer looks for a file on its own microSD.
 #
-# VERIFIED on a real A1 mini (2026-07-19): `file:///sdcard/<filename>` was
+# VERIFIED on a real A1 MINI (2026-07-19): `file:///sdcard/<filename>` was
 # accepted on the first attempt -- gcode_state went FAILED -> PREPARE and the
 # printer echoed the file back as subtask_name.
+#
+# NOT re-verified on the A1 in use since 2026-07-21. Same firmware family, so
+# it very probably behaves identically -- but this comment says VERIFIED, and
+# that word should keep meaning "someone watched it happen on this hardware".
 #
 # Do NOT "fix" this to match the public references; both are wrong for the A1:
 #   * OpenBambuAPI mqtt.md documents "file:///mnt/sdcard"  (that is the X1)
@@ -252,9 +256,10 @@ class BambuLink:
         stop took by watching gcode_state (the AutoStopController does this and
         re-sends once).
 
-        VERIFIED on a real A1 mini (2026-07-19): sent during PREPARE, the
+        VERIFIED on a real A1 MINI (2026-07-19): sent during PREPARE, the
         printer went PREPARE -> **FAILED**. A stopped print reports as FAILED,
         not IDLE, which is why FAILED is in AutoStopController.TERMINAL.
+        Not re-verified on the A1 in use since 2026-07-21.
         """
         self._publish({"print": {"sequence_id": self._next_seq(),
                                  "command": "stop"}})

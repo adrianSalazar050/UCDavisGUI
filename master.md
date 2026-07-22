@@ -6,10 +6,10 @@ existing specialist docs rather than restating them.
 | Doc | What it covers |
 |---|---|
 | `README.md` | Quick start, the data-collection scripts (`capture.py`, `check_registration.py`, `probe_gcode.py`), and the research framing + exit criterion |
-| `CONNECTION.md` | Verified LAN/MQTT connection parameters for the A1 mini, TLS specifics, prerequisites |
-| `FAILURE_DETECTOR_REPORT.md` | YOLO training run, test metrics, webcam-resolution robustness study |
-| `FRONTEND-STACK-GUIDE.md` | The React/Vite/token conventions the frontend follows (from the VERA project) |
-| `docs/superpowers/specs/`, `docs/superpowers/plans/` | Per-feature design specs and implementation plans |
+| `CONNECTION.md` | Verified LAN/MQTT connection parameters (A1 and A1 mini), TLS specifics, prerequisites, troubleshooting |
+| `FAILURE_DETECTOR_REPORT.md` | YOLO training run, test metrics, webcam-resolution robustness study, and §8 the A1-camera domain adaptation |
+| `docs/superpowers/` | Per-feature design specs and implementation plans — **historical records, not maintained**. [Index + what's stale in them](docs/superpowers/README.md) |
+| `FRONTEND-STACK-GUIDE.md` | ⚠ describes a *different* project (VERA/HORUS) whose conventions `frontend/` copied. Read for conventions, not facts |
 
 ---
 
@@ -51,6 +51,35 @@ layer-indexed frames + telemetry for building training datasets.
    subscribes to MQTT itself and writes `runs/<ts>_<name>/frames/layer_NNNN.jpg`
    + `telemetry.jsonl` + `frames.csv`. The server *reads* those files
    (`server/runs.py`) to serve `/api/frame/latest`; it never opens a camera.
+
+---
+
+### 1.1 Which hardware each claim was verified on
+
+Two different printers have been used, and the docs below say "verified" about
+both. They are **not** interchangeable, so when something says verified, check
+which machine it means.
+
+| | A1 mini | A1 |
+|---|---|---|
+| Serial | `0300CA633005010` | `03919D531805572` |
+| In use | until 2026-07-19 | from 2026-07-21 (current) |
+| Bed | 180 mm | 256 mm |
+| Camera frame | 1680x1080 | 1536x1080 |
+| Bed sits in frame | top half | bottom ~60% |
+
+Verified on the **A1 mini**, and *not* re-checked on the A1: the
+`file:///sdcard/<filename>` start-print URL scheme (§5.4), `stop_print()`'s
+`PREPARE → FAILED` transition (§3.1), and the entire domain-adaptation dataset
+and checkpoint (§11 — all of it shot on the mini, in a different room).
+
+Verified on the **A1** (2026-07-21): MQTT connect + state, FTPS login/LIST, the
+camera stream, and the ROI geometry above. The FTPS **upload** is implemented
+and tested but has not written to a real card on either machine (§9).
+
+Everything in `server/` is printer-model-agnostic — it never encodes a bed size
+or a frame geometry. The model-specific values are the ROI (§4.1) and the
+detection dataset (§11).
 
 ---
 
@@ -133,7 +162,7 @@ The one place that speaks the printer protocol.
   2026-07-19** — sent during `PREPARE`, the printer went `PREPARE → FAILED`, so
   a stopped print reports as FAILED (which is why `AutoStopController.TERMINAL`
   includes it). `start_print` is built by `build_project_file_command` — see
-  §5.3 for the verified URL scheme and the two public references that are wrong
+  §5.4 for the verified URL scheme and the two public references that are wrong
   for this printer.
 - `decode_hms(attr, code)` — unpacks two 32-bit ints into the
   `AAAA_BBBB_CCCC_DDDD` form the Bambu wiki lookup expects.
@@ -236,6 +265,69 @@ Exists because of the domain gap in §11: the shipped model is effectively blind
 on this camera, and closing that needs images from *this* camera. Competes for
 the camera with `detect.py` — stop the server before collecting.
 
+After the label-error finding in §11, it holds off **8 seconds** after any
+`c`/`s` label change before capturing again, so the operator's hands and a
+half-cleared plate can't land in a frame carrying the new label.
+
+#### `collect_backgrounds.py` — clean frames, unattended
+Homes the bed (`G28`), then steps it through a range of Y positions
+(`--positions`, default 20–170 mm), capturing at each. Solves the two things
+hand collection is short of: negatives, and bed-position variety — collecting
+while idle parks the bed in one spot, whereas during a print it sweeps the view,
+and varied empty-bed frames are exactly what copy-paste augmentation pastes onto.
+
+**It moves the machine.** It refuses to run unless the printer is idle, and it
+will not capture until you pass `--confirmed-clear`; without that flag it writes
+a single `preflight.jpg` and exits so a human can confirm the plate is empty. An
+automatic empty-bed check was built and then *removed* — measured at 74%
+accurate, because clean frames differ from each other more than a failure does,
+and a check that unreliable is worse than none.
+
+#### `split_source.py` — the disjoint split
+Partitions the collected frames into train/test halves **before** anything is
+synthesised. This exists because the first evaluation was circular (§11), and it
+splits in **blocks of consecutive frames, not at random**: frames captured
+seconds apart are near-duplicates, so a random split puts a frame in train and
+its twin in test, which leaks just as effectively as sharing the frame outright.
+
+#### `synth_dataset.py` — copy-paste augmentation
+Cuts the real tangles out of the failure frames (background differencing against
+the nearest clean frame) and pastes them onto real clean frames at varied
+position, scale, rotation, and lighting, emitting YOLO labels from the paste
+geometry — labels are exact and free, which is the whole appeal over
+hand-labelling. Clean frames are emitted unchanged with empty label files; YOLO
+treats those as negatives, and they are what stop the model deciding every print
+is a failure. Output is a ready-to-train `images/{train,val}` + `labels/…` +
+`data.yaml` layout.
+
+Paste displacement is **capped** (`--max-shift`) rather than uniform across the
+frame: this camera is a wide fisheye, so a tangle photographed near the centre
+does not look like one at the edge, and pasting it there produces an optical
+configuration that never occurs — which a model will happily learn as an
+artifact. The real fix for uncovered bed regions is a short collection pass
+there, not more synthesis.
+
+#### `build_real_eval.py` — the evaluation set that counts
+Training runs on synthetic composites, so validating on synthetic data would
+only prove the generator is self-consistent. This builds a val set of *untouched*
+camera frames: real spaghetti frames with boxes derived by the same background
+differencing, plus real clean frames as negatives. The boxes are **derived, not
+hand-drawn**, and inherit that method's errors — good localisation, not
+gold-standard annotation.
+
+#### `eval_real.py` — checkpoint comparison at the operating point
+Runs one or more checkpoints against a real eval set and reports mAP *and* the
+number that actually decides deployment: at the deployed confidence threshold,
+what fraction of real failure frames are caught and what fraction of clean
+frames raise a false alarm. mAP hides both, and for auto-stop those two numbers
+*are* the decision.
+
+> The pipeline order matters and is easy to get wrong:
+> `collect_dataset.py`/`collect_backgrounds.py` → **`split_source.py`** →
+> `synth_dataset.py` (train half only) → fine-tune → `build_real_eval.py` +
+> `eval_real.py` (test half only). Skipping the split is what produced the
+> invalid 0.7123 in §11.
+
 ### 3.2 `server/` package
 
 There is **no `server/summary.py`** — `build_summary()` lives in
@@ -243,20 +335,22 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 
 | Module | Owns | Key names |
 |---|---|---|
-| `store.py` | `printers.json` persistence + the `PrinterConfig` dataclass | `PrinterConfig`, `PrinterStore`, `MemoryStore`, `DETECTION_CLASSES`, `CAMERA_SOURCES` |
+| `store.py` | `printers.json` persistence + the `PrinterConfig` dataclass | `PrinterConfig`, `PrinterStore`, `MemoryStore`, `DETECTION_CLASSES`, `CAMERA_SOURCES`, `MODEL_NAMES`, `guess_model_id`, `model_mismatch` |
 | `printer.py` | One live printer's state | `PrinterService`, `MockPrinter`, `build_summary`, `SUMMARY_FIELDS`, `STALE_S` |
-| `registry.py` | The set of printers, keyed by serial | `PrinterRegistry`, `DuplicateSerial` |
+| `registry.py` | The set of printers, keyed by serial | `PrinterRegistry`, `DuplicateSerial`, `.reconnect()`, `.printer_model()` |
 | `main.py` | The FastAPI app + all routes | `create_app`, `AddPrinter`, `EditPrinter`, `DetectionUpdate`, `ArmBody`, `AddQueueJob`, `ReorderQueueJobs` |
 | `detection.py` | Reading detector status, deciding, actuating | `StatusReader`, `AutoStopController`, `DetectorSupervisor`, `DetectionCoordinator`, `MockDetectorRunner` |
 | `queue.py` | Per-printer job list + `queues.json` | `PrintQueue`, `QueueStore`, `MemoryQueueStore` |
-| `sdcard.py` | Read-only microSD over FTPS | `list_dir`, `fetch_file`, `normalize_path`, `ImplicitFTP_TLS`, `SdError`, `parse_mlsd`, `parse_list_lines` |
+| `sdcard.py` | microSD over FTPS (read + upload) | `list_dir`, `fetch_file`, `upload_file`, `normalize_path`, `ImplicitFTP_TLS`, `SdError`, `parse_mlsd`, `parse_list_lines` |
 | `threemf.py` | Parsing a sliced `.gcode.3mf` | `parse_slice_info`, `SLICE_INFO_PATH` |
 | `runs.py` | Finding the newest captured frame | `find_active_run`, `newest_frame`, `ACTIVE_WINDOW_S` |
 | `__main__.py` | CLI entry, wiring, `--mock` seeding | `main`, `real_factory`, `mock_factory`, `MOCK_SEED` |
 
 **`store.py`.** `PrinterConfig` fields: `serial`, `host`, `access_code`, `name`
 (falls back to host), `capture`, `camera_source` (`"a1"`/`"webcam"`),
-`camera_index`, `conf`, `armed_classes`, `detect_enabled`. `from_dict()` does
+`camera_index`, `conf`, `armed_classes`, `detect_enabled`, `roi` (§4.1;
+`normalize_roi()` degrades a malformed value to `None` = whole frame, the same
+rule as `detect.parse_roi`). `from_dict()` does
 the type validation (the constructor does *not* — it only strips). `load()`
 never raises: a corrupt file logs a warning and yields no printers, because a
 server that refuses to boot leaves you with no UI to fix it from. Reads with
@@ -293,9 +387,11 @@ appears in a queue route's signature.
 |---|---|
 | `GET /api/printers` | Summaries, each with a `detection` object (null unless capture printer) |
 | `POST /api/printers` | 201; 409 on duplicate serial, 400 on bad fields |
-| `PUT /api/printers/{serial}` | Edit host/name/capture; blank `access_code` = keep current. Serial is not editable |
+| `PUT /api/printers/{serial}` | Edit host/name/capture/model_id; blank `access_code` = keep current. Serial is not editable |
+| `POST /api/printers/{serial}/reconnect` | Rebuild the MQTT connection from the stored config. 200 + summary, 404 unknown. Sends no printer command |
 | `DELETE /api/printers/{serial}` | 204 |
 | `GET /api/printers/{serial}/files?path=/` | FTPS listing. 400 on bad path, 502 on printer failure |
+| `POST /api/printers/{serial}/files` | Multipart upload (STOR) to the card **root**. 201 `{path, bytes, warning}`; 400 on a non-printable extension or empty body, 502 on printer failure |
 | `GET/POST/PUT/DELETE /api/printers/{serial}/queue[...]` | Queue CRUD + reorder |
 | `GET /api/frame/latest` | Newest `capture.py` frame; `X-Frame-Layer`, `X-Frame-Run` headers |
 | `GET/PUT /api/printers/{serial}/detection` | Snapshot / config update |
@@ -319,9 +415,29 @@ it LIST hangs or fails after a successful login). `normalize_path()` rejects
 `..` outright and rejects C0 control characters at the boundary (a `\r`/`\n` in
 a path would otherwise raise a bare `ValueError` from inside `ftplib.putline`,
 which is not an `ftplib` error subclass and would escape as a 500). `list_dir`
-prefers MLSD and falls back to LIST only on a 500/502. Both `list_dir` and
-`fetch_file` **always** raise `SdError`, whose message never contains the access
-code.
+prefers MLSD and falls back to LIST only on a 500/502. `list_dir`, `fetch_file`
+and `upload_file` **always** raise `SdError`, whose message never contains the
+access code.
+
+`upload_file` (STOR) is the only function in this package that **writes** to the
+card, and it inherits the implicit-TLS and session-reuse machinery above for
+free — which is most of why adding it was small. It overwrites silently, because
+that is what STOR does and the printer offers no rename.
+
+The route above it enforces what the *printer* can do with the result, and the
+two accepted shapes are not equivalent:
+
+| Uploaded | Queue can start it? | Why |
+|---|---|---|
+| `.gcode.3mf` | yes | `project_file` points at `Metadata/plate_N.gcode` inside the zip (§5.4) |
+| `.gcode` | **no** — printer's own screen only | no verified MQTT command launches a raw gcode; real cards are full of these (confirmed on hardware 2026-07-21), so refusing them would break how the card is actually used |
+| anything else | — | 400: the printer cannot print it at all |
+
+Uploads always land in the card **root**, and the route takes `os.path.basename`
+of the client's filename, discarding any directory component. Both halves matter:
+`file:///sdcard/<name>` has no path component, so a file in a subdirectory could
+be listed but never started, and stripping the directory also means a traversal
+attempt lands harmlessly at `/evil.gcode.3mf` instead of escaping.
 
 **`threemf.py`.** A `.gcode.3mf` is a zip; `Metadata/slice_info.config` is XML
 with one `<plate>` each carrying `prediction` (seconds) and `weight` (grams)
@@ -375,8 +491,22 @@ seconds indefinitely. See §10 for the two other halves of that fix
 the bed. **Measure it from a frame taken mid-print, not an idle one.** The bed
 parks somewhere quite different from where it prints: the first default here was
 measured idle and, during an actual print, contained only the printer's front
-panel -- no bed at all. While printing, the bed rides high and nearly edge-on,
-so the working default is full width x top half (`0,0,1,0.5`). On the A1's wide, low view most of the frame is the room, and the model
+panel -- no bed at all.
+
+> **The ROI is per-printer-MODEL, not a constant. Do not copy one between
+> machines.** Measured 2026-07-21, the two are close to inverted:
+>
+> | Printer | Frame | Bed sits in | Working ROI |
+> |---|---|---|---|
+> | A1 **mini** | 1680x1080 | top half | `0,0,1,0.5` |
+> | **A1** | 1536x1080 | bottom ~60% | `0.08,0.32,0.88,0.68` (provisional, measured idle) |
+>
+> Applying the mini's ROI to an A1 crops the bed out of frame **entirely** and
+> feeds the detector nothing but the room -- which is the silent-failure mode
+> this whole section exists to warn about. The A1 number above still needs
+> confirming from a mid-print frame.
+
+On the A1's wide, low view most of the frame is the room, and the model
 duly finds "failures" in furniture — measured on a real frame, the full view
 produced 5 false positives, *all* on a laptop keyboard, and the bed ROI produced
 0. The crop is an inference input only: detections are mapped back with
@@ -507,7 +637,7 @@ against a hand-edited file, walking entries in file order with "last one wins".
 ### 5.2 The queue
 
 `PrintQueue` itself is pure planning — no network, no registry. Only the start
-route (§5.3) commands the printer. `POST .../queue` with
+route (§5.4) commands the printer. `POST .../queue` with
 `{"sd_path": "/Benchy.gcode.3mf"}`:
 
 1. `sdcard.normalize_path` (400 on a bad path),
@@ -529,13 +659,46 @@ hint labelled "~" in the UI, and `None` when there is nothing to time.
 Passing `queue=None` to `create_app` disables every queue route (they 404),
 the same "None means inert" convention as `detection`.
 
-### 5.3 Starting a print
+### 5.3 The printer-model check
+
+A `.gcode.3mf` sliced for one model can be uploaded to another, and printing an
+A1 file on an A1-mini's smaller bed is a real crash risk. Two halves:
+
+- **The file knows.** `Metadata/slice_info.config` carries
+  `<metadata key="printer_model_id" value="N2S"/>`, in the same file
+  `parse_slice_info` already opens. `N2S` = A1, verified 2026-07-21.
+- **The printer does not.** All 64 keys the A1 publishes over MQTT were dumped
+  on 2026-07-21 and none identifies the model. So `PrinterConfig.model_id` is
+  *configured*, prefilled by `guess_model_id()` from the serial prefix and
+  correctable in the Edit form.
+
+Enforcement escalates with the cost of being wrong:
+
+| Step | Behaviour |
+|---|---|
+| Upload | 201 + `warning` naming both models — parking a file for another printer in the fleet is legitimate |
+| Queue add | job records `model_id`; the row shows a ⚠ badge |
+| **Start** | **409**, and the job stays queued |
+
+> **UNKNOWN NEVER BLOCKS.** `model_mismatch()` returns `None` the moment either
+> side is empty — every raw `.gcode`, every 3mf from a slicer that omits the
+> key, and every printer whose model was never set. Only a *confirmed*
+> difference between two known ids refuses anything. This matters because the
+> serial-prefix table is mostly unverified community knowledge (see the comment
+> on `MODEL_NAMES`): a confidently wrong guess must never be able to cost you a
+> print, and the worst it can do is refuse one you can re-enable by setting the
+> model to Unknown.
+
+### 5.4 Starting a print
 
 `POST /api/printers/{serial}/queue/{job_id}/start` sends the queue head to the
 printer. No upload: jobs already reference microSD files, so this is one MQTT
 `project_file` command via `BambuLink.start_print`.
 
-**The URL scheme is `file:///sdcard/<filename>`, verified on a real A1 mini.**
+**The URL scheme is `file:///sdcard/<filename>`, verified on a real A1 mini
+(2026-07-19). Not yet re-verified on the A1** now in use — same firmware family,
+so it very probably behaves identically, but "probably" is not what the rest of
+this section means by *verified*. Confirm it before trusting a queued start.
 Both public references are wrong for this printer — OpenBambuAPI's `mqtt.md`
 documents `file:///mnt/sdcard` (that is the X1) and `davglass/bambu-cli` sends
 `ftp:///<path>`. The candidates were tried against the hardware:
@@ -577,13 +740,13 @@ page gets the same `{printers, selected, onSelect}` props):
 |---|---|---|
 | `overview` | `Overview.jsx` | Printer grid (`PrinterCard`, with inline `EditPrinterForm`) + `AddPrinterForm` |
 | `dashboard` | `Dashboard.jsx` | Stat tiles, `CameraCard`, `AutoStopCard`, `PrintInfoCard`, `HmsCard` |
-| `detection` | `Detection.jsx` | Enable/disable, camera source, webcam index, conf slider, armed-class checkboxes, detector health + live view |
-| `sdfiles` | `SdFiles.jsx` | FTPS microSD browser with breadcrumbs |
+| `detection` | `Detection.jsx` | Enable/disable, camera source, webcam index, conf slider, armed-class checkboxes, detector health, and the **draggable ROI editor** (`RoiEditor`) over the live view |
+| `sdfiles` | `SdFiles.jsx` | FTPS microSD browser with breadcrumbs + upload |
 | `queue` | `Queue.jsx` | Job table, reorder, remove, "Add from SD" picker, totals bar |
 
 **Data layer.** `src/api/printer.js` is a set of plain `fetch` wrappers —
 `addPrinter`, `updatePrinter`, `removePrinter`, `fetchFiles`, `fetchQueue`,
-`addQueueJob`, `removeQueueJob`, `reorderQueue`, `fetchLatestFrame`,
+`addQueueJob`, `removeQueueJob`, `reorderQueue`, `uploadFile`, `fetchLatestFrame`,
 `updateDetection`, `armDetection`, `fetchDetectionFrame`. Its `detail(res)`
 helper flattens FastAPI's `{"detail": ...}` — which is a *list* of validation
 objects for a 422 — so no caller can ever surface `[object Object]`. The two
@@ -602,6 +765,28 @@ frame fetchers return an object URL the caller must revoke, or `null`.
 StrictMode double-mount teardown, and keeps the last-known-good list if a frame
 fails to parse. `App.jsx` auto-selects the printer when there is exactly one and
 repairs the selection when the selected printer disappears.
+
+**The ROI editor.** `components/detection/RoiEditor.jsx` draws a draggable box
+(8 handles + move) over the live frame; the four `%` inputs and the box are two
+views of one value. The drag maths is pure and lives in `roiGeometry.js`
+(`clampRoi`, `applyHandleDrag`) — the only frontend code with unit tests.
+
+Two rectangles are visible at once, deliberately:
+
+| Box | Means |
+|---|---|
+| burned into the JPEG by `detect.py` | what the detector is using **right now** |
+| the draggable overlay | what you are about to apply |
+
+They converge on Apply. Before this, the only feedback was the burned-in one,
+which cannot change until the config saves, the supervisor respawns the
+detector, and a new frame arrives — so you were aiming blind at the setting
+that §4.1 says fails *silently* when wrong.
+
+Two details that are easy to get wrong: deltas are measured from the box as it
+was at drag **start** (accumulating per-move drifts once clamping engages, so
+the box stops following the cursor back), and `pointermove`/`pointerup` are
+bound to `window`, not the element, so a drag that leaves the image still ends.
 
 `SdBrowser` and `QueuePanel` are both mounted with `key={printer.serial}` so
 switching printers **remounts** rather than resetting via an Effect — see the
@@ -700,11 +885,45 @@ python eval_webcam_resolutions.py
 python run_camera_detection.py              # windowed live demo
 ```
 
+### Domain adaptation to the A1 camera (§11)
+
+Stop the server first — these compete for the camera. Run the split **before**
+synthesising anything; that ordering is the whole point.
+
+```bash
+# 1. collect. Failures by hand, backgrounds unattended.
+python collect_dataset.py --host 192.168.1.42          # c/s to label, space to shoot
+python collect_backgrounds.py --host 192.168.1.42      # writes preflight.jpg, then exits
+python collect_backgrounds.py --host 192.168.1.42 --confirmed-clear
+
+# 2. split FIRST -> datasets/a1_train, datasets/a1_test
+python split_source.py
+
+# 3. synthesise from the train half only
+python synth_dataset.py   --src datasets/a1_train --out datasets/synth_ho
+
+# 4. fine-tune from the public-data checkpoint
+yolo detect train model=runs/train/failure_detector/weights/best.pt \
+     data=datasets/synth_ho/data.yaml epochs=60 imgsz=640 workers=0 name=a1_holdout
+
+# 5. evaluate on the test half only
+python build_real_eval.py --src datasets/a1_test --out datasets/real_ho
+python eval_real.py --models runs/train/failure_detector/weights/best.pt \
+                             runs/detect/runs/train/a1_holdout/weights/best.pt \
+                    --eval datasets/real_ho
+```
+
+Note the defaults on `build_real_eval.py` (`--out datasets/real_eval`) and
+`eval_real.py` (`--eval datasets/real_eval`) point at the **contaminated**
+first-run directories, which are kept as the record of §11.2. Pass the `_ho`
+paths explicitly; the bare `python build_real_eval.py` rebuilds the wrong thing.
+
 ### Tests
 
 ```bash
-python -m pytest              # from the repo root
+python -m pytest                        # from the repo root
 python -m pytest -q server/tests/test_detection.py
+cd frontend && npm test                 # ROI drag maths (vitest)
 ```
 
 ---
@@ -719,8 +938,11 @@ GUI_UCDavis/
 │  ├─ _detect/
 │  │  ├─ status.json             detect.py → server: ts, fps, camera, conf, detections, error
 │  │  └─ latest.jpg              annotated frame, JPEG q85
-│  ├─ train/failure_detector/weights/best.pt      trained detector
+│  ├─ train/failure_detector/weights/best.pt      public-data detector ("best.pt")
 │  ├─ eval/                      per-tier eval plots + confusion matrices
+│  ├─ detect/runs/train/
+│  │  ├─ a1_synth/               fine-tune on datasets/synth — CIRCULAR EVAL, do not quote
+│  │  └─ a1_holdout/weights/best.pt   fine-tune on the disjoint split — the valid one
 │  └─ 20260715T143200_Benchy/    one capture.py run
 │     ├─ meta.json               started, camera, settle_s, burst, gcode_file,
 │     │                          subtask_name, total_layer_num
@@ -729,6 +951,12 @@ GUI_UCDavis/
 │     │                          gcode_state, nozzle_temper, bed_temper
 │     └─ frames/layer_0001.jpg …
 ├─ runs-mock/                    same shape, written by --mock
+├─ datasets/                     (gitignored) the A1-camera domain-adaptation data
+│  ├─ a1_camera/                 all collected source frames + manifest.csv
+│  ├─ a1_train/ a1_test/         split_source.py's disjoint block split
+│  ├─ synth/     real_eval/      built from the UNSPLIT frames — contaminated, kept
+│  │                             only as the record of the invalid first run
+│  └─ synth_ho/  real_ho/        built from a1_train / a1_test — the valid pair
 ├─ server/  frontend/  docs/
 ├─ 3d-printing-failure-detection.v1i.yolov8/     Roboflow dataset (gitignored)
 │  └─ webcam_sim/res_{480,320,160}/              degraded copies
@@ -743,23 +971,60 @@ GUI_UCDavis/
 
 ## 9. Testing
 
-**261 tests**, all under `server/tests/`, run with plain `pytest` from the repo
-root. They use no sockets, no camera, and no printer.
+```bash
+python -m pytest              # server + root modules, from the repo root
+cd frontend && npm test       # ROI drag maths (vitest)
+```
 
-| File | Tests | Focus |
-|---|---|---|
-| `test_api.py` | 55 | Every route via FastAPI's `TestClient`, against a fake registry |
-| `test_registry.py` | 41 | Add/remove/update, capture invariant, persistence, locking |
-| `test_detection.py` | 34 | `StatusReader`, the `AutoStopController` state machine, `DetectorSupervisor` argv/env, coordinator ticks |
-| `test_store.py` | 31 | `PrinterConfig` validation, tolerant load, atomic save |
-| `test_services.py` | 28 | `PrinterService` / `MockPrinter` |
-| `test_sdcard.py` | 28 | Path guard, MLSD/LIST parsers, sorting, `list_dir` control flow with a fake FTP class |
-| `test_detect.py` | 22 | `detect.py`'s pure parts: status building, detection mapping, atomic writes, the loop |
-| `test_summary.py` | 10 | `build_summary` — including that it can never contain the access code |
-| `test_runs.py` | 7 | Active-run discovery and newest-frame selection |
-| `test_threemf.py` | 5 | Slice-info parsing and its tolerance of garbage |
-| `test_queue.py` | 4 | `PrintQueue` mutation, ordering, totals |
-| `test_bambu_link.py` | 2 | `deep_merge`, `decode_hms` |
+Neither suite uses a socket, a camera, or a printer.
+
+**Per-test counts are deliberately not written down here.** They were restated
+in two documents and went stale three times in a single afternoon's work; the
+commands above are the only honest source. What each file covers is stable and
+worth knowing:
+
+| File | Covers |
+|---|---|
+| `test_api.py` | Every route via FastAPI's `TestClient`, against a fake registry |
+| `test_registry.py` | Add/remove/update/reconnect, capture invariant, persistence, locking, model id |
+| `test_store.py` | `PrinterConfig` validation, tolerant load, atomic save, model-id guessing and mismatch |
+| `test_detection.py` | `StatusReader`, the `AutoStopController` state machine, `DetectorSupervisor` argv/env, coordinator ticks |
+| `test_sdcard.py` | Path guard, MLSD/LIST parsers, sorting, `list_dir`/`upload_file` control flow with a fake FTP class |
+| `test_detect.py` | `detect.py`'s pure parts: status building, detection mapping, ROI/offset math, atomic writes, the loop |
+| `test_services.py` | `PrinterService` / `MockPrinter`, and the two service factories |
+| `test_summary.py` | `build_summary` — including that it can never contain the access code |
+| `test_bambu_link.py` | `deep_merge`, `decode_hms`, `build_project_file_command` |
+| `test_threemf.py` | Slice-info parsing, `printer_model_id`, tolerance of garbage |
+| `test_runs.py` | Active-run discovery and newest-frame selection |
+| `test_queue.py` | `PrintQueue` mutation, ordering, totals |
+| `test_docs.py` | The documentation itself — see below |
+
+**Frontend** (`vitest`, added 2026-07-21): `roiGeometry.test.js` covers the ROI
+drag maths. That module is pure on purpose so it *can* be tested; the React
+components around it are verified by build and by eye, which is a real gap
+rather than an oversight. The tests earned their keep immediately by catching
+`clampRoi` corrupting a valid box through floating-point error
+(`0.32 → 0.31999999999999995` on every call).
+
+**The docs are tested too** (`test_docs.py`). Every rule in it exists because
+the failure happened here:
+
+| Guard | Why |
+|---|---|
+| every relative markdown link resolves | a doc linked `LoDISA-GUI/COLORS.md`, which lives in a *different repository* — the link had never once worked |
+| every `§N` in master.md matches a real heading | renumbering a section silently orphaned four references, including ones in `server/*.py` comments |
+| no hardcoded suite sizes in the maintained docs | they went stale five times in one day (261 → 270 → 299 → 316 → 358 → 362), restated in two files |
+| every `docs/superpowers/` file declares a STATUS | a spec for a PyQt6 GUI that was **never built** sat there marked "Approved by user", which is exactly what someone picks up and starts implementing |
+
+Each guard was verified by deliberately breaking the thing it protects and
+watching it fail — a doc test that has never been seen to fail is decoration.
+
+**What is not covered anywhere:** every React component, the FTPS `STOR`
+against real hardware (the note below), and the dataset scripts (§3.1).
+
+The dataset/training scripts (§3.1) are **not** unit-tested — they are one-shot
+research tools whose output is checked by looking at it, and their real
+correctness gate is the disjoint-split evaluation in §11.
 
 The design that makes this possible: everything that touches hardware is behind
 an injectable seam — `service_factory` in the registry, `spawn`/`clock` in
@@ -767,8 +1032,14 @@ an injectable seam — `service_factory` in the registry, `spawn`/`clock` in
 `detection_loop`, `clock` in the controller and `StatusReader`. Parsers and path
 guards are pure functions.
 
-**Not covered:** the destructive `stop_print()` command against real A1-mini
-hardware. `BambuLink.stop_print`'s docstring says so explicitly.
+**Not covered:** the FTPS **STOR** against real hardware. `sdcard.upload_file`'s
+control flow is fully tested against a fake FTP object and the whole route was
+exercised end to end under `--mock`, but as of 2026-07-21 no byte has been
+written to a real card — the printer was mid-print and a write to the
+filesystem it streams gcode from was not worth the risk. The *read* half
+(login, implicit TLS, session reuse, LIST) **is** verified live, mid-print, on
+2026-07-21, and STOR reuses exactly that connection machinery. Verify it before
+relying on it.
 
 ---
 
@@ -837,18 +1108,33 @@ hardware. `BambuLink.stop_print`'s docstring says so explicitly.
 - **`--workers 0` for training on Windows.** Each spawned dataloader worker
   reloads the CUDA DLLs and can exhaust the page file (`WinError 1455`). Raise it
   only after enlarging the page file.
-- **The detector is a prototype.** `FAILURE_DETECTOR_REPORT.md` is explicit:
-  trained on a public Roboflow dataset, not validated against this printer's
-  camera angle, lighting, or mount. `README.md`'s exit criterion — print-level
-  FPR < 1% over ≥30 successful prints, time-to-detection < 5 min over ≥20 induced
-  failures — has not been met yet.
+- **The detector is a prototype, and auto-stop is not validated.** The shipped
+  public-data model is blind on the A1's built-in camera, and the fine-tuned
+  replacement is measured on 9 positives from a single physical tangle in a
+  single room. §11 is the whole story; do not arm auto-stop on the strength of
+  the headline numbers. `README.md`'s exit criterion — print-level FPR < 1% over
+  ≥30 successful prints, time-to-detection < 5 min over ≥20 induced failures —
+  has not been met.
+- **Reconnect is not "add retry".** `PrinterService` already retries every
+  `RETRY_S` (10 s) until it connects, and paho self-heals after the first
+  connect. The button exists for the two things that path can't do: try *now*
+  instead of waiting out the window, and rebuild a wedged client. It cannot
+  help when the IP changed — that needs Edit, which rebuilds on a host change.
+  It sends no command, so it can never disturb a running print.
+- **Split the data before you derive anything from it.** §11.2. An md5 check
+  will not catch a leak, and a random split is not a split when consecutive
+  frames are near-duplicates.
 
 ---
 
-## 11. The camera-angle domain gap (measured, 2026-07-19)
+## 11. The camera-angle domain gap (measured 2026-07-19, first fix measured 2026-07-21)
 
 The most important open problem, and the thing that governs the next phase of
-work. **The shipped detector does not work on the A1's built-in camera.**
+work. **The public-data detector does not work on the A1's built-in camera.**
+A first domain-adaptation pass (§11.3) fixes that measurably but is **not yet
+deployable for auto-stop** — read §11.4 before quoting any of it.
+
+### 11.1 The gap, measured
 
 The public dataset it was trained on is shot at roughly 30–70° looking down at
 the print. The A1 mini's built-in camera is a wide fisheye mounted low and
@@ -885,28 +1171,85 @@ clean frames as negatives. The shipped public-data model scores:
 
 Not weak on this camera -- blind.
 
-Closing it needs training data from this camera. The plan:
+### 11.2 The eval that was circular (worth internalising)
 
-1. **Collect real frames** — `collect_dataset.py`, failure repositioned between
-   shots so the model learns the failure and not the corner it sat in.
-   **Collect clean frames too:** a set of only failures teaches "every print is
-   a failure" and yields 100% false positives.
-2. **Copy-paste augmentation** — paste failure crops onto real A1 backgrounds,
-   labels free from the paste location. Best domain match per unit of effort,
-   because it fixes the background and lighting gap directly.
-3. **Perspective warping** — supplementary. It teaches shape distortion but
-   cannot invent the occlusion a truly horizontal view produces. Remember labels
-   must be warped, not copied (see §3.1).
-4. **Fine-tune** from `best.pt` and evaluate on **held-out real A1 frames**. The
-   public test split will keep flattering the model; it is not the eval that
-   matters any more.
+The first fine-tune scored **mAP50 0.7123, 100% recall, 0% false alarms** — and
+the number was meaningless. All 49 clean frames used as eval negatives were
+*also* training negatives, and all 29 eval positives had their tangle cut out and
+pasted into ~600 training composites. The model was being asked about pixels it
+had memorised.
 
-A caution on scale: a handful of real failures is not enough to fine-tune on,
-and copy-paste over only a few backgrounds overfits to those backgrounds. Step 1
-carries more weight than it looks.
+Two things made this easy to miss, and both generalise:
 
-**The alternative that sidesteps all of this** is a USB webcam at 30–70°, which
-puts the model back in its training domain for near-zero effort —
-`camera_source: webcam` is already built and tested, and the resolution study
-says a cheap sensor is fine. Synthetic data is the right answer only when the
-built-in camera is a hard constraint.
+- **An md5 check said the files were distinct.** They were — byte-wise — because
+  the two writers use JPEG q92 and q95. Identity of *content* is the question;
+  hashing the encoded bytes does not answer it.
+- **Random splitting would not have saved it either.** Frames were captured
+  seconds apart, so neighbours are near-duplicates; a random split puts a frame
+  in train and its twin in test. `split_source.py` therefore splits in **blocks
+  of consecutive frames**, and splits the *source* frames before anything is
+  derived from them.
+
+Cost of honesty: 10 usable cutouts instead of 31, and 9 test positives instead of
+29. The re-run on the disjoint split is the only number worth quoting.
+
+### 11.3 What the fix achieved (disjoint split, 2026-07-21)
+
+Training: 517 composites from 10 cutouts and 32 clean backgrounds (train half).
+Evaluation: 9 real spaghetti frames + 17 real clean frames (test half), disjoint.
+
+| Model | mAP50 | mAP50-95 | recall @0.25 | false alarm @0.25 |
+|---|---|---|---|---|
+| `best.pt` (public data) | 0.0000 | 0.0000 | 77.8% | 58.8% |
+| fine-tuned on synthetic | **0.4539** | 0.1772 | **100%** | 11.8% |
+
+The baseline's 77.8% "recall" is an artifact of firing on most frames — which is
+also why its mAP is 0: nothing is localised. Read the two columns together or
+they lie.
+
+Both "false alarms" turned out to be **label errors**: inspection shows visible
+debris on the plate, captured seconds after the operator changed the label while
+the plate was still being cleared. The model was right and the labels were wrong,
+so 11.8% is an *upper* bound. Root cause is fixed in `collect_dataset.py` (8 s
+hold-off after a label change), which is the useful half of the finding — a
+metric that surprises you is often a data-collection bug.
+
+Full method and numbers: `FAILURE_DETECTOR_REPORT.md` §8.
+
+### 11.4 What this does NOT establish
+
+Read this before the checkpoint gets used for anything.
+
+- **One physical tangle.** Every failure image in the dataset is the same object.
+  This measures "can it find *this* tangle in frames and positions it has not
+  seen", not "can it find spaghetti". Different prints fail differently.
+- **Tiny evaluation.** 9 positives, 17 negatives. The confidence intervals are
+  wide enough to drive through.
+- **Scene-specific, and the scene has since changed.** Copy-paste bakes in the
+  backgrounds it pastes onto, and all 49 came from **the A1 mini, in a different
+  room**. A second machine elsewhere on the LAN measured a scene difference of
+  72, where same-scene frames differ by 1–3. Since 2026-07-21 the hardware *is*
+  that other machine (§1.1), and its camera geometry is close to inverted
+  (bed low, not high; 1536x1080, not 1680x1080). **This checkpoint should be
+  assumed not to transfer to the current A1 until re-measured.** The *cutouts*
+  transfer; the backgrounds do not. Re-running `collect_backgrounds.py` on the
+  A1 and then `synth_dataset.py` with the existing cutouts is the cheap path —
+  no new failures need to be induced.
+- **Not deployable for auto-stop.** Even at 11.8%, three consecutive qualifying
+  frames are needed to fire, which works out to roughly one spurious stop per
+  hour of printing. That has to be verified as near-zero on genuinely clean data
+  before anyone arms it.
+- **Perspective warping was never done.** It was step 3 of the original plan and
+  remains untried; it teaches shape distortion but cannot invent the occlusion a
+  truly horizontal view produces. If you do it, remember labels must be warped
+  through the same homography and re-fitted, **not** copied (see §3.1).
+
+`README.md`'s exit criterion — print-level FPR < 1% over ≥30 successful prints,
+time-to-detection < 5 min over ≥20 induced failures — remains unmet.
+
+### 11.5 The alternative that sidesteps all of this
+
+A USB webcam at 30–70° puts the model back in its training domain for near-zero
+effort — `camera_source: webcam` is already built and tested, and the resolution
+study says a cheap sensor is fine. Synthetic data is the right answer only when
+the built-in camera is a hard constraint.
