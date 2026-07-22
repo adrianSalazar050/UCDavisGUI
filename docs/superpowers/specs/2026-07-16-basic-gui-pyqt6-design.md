@@ -1,8 +1,10 @@
 # Basic GUI (PyQt6) — Design
 
-> **STATUS: ABANDONED — NEVER BUILT.**
+> **STATUS: ABANDONED — SCAFFOLD ONLY, NO GUI WAS EVER WRITTEN.**
 >
-> No PyQt6 GUI exists in this repository and none is planned; the project went with the React/FastAPI dashboard instead (`master.md` §6). There is no `basic_gui/` directory.
+> The project went with the React/FastAPI dashboard instead (`master.md` §6). There is no `basic_gui/` on `main`.
+>
+> What does exist is on the abandoned **`basic-gui`** branch: a package stub (`basic_gui/__init__.py`, an empty test package), a PyQt6 line in `requirements.txt`, and a 1920-line implementation plan (`plans/2026-07-16-basic-gui-pyqt6.md`) that exists only on that branch. No window, no widget, no working code.
 >
 > Kept only as a record of the option that was considered and dropped. The "Approved by user" line below refers to the design review at the time, **not** to work that happened. Do not implement from this file.
 

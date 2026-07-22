@@ -15,7 +15,7 @@ Every file carries a status banner directly under its title.
 
 | Status | File | Notes |
 |---|---|---|
-| ⛔ **never built** | `specs/2026-07-16-basic-gui-pyqt6-design.md` | PyQt6 desktop GUI. Considered, dropped in favour of the React dashboard. There is no `basic_gui/`. Do not implement from it |
+| ⛔ **abandoned** | `specs/2026-07-16-basic-gui-pyqt6-design.md` | PyQt6 desktop GUI. Dropped in favour of the React dashboard. Only a package scaffold was ever written, and it lives on the abandoned `basic-gui` branch along with its 1920-line plan. Do not implement from it |
 | ⚠ superseded | `specs/2026-07-16-bambu-dashboard-design.md` | v1, single printer + CLI flags. Replaced by the multi-printer spec |
 | ⚠ superseded | `plans/2026-07-16-bambu-dashboard.md` | the v1 plan |
 | ✅ shipped | `specs/2026-07-16-multi-printer-sd-browser-design.md` | runtime printer manager + FTPS SD browser |
