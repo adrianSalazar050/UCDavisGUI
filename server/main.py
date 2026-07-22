@@ -11,13 +11,13 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import (FastAPI, File, HTTPException, UploadFile, WebSocket,
-                     WebSocketDisconnect)
+from fastapi import (FastAPI, File, Form, HTTPException, UploadFile,
+                     WebSocket, WebSocketDisconnect)
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import runs, sdcard, threemf
+from . import runs, sdcard, slicejobs, threemf
 from .detection import CLASSES  # the 6 valid armed classes
 from .printer import PrinterBusy
 from .registry import DuplicateSerial
@@ -137,13 +137,15 @@ def _with_detection(printers: list[dict], detection) -> list[dict]:
 
 def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
-               detection=None, queue=None) -> FastAPI:
+               detection=None, queue=None, slicer=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake). `queue` is
     anything with add(serial, job), remove(serial, id) -> bool,
     reorder(serial, ids), get(serial) -> list, totals(serial) -> dict
     (PrintQueue, or a test fake); None disables the queue routes entirely,
-    same "None means inert" convention as `detection`."""
+    same "None means inert" convention as `detection`. `slicer` is a
+    SliceCoordinator (or a test fake); None disables the slice routes
+    entirely, same "None means inert" convention."""
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -395,6 +397,61 @@ def create_app(registry, runs_dir: pathlib.Path,
         queue.remove(serial, job_id)
         return {"started": True, "job": job,
                 "jobs": queue.get(serial), "totals": queue.totals(serial)}
+
+    def _require_slicer() -> None:
+        if slicer is None:
+            raise HTTPException(
+                404, "slicing is not available on this server -- Bambu Studio "
+                     "was not found. Set BAMBU_STUDIO_EXE if it is installed "
+                     "elsewhere.")
+
+    @app.get("/api/printers/{serial}/slice/options")
+    def slice_options(serial: str):
+        _require_slicer()
+        # No registry.get() check here, deliberately: an unknown serial
+        # degrades to empty presets/filaments (same "unknown never blocks"
+        # convention as printer_model/printer_nozzle), not a 404 -- the
+        # coordinator itself never raises for an unknown printer.
+        return slicer.options(serial)
+
+    @app.post("/api/printers/{serial}/slice", status_code=202)
+    def start_slice(serial: str, file: UploadFile = File(...),
+                    preset: str = Form(...), material: str = Form(...),
+                    supports: bool = Form(False)):
+        # SYNC def for the same reason as the SD routes: reading a large model
+        # off the wire must not stall the event loop and freeze every
+        # WebSocket. The slice itself runs on the coordinator's own thread.
+        _require_slicer()
+        name = os.path.basename((file.filename or "").replace("\\", "/")).strip()
+        if not name:
+            raise HTTPException(400, "no filename")
+        if not name.lower().endswith(slicejobs.MODEL_EXTS):
+            raise HTTPException(
+                400, f"{name}: not a model file. Upload one of "
+                     f"{', '.join(slicejobs.MODEL_EXTS)}.")
+        data = file.file.read()
+        if not data:
+            raise HTTPException(400, "empty file")
+        try:
+            job_id = slicer.submit(serial, name, data, preset, material,
+                                   bool(supports))
+        except KeyError:
+            raise HTTPException(404, "unknown printer")
+        except ValueError as e:
+            raise HTTPException(400, str(e))  # bad choice, not a server fault
+        return {"job_id": job_id}
+
+    @app.get("/api/slice/jobs")
+    def list_slice_jobs(serial: str | None = None):
+        _require_slicer()
+        return {"jobs": slicer.list(serial)}
+
+    @app.delete("/api/slice/jobs/{job_id}", status_code=204)
+    def cancel_slice_job(job_id: str):
+        _require_slicer()
+        if not slicer.cancel(job_id):
+            raise HTTPException(404, "unknown job")
+        return Response(status_code=204)
 
     @app.get("/api/frame/latest")
     def frame_latest():

@@ -1,4 +1,5 @@
 import io
+import pathlib
 import zipfile
 
 from fastapi.testclient import TestClient
@@ -1077,3 +1078,118 @@ def test_start_404s_on_unknown_printer_and_empty_queue(tmp_path, monkeypatch):
     c, _ = queue_client(tmp_path, q, registry=FakeRegistry([StartableService()]))
     assert c.post("/api/printers/NOPE/queue/J1/start").status_code == 404
     assert c.post("/api/printers/S1/queue/J1/start").status_code == 404
+
+
+# ---------- slice routes ----------
+
+class FakeSlicer:
+    """Stands in for SliceCoordinator at the route boundary."""
+
+    def __init__(self):
+        self.submitted = []
+        self.jobs = []
+        self.raise_on_submit = None
+
+    def options(self, serial):
+        return {"model_id": "N2S", "nozzle": "0.4",
+                "presets": [{"id": "standard", "label": "Standard 0.20 mm"}],
+                "filaments": [{"material": "PLA",
+                               "profile": "Generic PLA @BBL A1"}],
+                "detected_filament": "PLA"}
+
+    def submit(self, serial, filename, data, tier, material, supports):
+        if self.raise_on_submit:
+            raise self.raise_on_submit
+        self.submitted.append((serial, filename, data, tier, material,
+                               supports))
+        return "job-1"
+
+    def list(self, serial=None):
+        return self.jobs
+
+    def cancel(self, job_id):
+        return job_id == "job-1"
+
+
+def test_slice_routes_404_when_no_slicer_is_installed():
+    # "None means inert", same as queue=None / detection=None. The server must
+    # still boot and monitor on a machine with no slicer.
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=None))
+    assert client.get("/api/printers/AAA/slice/options").status_code == 404
+    assert client.get("/api/slice/jobs").status_code == 404
+
+
+def test_slice_options_returns_presets_and_the_detected_filament():
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=FakeSlicer()))
+    body = client.get("/api/printers/AAA/slice/options").json()
+    assert body["detected_filament"] == "PLA"
+    assert body["presets"][0]["id"] == "standard"
+
+
+def test_posting_a_model_starts_a_job():
+    slicer = FakeSlicer()
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=slicer))
+    res = client.post(
+        "/api/printers/AAA/slice",
+        files={"file": ("part.stl", b"solid", "application/octet-stream")},
+        data={"preset": "standard", "material": "PLA", "supports": "true"})
+    assert res.status_code == 202
+    assert res.json()["job_id"] == "job-1"
+    serial, filename, data, tier, material, supports = slicer.submitted[0]
+    assert (serial, filename, data) == ("AAA", "part.stl", b"solid")
+    assert (tier, material, supports) is not None and supports is True
+
+
+def test_posting_an_unsupported_extension_is_a_400():
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=FakeSlicer()))
+    res = client.post(
+        "/api/printers/AAA/slice",
+        files={"file": ("notes.txt", b"hello", "text/plain")},
+        data={"preset": "standard", "material": "PLA", "supports": "false"})
+    assert res.status_code == 400
+
+
+def test_posting_an_empty_file_is_a_400():
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=FakeSlicer()))
+    res = client.post(
+        "/api/printers/AAA/slice",
+        files={"file": ("part.stl", b"", "application/octet-stream")},
+        data={"preset": "standard", "material": "PLA", "supports": "false"})
+    assert res.status_code == 400
+
+
+def test_an_unresolvable_preset_is_a_400_not_a_500():
+    slicer = FakeSlicer()
+    slicer.raise_on_submit = ValueError("no 'standard' preset")
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=slicer))
+    res = client.post(
+        "/api/printers/AAA/slice",
+        files={"file": ("part.stl", b"solid", "application/octet-stream")},
+        data={"preset": "standard", "material": "PLA", "supports": "false"})
+    assert res.status_code == 400
+    assert "preset" in res.json()["detail"]
+
+
+def test_an_unknown_printer_is_a_404():
+    slicer = FakeSlicer()
+    slicer.raise_on_submit = KeyError("ZZZ")
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=slicer))
+    res = client.post(
+        "/api/printers/ZZZ/slice",
+        files={"file": ("part.stl", b"solid", "application/octet-stream")},
+        data={"preset": "standard", "material": "PLA", "supports": "false"})
+    assert res.status_code == 404
+
+
+def test_cancelling_an_unknown_job_is_a_404():
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=FakeSlicer()))
+    assert client.delete("/api/slice/jobs/nope").status_code == 404
+    assert client.delete("/api/slice/jobs/job-1").status_code == 204
