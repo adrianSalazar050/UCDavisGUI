@@ -67,7 +67,8 @@ def build_slicer(registry, queue, work_dir: pathlib.Path):
     logic in server/__main__.py."""
     exe = slicer_mod.find_slicer()
     if exe is None:
-        log.info("no Bambu Studio found; slicing disabled")
+        log.info("no Bambu Studio found; slicing disabled. Set BAMBU_STUDIO_EXE "
+                 "to its path (e.g. an AppImage) to enable it")
         return None
     index = slicer_mod.ProfileIndex.load(slicer_mod.profiles_root(exe))
     if not index:
