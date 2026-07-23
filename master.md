@@ -91,24 +91,46 @@ Verified on the **A1** (2026-07-23): FTPS **STOR** — a 43,976-byte
 `.gcode.3mf` was written to the card and read back with an identical MD5, and
 the `Metadata/plate_1.gcode.md5` sidecar inside it matched the actual gcode
 (§10). Also verified: the printer **accepts and starts** a CLI-sliced
-`.gcode.3mf` (§6). `POST .../queue/{id}/start` returned `started: true`, the
-printer echoed `cube.gcode.3mf` back as `subtask_name`, reported
-`total_layer_num: 100` (correct for a 20 mm cube at 0.20 mm), went
-`IDLE → RUNNING`, heated the nozzle to 205 °C, and reached layer 2.
+`.gcode.3mf` (§6). The first such attempt that day (below) stalled at layer 2;
+after the root-cause fix, a second CLI-sliced job printed a 20 mm cube
+**cleanly end to end — all 100 layers, HMS empty throughout.**
 
-**What that same print did next is not a clean result.** It stalled at layer
-2 of 100 (5%) with HMS `0300_1100_0002_0001` active and made no further
-progress for roughly 5 minutes; the operator stopped it, and the HMS cleared
-on stop. Nothing was shown on the printer's screen, so **the cause of the
-stall is a hypothesis, not a confirmed fact.** The leading explanation, found
-afterward: the slicer was never told which build plate is installed, so it
-heated the bed for a Cool Plate (35 °C) instead of this printer's actual
-Textured PEI Plate (65 °C) — see §6.7. That bug is fixed in software and
-verified through `SliceCoordinator` against a fake registry, but the fix
-itself has **not yet been re-run on the real printer.**
+**The first attempt, and its root cause.** `POST .../queue/{id}/start`
+returned `started: true`, the printer echoed `cube.gcode.3mf` back as
+`subtask_name`, reported `total_layer_num: 100` (correct for a 20 mm cube at
+0.20 mm), went `IDLE → RUNNING`, heated the nozzle to 205 °C, and reached
+layer 2 — then stalled there with HMS `0300_1100_0002_0001` active and made
+no further progress for roughly 5 minutes; the operator stopped it, and the
+HMS cleared on stop. **The root cause, confirmed 2026-07-23 (commit
+`b861837`):** `flatten_profile` resolved only a profile's `inherits` chain,
+not its `include` list. Bambu splits each machine's large gcode blocks —
+start, end, layer-change, timelapse, change-filament — into separate
+"template" profiles pulled in via `include`, and the A1 machine profile does
+not define those fields itself. So they were all silently dropped and the
+slice fell back to `fdm_machine_common`'s generic start gcode: a
+generic-Ender-style G28/G29 + "draw two lines" routine that hardcodes
+`M109 S205` and skips the A1's real bed-mesh and first-layer init entirely.
+That single bug explains **both** symptoms at once — the 205 °C nozzle
+(instead of the filament profile's 220 °C) and the layer-2 halt (the firmware
+never got its real start sequence). See §6 for the mechanism and precedence
+rule. A second, independent bug was real too but secondary: `curr_bed_type`
+was never set, so the bed heated for a Cool Plate (35 °C) instead of this
+printer's actual plate — see §6.7. Both bugs were present in the first
+attempt; the `include` bug is what caused the stall, not the bed temperature
+(the bed being 30 °C cold could easily have contributed to poor first-layer
+adhesion, but the print's real halt cause was the missing start/leveling
+sequence).
 
-**Not yet verified on any hardware:** a full print, started from a
-CLI-sliced `.gcode.3mf`, completing cleanly end to end.
+**Full clean print, verified on the A1 2026-07-23, after both fixes landed
+(commits `46c1d90`, `236c3da`, `b861837`).** A CLI-sliced 20 mm cube printed
+from start to **FINISH** — all 100 layers, HMS empty the entire time, nozzle
+heating 140 → 220 °C via the real Bambu preheat sequence, bed 45 °C (the
+Supertack plate installed at the time). It sailed past layer 2, where both
+earlier attempts had stalled. The produced gcode matched gcode the user
+sliced in Bambu Studio himself, command-for-command apart from one
+cooling-fan line. **This is the first full clean print the auto-slicing
+feature has produced end to end**, and it closes out the "not yet verified"
+line that used to sit here — see §10.
 
 Everything in `server/` is printer-model-agnostic — it never encodes a bed size
 or a frame geometry. The model-specific values are the ROI (§4.1) and the
@@ -814,6 +836,28 @@ would otherwise take the whole server down on a vendor tree that ships a
 cycle). Both are pure functions tested with a fake index and no slicer
 installed.
 
+**`inherits` is not the whole story — profiles also `include` gcode
+templates.** Bambu splits each machine's large gcode blocks — start, end,
+layer-change, timelapse, change-filament — into separate "template" profiles
+of their own, pulled into the machine profile via an `include` list. The
+machine profile does **not** carry those fields itself; they exist only in
+the included templates. Root-caused on hardware 2026-07-23 (commit
+`b861837`, see §1.1): resolving only `inherits` silently drops every one of
+those fields, and the flattened profile falls back to
+`fdm_machine_common`'s generic start gcode — a generic-Ender-style G28/G29 +
+"draw two lines" routine that hardcodes `M109 S205` and has no idea about the
+A1's bed mesh or first-layer init. That single gap was enough to mis-slice
+**every** file the feature produced, not just the A1's: `include` is used by
+27 machine and 1026 filament vendor profiles.
+
+`flatten_profile` now resolves both, with a specific precedence:
+**inherited keys (lowest) < included template keys < the profile's own keys
+(highest).** Included keys outrank inherited ones because they *are* the
+machine's real gcode, not a generic fallback; the profile's own keys still
+win over both, same as before. A named-but-missing template **raises**
+rather than silently degrading — a silently-dropped start gcode is exactly
+the wrong-file hazard this whole flattening step exists to prevent.
+
 The invocation, verified by hand on this machine:
 
 ```
@@ -1013,7 +1057,7 @@ selected entirely by which plate is fitted.
 reports its own model (§5.3) or nozzle (§6.4).** So, exactly like those two,
 `PrinterConfig.bed_type` is a **configured** field — one of `BED_TYPES`
 (`"Cool Plate"`, `"Textured PEI Plate"`, `"High Temp Plate"`, `"Engineering
-Plate"`, `"Cool Plate (SuperTack)"`), degrading to `DEFAULT_BED_TYPE =
+Plate"`, `"Supertack Plate"`), degrading to `DEFAULT_BED_TYPE =
 "Textured PEI Plate"` on anything unparseable — the plate this lab's A1
 actually ships with, confirmed by the operator. Unlike `nozzle`, `bed_type`
 *is* editable straight from the Edit Printer form, because fixing this from
@@ -1021,18 +1065,38 @@ the UI — not a hand-edited `printers.json` — is the point.
 `registry.printer_bed_type(serial)` mirrors `printer_nozzle`/`printer_model`
 and never returns `""` for the same reason those don't.
 
+**The slicer's own plate name is not the marketing name, and getting that
+wrong fails silently.** `BED_TYPES` originally shipped `"Cool Plate
+(SuperTack)"`, the name on the box. Bambu Studio does not recognise that
+string, and **an unrecognised `curr_bed_type` does not error — it silently
+falls back to Cool Plate (35 °C).** Measured on hardware 2026-07-23 (commit
+`236c3da`): requesting `"Cool Plate (SuperTack)"` produced
+`curr_bed_type = Cool Plate` and `M190 S35`, while the job record and the UI
+both still said SuperTack — a 10 °C under-temperature on the one plate whose
+whole selling point is adhesion, with no error anywhere to surface it. The
+slicer's own name, extracted from `BambuStudio.dll` alongside the other
+four, is **`"Supertack Plate"`**, which round-trips correctly. All five
+`BED_TYPES` values are now verified by slicing the same cube once per plate
+and reading the resulting `M190` back: Cool 35, Supertack 45, Textured PEI
+65, High Temp 65, and Engineering refuses PLA outright (its PLA temp is 0) —
+a loud failure, and the correct behaviour. If a plate is ever added, verify
+it the same way and confirm the string round-trips — do not trust the name
+on the box.
+
 **Getting this wrong was a real, measured failure, not a theoretical one.**
 Before this field existed, `run_slice` never set `curr_bed_type` at all, so
 Bambu Studio silently defaulted to `Cool Plate`. On real hardware
 (2026-07-23) a CLI-sliced cube heated its bed to 35 °C — the gcode carried
-`M190 S35` — PLA does not reliably stick to a cold bed, and that same print
-stalled at layer 2 (§1.1; the stall's cause is recorded there as a
-hypothesis, since nothing on the printer's screen confirmed it). Slicing the
-same cube twice with `curr_bed_type` set, no hardware involved, confirmed the
-fix in isolation: `'Cool Plate' → M190 S35`, `'Textured PEI Plate' → M190
-S65`. **That fix has not yet been re-run on the real printer** — §1.1 records
-that distinction; treat it as fixed-in-software, not fixed-and-confirmed,
-until someone slices and starts another print with it.
+`M190 S35` — and that same print stalled at layer 2 (§1.1). **The stall's
+actual root cause, confirmed afterward, was a separate bug** —
+`flatten_profile` dropping the machine's real start gcode via the `include`
+gap (§6, §1.1) — not the bed temperature; a 35 °C bed is a real adhesion
+risk in its own right but was not what halted this particular print. Slicing
+the same cube twice with `curr_bed_type` set, no hardware involved, first
+confirmed the fix in isolation: `'Cool Plate' → M190 S35`, `'Textured PEI
+Plate' → M190 S65`. That fix has since **also been confirmed on hardware**:
+the 2026-07-23 full clean print (§1.1) ran with `curr_bed_type` set to the
+installed Supertack plate and correctly heated the bed to 45 °C throughout.
 
 `run_slice(..., bed_type=)` patches `curr_bed_type` into a **copy** of the
 flattened process dict, the same pattern already used for
@@ -1404,22 +1468,23 @@ live against on 2026-07-21. This same run caught and fixed a false-failure
 trap in `storbinary`'s TLS unwrap that had been silently turning successful
 uploads into reported `502`s — see §6.7 and §11.
 
-**A CLI-sliced `.gcode.3mf` is now verified to START on real hardware
-(2026-07-23) — but a full print completing cleanly is still not verified.**
-The CLI produces a `.gcode.3mf` whose `Metadata/plate_1.gcode` and
-`slice_info.config` this repo's own `threemf.parse_slice_info` reads
-correctly, and the whole pipeline — slice → upload → queue, with the right
-provenance `model_id` — runs end to end over HTTP against a mock printer.
-What is now **also** verified: the real printer accepts and starts the
-result. `POST .../queue/{id}/start` returned `started: true`, the printer
-echoed the filename back as `subtask_name`, reported the correct
-`total_layer_num`, went `IDLE → RUNNING`, heated the nozzle correctly, and
-reached layer 2. What is **still not verified**: that print stalled at layer
-2/5% with an HMS active and was stopped by the operator, so nobody has yet
-watched a CLI-sliced job finish cleanly. The leading (but unconfirmed)
-explanation for the stall is the bed-temperature bug fixed in §6.7. Per
-§1.1, treat "a full print completing" as unverified until someone runs it
-and updates that section.
+**A CLI-sliced `.gcode.3mf` is now verified to START, and to FINISH, on real
+hardware (2026-07-23).** The CLI produces a `.gcode.3mf` whose
+`Metadata/plate_1.gcode` and `slice_info.config` this repo's own
+`threemf.parse_slice_info` reads correctly, and the whole pipeline — slice →
+upload → queue, with the right provenance `model_id` — runs end to end over
+HTTP against a mock printer. On the real printer, a first attempt that day
+started correctly (`POST .../queue/{id}/start` returned `started: true`,
+the printer echoed the filename back as `subtask_name`, reported the correct
+`total_layer_num`, went `IDLE → RUNNING`, heated the nozzle, and reached
+layer 2) but then stalled at layer 2/5% with an HMS active and was stopped
+by the operator. The root cause was found and fixed — `flatten_profile` was
+dropping the machine's real start gcode via the `include` gap (§6, §1.1),
+not (primarily) the bed-temperature bug fixed alongside it in §6.7. **After
+both fixes, a second CLI-sliced job printed cleanly end to end**: all 100
+layers, HMS empty throughout, the real Bambu preheat sequence to 220 °C, bed
+45 °C. This is the first full clean print the auto-slicing feature has
+produced. See §1.1 for the complete account of both bugs and both attempts.
 
 ---
 
@@ -1532,8 +1597,36 @@ and updates that section.
   plate is physically installed, so `slicer.py` has to be told
   (`PrinterConfig.bed_type`). Getting it wrong is not cosmetic — measured on
   hardware (2026-07-23), an unset `curr_bed_type` defaulted to Cool Plate's
-  35 °C bed target on a printer with a Textured PEI Plate (needs 65 °C), and
-  the resulting print's first layer failed to stick, stalling at layer 2.
+  35 °C bed target on a printer with a Textured PEI Plate (needs 65 °C).
+  Also: the value has to be the **slicer's** name, not the box's — measured
+  the same day, `"Cool Plate (SuperTack)"` (the marketing name) silently
+  degraded to Cool Plate too, because an unrecognised `curr_bed_type` does
+  not error. The correct string is `"Supertack Plate"`. Both are real bugs,
+  but neither was what stalled the print below — that was the `include` gap.
+- **`inherits` is not the whole vendor-profile story — `include` carries the
+  real machine gcode.** §6.2, §1.1. Bambu splits each machine's start/end/
+  layer-change/timelapse/change-filament gcode into separate template
+  profiles pulled in via `include`, and the machine profile itself does not
+  define those fields. Root-caused on hardware 2026-07-23 (commit `b861837`):
+  resolving only `inherits` silently drops all of it and falls back to
+  `fdm_machine_common`'s generic G28/G29 "draw two lines" gcode, which
+  hardcodes `M109 S205` and skips the A1's real bed-mesh/first-layer init.
+  This was the actual cause of the layer-2 stall recorded above — not the
+  bed-temperature bug, which was real but secondary. `include` keys now
+  resolve between inherited (lowest) and the profile's own keys (highest); a
+  named-but-missing template raises rather than degrading. Used by 27
+  machine and 1026 filament vendor profiles, so this silently affected every
+  file this feature ever sliced, not just the A1's.
+- **The A1's built-in camera serves exactly one client.** Diagnosed
+  2026-07-23: the TCP 6000 connection and the TLS+auth handshake can succeed
+  while no frame data ever arrives, and `detect.py` reports "camera read
+  failed (3 consecutive misses)" — not because anything is broken, but
+  because another viewer (Bambu Handy, Bambu Studio's camera tab, or a
+  previous detector process that hasn't released the stream) is already
+  holding the single camera slot, or the stream has hung firmware-side. This
+  is contention, not a code bug; if the detector goes down unexpectedly,
+  check what else might be watching the camera before assuming §11's other
+  camera gotchas apply.
 
 ---
 

@@ -41,19 +41,28 @@
 >   "unknown never blocks" convention as `printer_model`/`printer_nozzle` —
 >   not a 404). Fixed by dropping the check; only `slicer is None` 404s.
 >
-> **Hardware gate run 2026-07-23 (`master.md` §1.1).** FTPS STOR and a
-> CLI-sliced `.gcode.3mf` starting on a real printer — both marked
-> unverified in §8/§9 below at the time this was written — are now verified
-> on the A1: the upload wrote a byte-identical file, and `POST
-> .../queue/{id}/start` accepted the result, echoed it back as
-> `subtask_name`, and reached layer 2 of 100. The print then stalled at
-> layer 2/5% and was stopped by the operator. The leading (but unconfirmed)
-> explanation is that `curr_bed_type` was never set, so PLA heated for a
-> Cool Plate (35 °C) instead of this A1's actual Textured PEI Plate
-> (65 °C) — now fixed as `PrinterConfig.bed_type` (`master.md` §6.7), though
-> that fix itself has not yet been re-run on hardware. A full clean print
-> completing end to end remains outstanding. See `master.md` §1.1 and §10
-> for the verified facts, and the companion plan's STATUS for Task 12.
+> **Hardware gate run 2026-07-23 (`master.md` §1.1) — now fully PASSED.**
+> FTPS STOR and a CLI-sliced `.gcode.3mf` starting on a real printer were
+> verified first; a full clean print completing end to end was the one
+> thing still outstanding, and that is now done too. The first start
+> attempt that day reached layer 2 of 100 and then stalled at 5% with an
+> HMS active; the operator stopped it. **Root cause, confirmed the same
+> day (commit `b861837`):** `flatten_profile` resolved a profile's
+> `inherits` chain but not its `include` list, and Bambu Studio pulls each
+> machine's actual start/end/layer-change gcode in via `include` — the
+> machine profile itself doesn't carry those fields. Dropping them silently
+> fell back to a generic Ender-style start routine (hardcoded `M109 S205`,
+> no bed mesh, no first-layer init), which explains both the wrong nozzle
+> temperature and the layer-2 halt in one bug. A second, secondary bug was
+> also real and fixed the same day: `curr_bed_type` was never set (then,
+> once added, briefly held the marketing name `"Cool Plate (SuperTack)"`
+> instead of the slicer's own `"Supertack Plate"`), so the bed silently
+> heated for the wrong plate. **After both fixes, a second CLI-sliced job
+> printed a 20 mm cube cleanly end to end on the A1 — all 100 layers, HMS
+> empty throughout, matching Bambu-Studio-sliced gcode command-for-command
+> apart from one cooling-fan line.** See `master.md` §1.1, §6, §6.7, and
+> §10 for the full verified account, and the companion plan's STATUS for
+> Task 12.
 >
 > Historical record, not maintained. **`master.md` is authoritative wherever
 > this file disagrees with it.**

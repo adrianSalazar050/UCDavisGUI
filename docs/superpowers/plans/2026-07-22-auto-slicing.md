@@ -2,17 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **STATUS: Tasks 1–11 SHIPPED (2026-07-22); Task 12 executed 2026-07-23.**
-> Implements `docs/superpowers/specs/2026-07-22-auto-slicing-design.md`, whose
-> banner records what this plan got wrong in advance. Task 12 — slicing
-> something on the real A1 and starting it from the queue — ran on
-> 2026-07-23: FTPS STOR and the printer's acceptance of a CLI-sliced
-> `.gcode.3mf` are now verified (`master.md` §1.1, §10). The print reached
-> layer 2 of 100 and then stalled at 5%, and was stopped by the operator; the
-> leading, unconfirmed explanation is a bed-temperature bug (`master.md`
-> §6.7), fixed in software but not yet re-verified on hardware. **A full
-> clean print completing end to end remains outstanding** — that step, and
-> only that step, is still unrun.
+> **STATUS: Tasks 1–11 SHIPPED (2026-07-22); Task 12 executed and PASSED
+> 2026-07-23.** Implements
+> `docs/superpowers/specs/2026-07-22-auto-slicing-design.md`, whose banner
+> records what this plan got wrong in advance. Task 12 — slicing something on
+> the real A1 and starting it from the queue — ran on 2026-07-23: FTPS STOR
+> and the printer's acceptance of a CLI-sliced `.gcode.3mf` were verified
+> first (`master.md` §1.1, §10). That first print reached layer 2 of 100 and
+> stalled at 5%, and was stopped by the operator. **Root cause, confirmed the
+> same day (commit `b861837`):** `flatten_profile` resolved `inherits` but
+> not `include`, so the machine's real start/end/layer-change gcode — pulled
+> in only via `include` — was silently dropped in favour of a generic
+> fallback that hardcodes `M109 S205` and skips the A1's bed-mesh and
+> first-layer init. A secondary bed-temperature bug (`master.md` §6.7,
+> commits `46c1d90`/`236c3da`) was also real and fixed the same day. **After
+> both fixes, a second CLI-sliced job printed a 20 mm cube cleanly end to
+> end — all 100 layers, HMS empty throughout.** The one step this plan
+> called out as still outstanding is now done; see `master.md` §1.1 for the
+> full verified account.
 > Historical record, not maintained. **`master.md` is authoritative wherever
 > this file disagrees with it.**
 >
