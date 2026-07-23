@@ -497,9 +497,8 @@ def test_model_id_survives_persistence():
 
 
 # ---------------- nozzle ----------------
-# add()/update() don't take a nozzle kwarg (not part of this task), so these
-# seed the config the same way test_load_restores_and_starts_from_store does:
-# through the store, then r.load().
+# These seed the config the same way test_load_restores_and_starts_from_store
+# does: through the store, then r.load().
 
 def test_printer_nozzle_returns_the_configured_value():
     store = MemoryStore()
@@ -512,6 +511,45 @@ def test_printer_nozzle_returns_the_configured_value():
 
 def test_printer_nozzle_unknown_serial_defaults_to_04():
     assert reg().printer_nozzle("nope") == "0.4"
+
+
+# nozzle IS settable through update() -- see server/main.py's EditPrinter
+# model -- mirroring bed_type exactly: this is the last slicing-config field
+# to move from "hand-edit printers.json" to "editable from the Edit form".
+
+def test_update_sets_the_nozzle():
+    r = reg()
+    r.add(host="h", serial="S1", access_code="c")
+    r.update("S1", host="h", nozzle="0.6")
+    assert r.printer_nozzle("S1") == "0.6"
+
+
+def test_update_without_nozzle_keeps_the_current_one():
+    # The edit form round-trips every field; omitting nozzle must not wipe
+    # a diameter the user set deliberately -- same reasoning as bed_type.
+    r = reg()
+    r.add(host="h", serial="S1", access_code="c")
+    r.update("S1", host="h", nozzle="0.6")
+    r.update("S1", host="h", name="renamed")
+    assert r.printer_nozzle("S1") == "0.6"
+
+
+def test_update_invalid_nozzle_degrades_to_the_default():
+    # Same posture as store.py's from_dict: a wrong nozzle slices for the
+    # wrong hardware, so an unparseable value must land on DEFAULT_NOZZLE
+    # rather than being stored verbatim.
+    r = reg()
+    r.add(host="h", serial="S1", access_code="c")
+    r.update("S1", host="h", nozzle="0.5")
+    assert r.printer_nozzle("S1") == "0.4"
+
+
+def test_nozzle_survives_persistence():
+    store = MemoryStore()
+    r = reg(store)
+    r.add(host="h", serial="S1", access_code="c")
+    r.update("S1", host="h", nozzle="0.8")
+    assert store.load()[0].nozzle == "0.8"
 
 
 # ---------------- bed type ----------------

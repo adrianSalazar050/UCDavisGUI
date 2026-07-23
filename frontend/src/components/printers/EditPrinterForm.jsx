@@ -2,7 +2,7 @@ import { useState } from "react";
 import { updatePrinter } from "../../api/printer.js";
 import Button from "../ui/Button.jsx";
 import Field from "../ui/Field.jsx";
-import { BED_TYPES, PRINTER_MODELS, guessModelId } from "./printerModels.js";
+import { BED_TYPES, NOZZLES, PRINTER_MODELS, guessModelId } from "./printerModels.js";
 
 // Prefilled from the printer summary, which never carries the access code
 // (see EditPrinter in server/main.py) -- that field always starts blank.
@@ -21,6 +21,11 @@ export default function EditPrinterForm({ printer, onDone }) {
     // for safety, not the normal path -- unlike model_id there's no
     // "Unknown" choice, every printer has a plate actually installed.
     bed_type: printer.bed_type || "Textured PEI Plate",
+    // The printer summary always carries nozzle (see _with_nozzle in
+    // server/main.py), so the "0.4" fallback below is only for safety, not
+    // the normal path -- unlike model_id there's no "Unknown" choice, every
+    // printer has a nozzle actually installed.
+    nozzle: printer.nozzle || "0.4",
   });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -45,6 +50,7 @@ export default function EditPrinterForm({ printer, onDone }) {
         capture: form.capture,
         model_id: form.model_id,
         bed_type: form.bed_type,
+        nozzle: form.nozzle,
       });
       onDone(); // /ws pushes the refreshed card in on its own
     } catch (e2) {
@@ -86,6 +92,16 @@ export default function EditPrinterForm({ printer, onDone }) {
           <select value={form.bed_type} onChange={set("bed_type")}>
             {BED_TYPES.map((b) => (
               <option key={b} value={b}>{b}</option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      <div className="add-form__row">
+        <Field label="Nozzle"
+               help="Selects the machine profile a slice uses -- must match the nozzle actually installed.">
+          <select value={form.nozzle} onChange={set("nozzle")}>
+            {NOZZLES.map((n) => (
+              <option key={n} value={n}>{n} mm</option>
             ))}
           </select>
         </Field>

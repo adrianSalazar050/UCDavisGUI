@@ -48,8 +48,8 @@ from typing import Any, Callable
 
 from .sdcard import SdError
 from .store import (BED_TYPES, CAMERA_SOURCES, DEFAULT_BED_TYPE,
-                    DEFAULT_NOZZLE, DETECTION_CLASSES, PrinterConfig,
-                    guess_model_id, normalize_roi)
+                    DEFAULT_NOZZLE, DETECTION_CLASSES, NOZZLES,
+                    PrinterConfig, guess_model_id, normalize_roi)
 
 log = logging.getLogger("server.registry")
 
@@ -195,7 +195,8 @@ class PrinterRegistry:
         return True
 
     def update(self, serial, *, host=None, access_code=None, name=None,
-               capture=None, model_id=None, bed_type=None) -> dict | None:
+               capture=None, model_id=None, bed_type=None,
+               nozzle=None) -> dict | None:
         """Edit a registered printer's connection info. Returns the new summary
         dict, or None if the serial is unknown. The serial is NOT changeable.
         A blank/None access_code KEEPS the current one. Changing host or
@@ -211,7 +212,12 @@ class PrinterRegistry:
         value must be one of BED_TYPES, so a submitted-but-invalid one
         degrades to DEFAULT_BED_TYPE rather than being stored verbatim --
         same posture as store.py's from_dict, because a wrong plate slices
-        for the wrong temperature (see PrinterConfig.bed_type)."""
+        for the wrong temperature (see PrinterConfig.bed_type).
+
+        nozzle: same convention, mirroring bed_type exactly -- None keeps
+        the stored diameter, and a submitted-but-invalid value degrades to
+        DEFAULT_NOZZLE rather than being stored verbatim, because a wrong
+        nozzle selects the wrong machine profile (see PrinterConfig.nozzle)."""
         # Same validation posture as add(): reject wrong types outright
         # (before they can reach `.strip()` and raise a raw AttributeError,
         # or reach PrinterConfig and get silently coerced); cosmetic fields
@@ -251,6 +257,8 @@ class PrinterRegistry:
                 cfg.model_id = model_id.strip() if isinstance(model_id, str) else ""
             if bed_type is not None:
                 cfg.bed_type = bed_type if bed_type in BED_TYPES else DEFAULT_BED_TYPE
+            if nozzle is not None:
+                cfg.nozzle = nozzle if nozzle in NOZZLES else DEFAULT_NOZZLE
             if capture is not None:
                 if capture:
                     self._clear_capture()

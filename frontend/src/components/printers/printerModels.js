@@ -48,3 +48,11 @@ export const BED_TYPES = [
   // so a wrong string here is a wrong bed temperature with no error anywhere.
   "Supertack Plate",
 ];
+
+// Mirrors NOZZLES in server/store.py exactly -- the server validates
+// against that tuple and degrades anything else to DEFAULT_NOZZLE, this
+// list only populates the dropdown. Like BED_TYPES there is no "Unknown"
+// entry: every printer has a nozzle actually installed, and the wrong
+// diameter here selects the wrong machine profile when slicing (see
+// PrinterConfig.nozzle in server/store.py).
+export const NOZZLES = ["0.2", "0.4", "0.6", "0.8"];

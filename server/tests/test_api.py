@@ -63,7 +63,7 @@ class FakeService:
 class FakeRegistry:
     def __init__(self, services=None, duplicate=False, sd_file=None,
                  sd_file_error=None, sd_upload_error=None, model_id="",
-                 bed_type="Textured PEI Plate"):
+                 bed_type="Textured PEI Plate", nozzle="0.4"):
         self._services = {s.serial: s for s in (services or [])}
         self.duplicate = duplicate
         self.added = []
@@ -77,6 +77,7 @@ class FakeRegistry:
         self.reconnect_calls = []
         self._model_id = model_id
         self._bed_type = bed_type
+        self._nozzle = nozzle
 
     def printer_model(self, serial):
         # Mirrors PrinterRegistry.printer_model: "" for unknown printer or
@@ -91,6 +92,13 @@ class FakeRegistry:
         if serial not in self._services:
             return "Textured PEI Plate"
         return self._bed_type
+
+    def printer_nozzle(self, serial):
+        # Mirrors PrinterRegistry.printer_nozzle: the configured default even
+        # for an unknown printer -- never "" (see store.DEFAULT_NOZZLE).
+        if serial not in self._services:
+            return "0.4"
+        return self._nozzle
 
     def summaries(self):
         return [s.summary() for s in self._services.values()]
@@ -117,7 +125,7 @@ class FakeRegistry:
         return True
 
     def update(self, serial, host=None, access_code=None, name="",
-               capture=False, model_id=None, bed_type=None):
+               capture=False, model_id=None, bed_type=None, nozzle=None):
         if serial not in self._services:
             return None
         if not (host and host.strip()):
@@ -127,6 +135,8 @@ class FakeRegistry:
             self._model_id = model_id
         if bed_type is not None:
             self._bed_type = bed_type
+        if nozzle is not None:
+            self._nozzle = nozzle
         self.updated.append((serial, host, access_code, name, capture))
         return svc.summary()
 
@@ -216,7 +226,8 @@ def test_list_printers_envelope(tmp_path):
     assert r.json() == {"printers": [{"serial": "S1", "gcode_state": "IDLE",
                                       "connection": "ok",
                                       "report_age_s": 1.0,
-                                      "bed_type": "Textured PEI Plate"}]}
+                                      "bed_type": "Textured PEI Plate",
+                                      "nozzle": "0.4"}]}
 
 
 def test_list_printers_empty(tmp_path):
@@ -348,6 +359,30 @@ def test_edit_printer_omitted_bed_type_keeps_the_current_one(tmp_path):
     r = client(tmp_path, reg).put("/api/printers/S1", json={"host": "1.2.3.4"})
     assert r.status_code == 200
     assert r.json()["bed_type"] == "High Temp Plate"
+
+
+def test_edit_printer_accepts_and_persists_nozzle(tmp_path):
+    # Mirrors test_edit_printer_accepts_and_persists_bed_type: nozzle must
+    # be savable from the Edit form, not just from a hand-edited
+    # printers.json.
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).put("/api/printers/S1", json={
+        "host": "1.2.3.4", "nozzle": "0.6"})
+    assert r.status_code == 200
+    assert r.json()["nozzle"] == "0.6"
+    # Persists, not just echoed back: a fresh list reflects it too, which is
+    # what lets EditPrinterForm show the ACTUAL current nozzle on reopen
+    # instead of always showing the default and silently overwriting a
+    # deliberately-chosen diameter on the next unrelated save.
+    r2 = client(tmp_path, reg).get("/api/printers")
+    assert r2.json()["printers"][0]["nozzle"] == "0.6"
+
+
+def test_edit_printer_omitted_nozzle_keeps_the_current_one(tmp_path):
+    reg = FakeRegistry([FakeService("S1")], nozzle="0.8")
+    r = client(tmp_path, reg).put("/api/printers/S1", json={"host": "1.2.3.4"})
+    assert r.status_code == 200
+    assert r.json()["nozzle"] == "0.8"
 
 
 def test_edit_printer_blank_access_code_defaults_to_keep(tmp_path):
