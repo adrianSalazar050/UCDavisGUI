@@ -1,0 +1,5 @@
+# The image only needs the toolchain (Dockerfile.build); the repo is bind-mounted
+# at run time. Keep the build context tiny by excluding the heavy, already-built
+# Windows artifacts that live under desktop/.
+node_modules
+release
