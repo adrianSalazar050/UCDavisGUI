@@ -194,6 +194,60 @@ exception).
                                                         /api/frame/latest)
 ```
 
+### 2.1 Serving the dashboard to a LAN, behind a password
+
+The app is **already a website.** FastAPI serves the built React frontend
+directly (§7), and the Electron desktop app (§8) is only a window pointed at
+that same server. For a shared lab, running **one** server and letting
+everyone open a URL beats an installer per person: no install, works on any
+OS, works from a phone, and there is exactly one place to update.
+
+**A hosted/cloud site cannot replace this — that is an architectural
+invariant, not a current limitation.** The printer is reachable only at a
+private LAN address, over MQTT (8883), FTPS (990), and raw TCP (6000). A
+browser cannot open those sockets, and the public internet cannot route to
+`192.168.x.x`. Something has to run on the LAN regardless of where the UI
+itself is served from.
+
+`--host` (default `127.0.0.1`) makes exposure opt-in. **THE FAIL-CLOSED
+RULE**, enforced by `build_auth()` in `server/__main__.py`: binding anywhere
+other than loopback **without** `BAMBU_PASSWORD` set in the environment makes
+the server refuse to start, rather than boot unprotected. Putting "stop a
+print / upload a file / start a job" on a shared network must not be possible
+by forgetting a flag — this is the single most important property of the
+design.
+
+`server/auth.py` (`Auth`) holds one shared password — SHA-256 +
+`hmac.compare_digest`, so a wrong guess cannot be timed character by
+character, and the plaintext itself is never retained — plus a set of
+in-memory session tokens. `create_app(..., auth=None)` means **inert**: no
+authentication at all, the same "None means inert" convention `queue` (§5.2)
+and `slicer` (§6.6) already use. That is what the desktop app and the dev
+workflow get automatically, since both bind loopback and there would be
+nowhere to type a password anyway; a password on loopback is still honoured
+if one happens to be set.
+
+**The session is a cookie, not a bearer token, because of one hard
+constraint:** the dashboard's live updates run over a WebSocket (§7), and
+browsers cannot attach custom headers to a WS handshake. A bearer token in
+`Authorization` therefore cannot protect `/ws`. A cookie rides the handshake
+automatically, so one mechanism — `auth.valid(cookie)` — covers `/api/*` and
+`/ws` alike. `/ws` is checked **inside the handler** in `server/main.py`, not
+by the HTTP middleware that guards everything else, because FastAPI's HTTP
+middleware never sees websocket scope (§11).
+
+The static frontend and `POST /api/login` stay reachable with no session at
+all — otherwise the login page could never load and nobody could ever obtain
+one.
+
+**Verified in a real browser against a password-protected server
+(2026-07-23):** the login screen renders, a wrong password is rejected with
+the server's own message, the correct password reveals the dashboard, and
+logout re-closes the API. **This is plain HTTP, not TLS** — the password
+resists a passer-by on the network, not a sniffer. That trade is deliberate
+and recorded in the design spec:
+`docs/superpowers/specs/2026-07-23-lan-serving-auth-design.md`.
+
 ---
 
 ## 3. Component reference
@@ -402,7 +456,8 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 | `slicepresets.py` | Curated quality tiers + filament mapping (§6.3) | `TIERS`, `MACHINE_TOKENS`, `PROCESS_TOKENS`, `MATERIALS`, `machine_profile_name`, `resolve_preset`, `available_presets`, `filament_profile_name`, `available_filaments`, `detect_loaded_filament` |
 | `slicejobs.py` | Slice job records, states, the worker thread (§6.4) | `SliceCoordinator`, `output_name`, `MODEL_EXTS`, `MAX_FINISHED_JOBS`, `TICK_S` |
 | `runs.py` | Finding the newest captured frame | `find_active_run`, `newest_frame`, `ACTIVE_WINDOW_S` |
-| `__main__.py` | CLI entry, wiring, `--mock` seeding | `main`, `real_factory`, `mock_factory`, `MOCK_SEED` |
+| `auth.py` | Shared-password auth for LAN serving (§2.1) | `Auth`, `is_loopback`, `LOOPBACK_HOSTS` — `build_auth` (the fail-closed rule) lives in `__main__.py`, not here |
+| `__main__.py` | CLI entry, wiring, `--mock` seeding, `--host`/`build_auth` (§2.1) | `main`, `real_factory`, `mock_factory`, `MOCK_SEED`, `build_auth` |
 
 **`store.py`.** `PrinterConfig` fields: `serial`, `host`, `access_code`, `name`
 (falls back to host), `capture`, `camera_source` (`"a1"`/`"webcam"`),
@@ -1277,7 +1332,21 @@ python -m server --port 8000 --runs-dir runs --printers-file printers.json
 ```
 
 Then open <http://127.0.0.1:8000>. Printers are added **in the browser**
-(Overview → Add printer) — there are no `--host/--serial/--access-code` flags.
+(Overview → Add printer) — there are no `--serial/--access-code` flags.
+
+To serve the dashboard to the rest of the lab instead of just this machine
+(§2.1), set a password and bind beyond loopback:
+
+```bash
+BAMBU_PASSWORD=<shared password> python -m server --host 0.0.0.0
+# PowerShell: $env:BAMBU_PASSWORD="<shared password>"; python -m server --host 0.0.0.0
+```
+
+Everyone else then just opens `http://<that machine's LAN IP>:8000` and logs
+in with the shared password. The default with no `--host` stays
+`127.0.0.1` (this machine only, no password needed) — exposure is opt-in, and
+binding anywhere else **without** `BAMBU_PASSWORD` set refuses to start
+(§2.1's fail-closed rule).
 
 `--mock` seeds three printers (running / stale / offline), uses `MemoryStore` +
 `MemoryQueueStore` so nothing touches your real `printers.json`/`queues.json`,
@@ -1703,6 +1772,20 @@ produced. See §1.1 for the complete account of both bugs and both attempts.
   silently does nothing — no error, the move just never happens. Any code
   that appends to `machine_end_gcode` must `M17` first, the way
   `bed_forward_gcode()` does.
+- **The fail-closed rule exists so exposing printer control can never be an
+  accident.** §2.1. `build_auth()` refuses to start the server at all if
+  `--host` resolves to anything but loopback and `BAMBU_PASSWORD` is unset —
+  it does not fall back to running unprotected. Binding `0.0.0.0` and
+  forgetting the password is the one mistake this whole design exists to make
+  impossible, not just discouraged.
+- **Auth has to be a cookie, not a header, because of the WebSocket.** §2.1.
+  Browsers cannot set custom headers on a WS handshake, so a bearer token
+  could never protect `/ws` — only a cookie rides the handshake
+  automatically. That is also why `/ws` checks `auth.valid(...)` itself
+  inside the handler in `server/main.py` rather than relying on the
+  `@app.middleware("http")` guard that covers every other route: FastAPI's
+  HTTP middleware never sees websocket scope, so it silently would not have
+  applied.
 
 ---
 

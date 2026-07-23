@@ -1,11 +1,14 @@
 # Serving the dashboard to the lab, with a shared password — design
 
-> **STATUS: PROPOSED (2026-07-23).** Agreed in brainstorming; implementation
-> follows. Supersedes nothing — it adds a second, simpler way to reach the app
-> alongside the desktop installer.
+> **STATUS: SHIPPED (2026-07-23, commit `ff87e8d`).** Implemented as designed
+> below and verified in a real browser against a password-protected server:
+> the login screen renders, a wrong password is rejected with the server's
+> own message, the correct password reveals the dashboard, and logout
+> re-closes the API. Supersedes nothing — it adds a second, simpler way to
+> reach the app alongside the desktop installer.
 >
-> Historical record, not maintained. **`master.md` is authoritative wherever
-> this file disagrees with it.**
+> Historical record, not maintained. **`master.md` §2.1 is authoritative
+> wherever this file disagrees with it.**
 
 Date: 2026-07-23
 
