@@ -1,0 +1,16 @@
+# Runtime dependencies for the FROZEN desktop build (PyInstaller).
+#
+# Differs from requirements.txt in two deliberate ways:
+#   1. opencv-python-headless instead of opencv-python -- the only cv2 use in
+#      the bundled path is MockPrinter's frame drawing (never the real path),
+#      and headless drops the libGL.so.1 runtime dependency that otherwise
+#      breaks a plain opencv-python inside a minimal Linux / AppImage host.
+#   2. NO torch / ultralytics -- failure detection is out of scope for the
+#      desktop bundle (launcher passes detection=None). Excluding them keeps
+#      the frozen app ~150-250 MB instead of >1 GB.
+paho-mqtt>=2.0
+opencv-python-headless>=4.9
+numpy>=1.26
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9

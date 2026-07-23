@@ -1,0 +1,57 @@
+{
+  "name": "bambu-monitor-desktop",
+  "version": "0.1.0",
+  "description": "Desktop shell for the Bambu Monitor dashboard",
+  "author": "adrianSalazar050",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.bambumonitor.app",
+    "productName": "Bambu Monitor",
+    "directories": {
+      "output": "release",
+      "buildResources": "icons"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "icons/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist/bambu-backend",
+        "to": "backend"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "icons/icon.ico",
+      "artifactName": "Bambu Monitor Setup ${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Bambu Monitor"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "icons/icon.png",
+      "category": "Utility",
+      "artifactName": "Bambu Monitor ${version}.${ext}"
+    }
+  }
+}
