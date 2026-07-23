@@ -1,0 +1,5 @@
+# Shell scripts and the Dockerfile MUST stay LF: a CRLF sneaks into the shebang
+# (`#!/usr/bin/env bash\r`) and breaks execution inside the Linux build
+# container, regardless of the checkout OS's autocrlf setting.
+*.sh            text eol=lf
+Dockerfile*     text eol=lf
