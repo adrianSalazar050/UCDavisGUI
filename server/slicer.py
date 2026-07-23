@@ -17,6 +17,7 @@ import logging
 import os
 import pathlib
 import subprocess
+import sys
 
 from .store import DEFAULT_BED_TYPE
 
@@ -133,7 +134,8 @@ class ProfileIndex:
 
 
 # Where Bambu Studio installs itself on Windows. Checked in order, after the
-# BAMBU_STUDIO_EXE override.
+# BAMBU_STUDIO_EXE override. Kept as a named constant because it's the stable
+# case; the Linux/mac candidates are computed (see _slicer_candidates).
 DEFAULT_SLICER_PATHS = (
     r"C:\Program Files\Bambu Studio\bambu-studio.exe",
     r"C:\Program Files (x86)\Bambu Studio\bambu-studio.exe",
@@ -142,14 +144,54 @@ DEFAULT_SLICER_PATHS = (
 # Vendor whose profiles we index, relative to the install directory.
 PROFILES_SUBPATH = ("resources", "profiles", "BBL")
 
+# The executable's base name across the Linux packages people actually ship.
+_LINUX_SLICER_NAMES = ("bambu-studio", "bambustudio", "BambuStudio")
 
-def find_slicer(env=None, candidates=DEFAULT_SLICER_PATHS) -> str | None:
-    """Path to bambu-studio.exe, or None when it isn't installed.
+
+def _slicer_candidates(system: str, home) -> list:
+    """Concrete paths (AppImage globs already expanded) to probe for Bambu
+    Studio, by OS. On Windows there is a canonical install dir; on Linux the
+    official distribution is an AppImage the user downloads, so we sweep the
+    usual download/install spots and the standard PATH dirs. A miss here is
+    not fatal -- BAMBU_STUDIO_EXE overrides everything, and no slicer just
+    means slicing stays inert (see find_slicer)."""
+    home = pathlib.Path(home)
+    if system == "win32":
+        return list(DEFAULT_SLICER_PATHS)
+    if system == "darwin":
+        app = "BambuStudio.app/Contents/MacOS/BambuStudio"
+        return [f"/Applications/{app}", str(home / "Applications" / app)]
+    # linux and anything else UNIX-like. The absolute dirs are literal POSIX
+    # strings on purpose -- building them with pathlib on a Windows HOST (the
+    # cross-build / test case) would emit backslashes and match nothing on the
+    # Linux TARGET. The ~/.local/bin one is home-relative, so it uses pathlib
+    # against the (real or injected) home.
+    fixed = [f"{base}/{n}"
+             for base in ("/usr/bin", "/usr/local/bin",
+                          "/opt/bambu-studio", "/opt/BambuStudio")
+             for n in _LINUX_SLICER_NAMES]
+    fixed += [str(home / ".local" / "bin" / n) for n in _LINUX_SLICER_NAMES]
+    # AppImages carry a version in the filename, so they must be globbed. Sort
+    # for a deterministic pick when several versions sit side by side.
+    globbed = []
+    for d in (home / "Applications", home / "Downloads",
+              home / ".local" / "bin", pathlib.Path("/opt")):
+        if d.is_dir():
+            globbed += [str(p) for p in
+                        sorted(d.glob("*[Bb]ambu*[Ss]tudio*.AppImage"))]
+    return globbed + fixed
+
+
+def find_slicer(env=None, candidates=None, system=None, home=None) -> str | None:
+    """Path to the Bambu Studio executable, or None when it isn't installed.
 
     None is a supported outcome, not an error: create_app turns it into 404s
     on every slice route, the same "None means inert" convention queue=None
     and detection=None already use. A machine with no slicer still boots,
     still monitors, still prints files already on the card.
+
+    `candidates` defaults to a per-OS list (see _slicer_candidates); `system`
+    and `home` are injectable so the per-OS logic is testable off that OS.
     """
     env = os.environ if env is None else env
     override = (env.get("BAMBU_STUDIO_EXE") or "").strip()
@@ -157,20 +199,52 @@ def find_slicer(env=None, candidates=DEFAULT_SLICER_PATHS) -> str | None:
     # otherwise a stale env var silently disables the whole feature.
     if override and os.path.exists(override):
         return override
+    if candidates is None:
+        system = sys.platform if system is None else system
+        home = pathlib.Path.home() if home is None else home
+        candidates = _slicer_candidates(system, home)
     for path in candidates:
         if os.path.exists(path):
             return path
     return None
 
 
-def profiles_root(exe: str) -> pathlib.Path:
-    """The vendor profile directory shipped beside `exe`.
+def profiles_root(exe: str, env=None, system=None, home=None) -> pathlib.Path:
+    """The vendor profile directory to index and flatten.
 
-    Deliberately the INSTALLED resources tree, not the OTA-updated copy under
-    %APPDATA%: the two can differ, and this is the one the slicer itself
-    validated against.
+    Preference order:
+      1. BAMBU_STUDIO_PROFILES, if set to an existing dir -- the escape hatch
+         for a layout we don't recognise (notably a Linux AppImage, whose
+         resources aren't readable beside the file).
+      2. resources/profiles/BBL beside the executable -- the INSTALLED tree,
+         deliberately not the OTA copy: on Windows the two can differ and this
+         is the one the slicer validated against. This is also where a Linux
+         .deb install puts them.
+      3. Linux/mac: the per-user config Bambu Studio writes on first run
+         (~/.config/BambuStudio/system/BBL), which IS readable when the app
+         itself is an AppImage.
+
+    Returns the first that exists, else the beside-the-exe path -- a missing
+    dir is handled gracefully by ProfileIndex.load (slicing stays inert), so
+    the caller never has to special-case "not found" here.
     """
-    return pathlib.Path(exe).parent.joinpath(*PROFILES_SUBPATH)
+    env = os.environ if env is None else env
+    override = (env.get("BAMBU_STUDIO_PROFILES") or "").strip()
+    if override and pathlib.Path(override).is_dir():
+        return pathlib.Path(override)
+    system = sys.platform if system is None else system
+    home = pathlib.Path.home() if home is None else home
+    beside = pathlib.Path(exe).parent.joinpath(*PROFILES_SUBPATH)
+    candidates = [beside]
+    if system != "win32":
+        candidates.append(home / ".config" / "BambuStudio" / "system" / "BBL")
+    if system == "darwin":
+        candidates.append(home / "Library" / "Application Support"
+                          / "BambuStudio" / "system" / "BBL")
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return beside
 
 
 def build_argv(exe, model_path, machine_json, process_json, filament_json,

@@ -191,6 +191,74 @@ def test_profiles_root_is_beside_the_executable():
     assert got.as_posix().endswith("Bambu Studio/resources/profiles/BBL")
 
 
+# --- cross-platform slicer detection (for the Linux/mac desktop builds) ---
+# On Linux Bambu Studio ships as an AppImage the user downloads, so there is no
+# canonical install path -- detection is best-effort, and BAMBU_STUDIO_EXE /
+# BAMBU_STUDIO_PROFILES let the user point at it explicitly when a guess misses.
+
+def test_find_slicer_finds_a_linux_appimage_in_applications(tmp_path):
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    appimage = apps / "Bambu_Studio_ubuntu.AppImage"
+    appimage.write_text("", encoding="utf-8")
+    got = find_slicer({}, system="linux", home=tmp_path)
+    assert got == str(appimage)
+
+
+def test_find_slicer_finds_a_linux_binary_on_a_standard_path(tmp_path):
+    # Simulate /opt/bambu-studio/bambu-studio via an injected home-relative tree
+    # is awkward; instead assert the candidate list includes the usual places.
+    from server.slicer import _slicer_candidates
+    cands = _slicer_candidates("linux", tmp_path)
+    assert "/usr/bin/bambu-studio" in cands
+    assert str(tmp_path / ".local" / "bin" / "bambu-studio") in cands
+
+
+def test_find_slicer_env_override_still_wins_on_linux(tmp_path):
+    exe = tmp_path / "my-bambu.AppImage"
+    exe.write_text("", encoding="utf-8")
+    assert find_slicer({"BAMBU_STUDIO_EXE": str(exe)},
+                       system="linux", home=tmp_path) == str(exe)
+
+
+def test_find_slicer_returns_none_on_linux_with_nothing_installed(tmp_path):
+    assert find_slicer({}, system="linux", home=tmp_path) is None
+
+
+def test_profiles_root_honors_the_env_override(tmp_path):
+    prof = tmp_path / "custom_profiles"
+    prof.mkdir()
+    got = profiles_root("/anywhere/bambu-studio",
+                        env={"BAMBU_STUDIO_PROFILES": str(prof)})
+    assert got == prof
+
+
+def test_profiles_root_falls_back_to_the_linux_user_config(tmp_path):
+    # An AppImage has no readable resources/ beside it, but Bambu Studio writes
+    # its system profiles to ~/.config/BambuStudio/system/BBL after first run.
+    cfg = tmp_path / ".config" / "BambuStudio" / "system" / "BBL"
+    cfg.mkdir(parents=True)
+    got = profiles_root(str(tmp_path / "Bambu.AppImage"),
+                        env={}, system="linux", home=tmp_path)
+    assert got == cfg
+
+
+def test_profiles_root_prefers_beside_the_exe_when_it_exists(tmp_path):
+    beside = tmp_path / "resources" / "profiles" / "BBL"
+    beside.mkdir(parents=True)
+    exe = tmp_path / "bambu-studio"
+    got = profiles_root(str(exe), env={}, system="linux", home=tmp_path)
+    assert got == beside
+
+
+def test_profiles_root_returns_the_beside_path_when_nothing_exists(tmp_path):
+    # Graceful: ProfileIndex.load tolerates a missing dir (slicing disabled),
+    # so returning the primary candidate is fine even when it doesn't exist.
+    exe = tmp_path / "bambu-studio"
+    got = profiles_root(str(exe), env={}, system="linux", home=tmp_path)
+    assert got.as_posix().endswith("resources/profiles/BBL")
+
+
 def test_build_argv_has_the_verified_shape():
     argv = build_argv("bs.exe", "model.stl", "m.json", "p.json", "f.json",
                       "out.gcode.3mf", "workdir")
