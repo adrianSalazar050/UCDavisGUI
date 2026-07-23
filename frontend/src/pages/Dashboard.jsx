@@ -48,8 +48,13 @@ export default function Dashboard({ printers, selected }) {
         ) : (
           <Card title="Camera">
             <div className="camera-placeholder">
-              No camera on this printer — mark it as the capture printer on the
-              Overview page if the webcam points at it.
+              {s.detection_available === false
+                ? /* Same trap as the Detection page: with no detector wired
+                     (the desktop build), marking a capture printer would not
+                     produce a camera view, so don't advise it. */
+                  "The live camera view isn’t available in this build."
+                : "No camera on this printer — mark it as the capture printer " +
+                  "on the Overview page if the webcam points at it."}
             </div>
           </Card>
         )}

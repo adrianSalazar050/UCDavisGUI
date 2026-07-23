@@ -223,11 +223,15 @@ def make_frame(runs_dir, run="20260716T000000_x", layer=7):
 def test_list_printers_envelope(tmp_path):
     r = client(tmp_path).get("/api/printers")
     assert r.status_code == 200
+    # detection_available rides on every summary so the client can tell
+    # "no capture printer yet" from "this build has no detector" (see
+    # _with_detection); this client is built with detection=None.
     assert r.json() == {"printers": [{"serial": "S1", "gcode_state": "IDLE",
                                       "connection": "ok",
                                       "report_age_s": 1.0,
                                       "bed_type": "Textured PEI Plate",
-                                      "nozzle": "0.4"}]}
+                                      "nozzle": "0.4",
+                                      "detection_available": False}]}
 
 
 def test_list_printers_empty(tmp_path):
@@ -1297,3 +1301,25 @@ def test_lifespan_does_not_leak_a_component_if_a_later_start_raises():
         with TestClient(app):
             pass
     assert events == ["detection-start", "detection-stop"]
+
+
+# --- detection availability ------------------------------------------------
+# BUG reported 2026-07-23 from the packaged desktop app: the Detection page said
+# "Mark <printer> as the capture printer on the Overview page", but doing so
+# changed nothing. The desktop launcher passes detection=None (torch is
+# deliberately out of the bundle), and _with_detection then attached NO
+# detection key at all -- so the client could not tell "no capture printer yet"
+# from "this build has no detector", and sent the user on an impossible errand.
+
+def test_summaries_flag_detection_as_unavailable_when_it_is_disabled(tmp_path):
+    c, _ = det_client(tmp_path, None)
+    p = c.get("/api/printers").json()["printers"][0]
+    assert p["detection_available"] is False
+    # and no detection object is invented for a server that has no detector
+    assert p.get("detection") is None
+
+
+def test_summaries_flag_detection_as_available_when_it_is_wired(tmp_path):
+    c, _ = det_client(tmp_path, FakeDetection())
+    p = c.get("/api/printers").json()["printers"][0]
+    assert p["detection_available"] is True

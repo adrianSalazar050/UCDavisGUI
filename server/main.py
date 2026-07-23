@@ -141,11 +141,24 @@ def _comparable(printers: list[dict]) -> list[dict]:
 
 def _with_detection(printers: list[dict], detection) -> list[dict]:
     """Attach a `detection` object to each summary (None unless it's the
-    capture printer). Detection state lives in detection.py, not the service."""
-    if detection is None:
-        return printers
+    capture printer), plus `detection_available`: whether this SERVER has a
+    detector wired at all. Detection state lives in detection.py, not the
+    service.
+
+    The flag exists because `detection=None` is a real deployment, not just a
+    test seam: the desktop build passes it (torch/ultralytics are deliberately
+    out of that bundle). Without the flag the client cannot tell "you haven't
+    marked a capture printer yet" from "this build has no detector" -- both
+    just look like a missing detection object. Reported 2026-07-23 from the
+    packaged app: the Detection page told the user to mark a capture printer on
+    the Overview page, they did, and nothing changed, because marking one
+    cannot conjure a detector that was never bundled.
+    """
+    available = detection is not None
     for p in printers:
-        p["detection"] = detection.snapshot(p.get("serial"))
+        p["detection_available"] = available
+        if available:
+            p["detection"] = detection.snapshot(p.get("serial"))
     return printers
 
 

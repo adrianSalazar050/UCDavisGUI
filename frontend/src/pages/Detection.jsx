@@ -87,6 +87,24 @@ export default function Detection({ printers, selected }) {
   if (!s) {
     return <PageFrame><div className="empty">No printer selected.</div></PageFrame>;
   }
+  // Two different reasons there is no detection object, and they need
+  // different advice. detection_available === false means the SERVER has no
+  // detector wired at all -- the desktop build ships without it -- so telling
+  // someone to mark a capture printer would send them after something that
+  // cannot help (reported 2026-07-23). Only when a detector exists is "you
+  // haven't marked the capture printer yet" the real answer.
+  if (s.detection_available === false) {
+    return (
+      <PageFrame>
+        <div className="empty">
+          Failure detection isn’t available in this build. The desktop app ships
+          without the YOLO detector to keep the download small — run the full
+          server (<code>python -m server</code>) to use detection and the live
+          camera view.
+        </div>
+      </PageFrame>
+    );
+  }
   if (!d) {
     return (
       <PageFrame>
