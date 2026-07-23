@@ -54,6 +54,93 @@ def test_flatten_raises_on_an_inheritance_cycle():
         flatten_profile("a", index)
 
 
+# --- include resolution ---
+# Bambu splits a machine's big gcode blocks (start/end/layer-change/timelapse/
+# change-filament) into separate "template" profiles pulled in via `include`,
+# and the main profile does NOT define those fields itself. Resolving only
+# `inherits` drops all of them and falls back to the generic base gcode.
+# Measured 2026-07-23: that shipped M109 S205 instead of the filament's 220 C
+# and a print that ran one layer then halted, because the generic start omits
+# the A1's real bed-mesh/first-layer init.
+
+def test_flatten_merges_an_included_profiles_keys():
+    index = {
+        "base": {"name": "base", "walls": "2"},
+        "tmpl": {"name": "tmpl", "machine_start_gcode": "REAL"},
+        "kid": {"name": "kid", "inherits": "base", "include": ["tmpl"]},
+    }
+    out = flatten_profile("kid", index)
+    assert out["machine_start_gcode"] == "REAL"
+    assert out["walls"] == "2"
+
+
+def test_include_overrides_inherited_keys():
+    # THE load-bearing property: the included template IS the machine's real
+    # gcode and must win over the generic one the inherit chain provides.
+    index = {
+        "generic": {"name": "generic", "machine_start_gcode": "GENERIC S205"},
+        "tmpl": {"name": "tmpl", "machine_start_gcode": "BAMBU S220"},
+        "kid": {"name": "kid", "inherits": "generic", "include": ["tmpl"]},
+    }
+    assert flatten_profile("kid", index)["machine_start_gcode"] == "BAMBU S220"
+
+
+def test_own_keys_override_an_included_profile():
+    index = {
+        "tmpl": {"name": "tmpl", "layer_gcode": "FROM_TEMPLATE"},
+        "kid": {"name": "kid", "include": ["tmpl"], "layer_gcode": "OWN"},
+    }
+    assert flatten_profile("kid", index)["layer_gcode"] == "OWN"
+
+
+def test_include_does_not_leak_the_templates_metadata():
+    # A template's own name/instantiation must not shadow the including
+    # profile's identity.
+    index = {
+        "tmpl": {"name": "tmpl", "instantiation": "false",
+                 "machine_start_gcode": "REAL"},
+        "kid": {"name": "kid", "include": ["tmpl"]},
+    }
+    out = flatten_profile("kid", index)
+    assert out["name"] == "kid"
+    assert out.get("instantiation") != "false" or "instantiation" not in out
+    assert out["machine_start_gcode"] == "REAL"
+
+
+def test_multiple_includes_merge_in_order():
+    index = {
+        "a": {"name": "a", "machine_start_gcode": "START"},
+        "b": {"name": "b", "machine_end_gcode": "END"},
+        "kid": {"name": "kid", "include": ["a", "b"]},
+    }
+    out = flatten_profile("kid", index)
+    assert out["machine_start_gcode"] == "START"
+    assert out["machine_end_gcode"] == "END"
+
+
+def test_a_single_string_include_is_accepted():
+    index = {
+        "tmpl": {"name": "tmpl", "machine_start_gcode": "REAL"},
+        "kid": {"name": "kid", "include": "tmpl"},
+    }
+    assert flatten_profile("kid", index)["machine_start_gcode"] == "REAL"
+
+
+def test_flatten_raises_on_a_missing_include():
+    # Loud, not silent: an unresolved template drops the entire machine start
+    # gcode back to the generic fallback, which is exactly the dangerous
+    # wrong-file case this whole mechanism exists to prevent.
+    with pytest.raises(SliceError, match="gone"):
+        flatten_profile("kid", {"kid": {"name": "kid", "include": ["gone"]}})
+
+
+def test_flatten_raises_on_an_include_cycle():
+    index = {"a": {"name": "a", "include": ["b"]},
+             "b": {"name": "b", "include": ["a"]}}
+    with pytest.raises(SliceError, match="cycle"):
+        flatten_profile("a", index)
+
+
 def test_profile_index_keys_on_the_name_field_not_the_filename(tmp_path):
     # Verified on the real tree: name and filename are not always the same.
     (tmp_path / "machine").mkdir()

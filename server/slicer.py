@@ -37,12 +37,34 @@ class SlicerNotFound(SliceError):
     """
 
 
+# Bookkeeping keys carried on a profile for identity, not print settings. When
+# we pull the fields out of an *included* template (below) we take its gcode and
+# config but not these, so a template called "...template machine_start_gcode"
+# can't shadow the including profile's own name/type.
+_INCLUDE_METADATA = frozenset((
+    "name", "type", "from", "setting_id", "instantiation", "include",
+))
+
+
 def flatten_profile(name: str, index: dict) -> dict:
-    """Resolve a vendor profile's `inherits` chain into a self-contained dict.
+    """Resolve a vendor profile's `inherits` chain AND its `include` templates
+    into a self-contained dict.
 
     Vendor profiles are PARTIALS. "Bambu Lab A1 0.4 nozzle" carries 39 keys and
     inherits the other ~70; handing that straight to --load-settings fails
     validation. Child keys win over parent keys.
+
+    On top of that, Bambu splits a machine's large gcode blocks -- start, end,
+    layer-change, timelapse, change-filament -- into separate "template"
+    profiles pulled in via an `include` list, and the main profile does NOT
+    define those fields itself. Resolving only `inherits` therefore drops every
+    one of them and falls back to fdm_machine_common's GENERIC start gcode,
+    which hardcodes M109 S205 and omits the A1's real bed-mesh and first-layer
+    init. Measured 2026-07-23: that sliced PLA at 205 C instead of the
+    filament's 220 C and produced a print that ran a single layer and then
+    halted. So `include` is not optional -- it carries the machine's actual
+    gcode. Included keys override inherited ones (they ARE the real gcode) and
+    are in turn overridden by the profile's own keys.
 
     Pure: dict-of-dicts in, dict out, so it tests without a slicer installed.
     """
@@ -52,14 +74,26 @@ def flatten_profile(name: str, index: dict) -> dict:
 def _flatten(name: str, index: dict, seen: tuple) -> dict:
     if name in seen:
         raise SliceError(
-            f"inheritance cycle in slicer profiles: {' -> '.join(seen + (name,))}")
+            f"cycle in slicer profiles: {' -> '.join(seen + (name,))}")
     try:
         node = index[name]
     except KeyError:
         raise SliceError(f"unknown slicer profile: {name!r}") from None
     parent = node.get("inherits")
     out = dict(_flatten(parent, index, seen + (name,))) if parent else {}
-    out.update({k: v for k, v in node.items() if k != "inherits"})
+    # Includes sit between inherited (lowest) and the node's own keys (highest).
+    # A missing template raises rather than degrading silently: an unresolved
+    # include drops the whole machine start gcode back to the generic fallback,
+    # which is the exact dangerous wrong-file case this exists to prevent.
+    includes = node.get("include") or []
+    if isinstance(includes, str):
+        includes = [includes]
+    for inc in includes:
+        included = _flatten(inc, index, seen + (name,))
+        out.update({k: v for k, v in included.items()
+                    if k not in _INCLUDE_METADATA})
+    out.update({k: v for k, v in node.items()
+                if k not in ("inherits", "include")})
     return out
 
 
