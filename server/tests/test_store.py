@@ -7,8 +7,9 @@ import tempfile
 
 import pytest
 
-from server.store import (MemoryStore, PrinterConfig, PrinterStore,
-                          guess_model_id, model_mismatch)
+from server.store import (BED_TYPES, DEFAULT_BED_TYPE, MemoryStore,
+                          PrinterConfig, PrinterStore, guess_model_id,
+                          model_mismatch)
 
 
 def cfg(serial="0300CA633005010", host="192.168.137.2", code="test-access-code",
@@ -423,10 +424,24 @@ def test_bed_type_defaults_to_textured_pei_plate():
 
 def test_bed_type_accepts_the_five_known_plates():
     for b in ("Cool Plate", "Textured PEI Plate", "High Temp Plate",
-             "Engineering Plate", "Cool Plate (SuperTack)"):
+             "Engineering Plate", "Supertack Plate"):
         c = PrinterConfig.from_dict(
             {"serial": "s", "host": "h", "access_code": "a", "bed_type": b})
         assert c.bed_type == b
+
+
+def test_bed_type_uses_the_slicers_supertack_name_not_the_marketing_one():
+    # MEASURED 2026-07-23, and the reason this test exists: an unrecognised
+    # curr_bed_type does not error, it silently becomes Cool Plate (35 C).
+    # "Cool Plate (SuperTack)" is the name on the box and was what this list
+    # shipped with -- it sliced at 35 C while the UI said SuperTack. The
+    # slicer's own name is "Supertack Plate" and it gives the correct 45 C.
+    # Every value in BED_TYPES must be a name the SLICER knows.
+    assert "Supertack Plate" in BED_TYPES
+    assert "Cool Plate (SuperTack)" not in BED_TYPES
+    assert PrinterConfig.from_dict(
+        {"serial": "s", "host": "h", "access_code": "a",
+         "bed_type": "Cool Plate (SuperTack)"}).bed_type == DEFAULT_BED_TYPE
 
 
 def test_bed_type_degrades_to_textured_pei_plate_on_junk():

@@ -191,11 +191,11 @@ def test_the_printers_configured_bed_type_reaches_the_runner(tmp_path):
 def test_bed_type_is_surfaced_on_the_job_record(tmp_path):
     # Alongside material/supports, so the UI and the API can show what a job
     # was actually sliced for.
-    reg = FakeRegistry(bed_type="Cool Plate (SuperTack)")
+    reg = FakeRegistry(bed_type="Supertack Plate")
     c = make(tmp_path, registry=reg)
     job_id = c.submit("AAA", "p.stl", b"x", "standard", "PLA", False)
     c.run_once()
-    assert c.get(job_id)["bed_type"] == "Cool Plate (SuperTack)"
+    assert c.get(job_id)["bed_type"] == "Supertack Plate"
 
 
 def test_jobs_are_listed_newest_first_and_filtered_by_serial(tmp_path):

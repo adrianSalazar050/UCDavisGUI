@@ -43,5 +43,8 @@ export const BED_TYPES = [
   "Textured PEI Plate",
   "High Temp Plate",
   "Engineering Plate",
-  "Cool Plate (SuperTack)",
+  // "Supertack Plate", not the "Cool Plate (SuperTack)" marketing name --
+  // the slicer silently treats an unrecognised plate as Cool Plate (35 C),
+  // so a wrong string here is a wrong bed temperature with no error anywhere.
+  "Supertack Plate",
 ];

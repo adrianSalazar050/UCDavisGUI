@@ -564,8 +564,8 @@ def test_bed_type_survives_persistence():
     store = MemoryStore()
     r = reg(store)
     r.add(host="h", serial="S1", access_code="c")
-    r.update("S1", host="h", bed_type="Cool Plate (SuperTack)")
-    assert store.load()[0].bed_type == "Cool Plate (SuperTack)"
+    r.update("S1", host="h", bed_type="Supertack Plate")
+    assert store.load()[0].bed_type == "Supertack Plate"
 
 
 # ---------------- reconnect ----------------

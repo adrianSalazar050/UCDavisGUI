@@ -84,8 +84,22 @@ DEFAULT_NOZZLE = "0.4"
 # cannot report which plate is physically installed any more than it can
 # report its own model or nozzle diameter, so this can only ever be
 # CONFIGURED, never detected.
+# EVERY string here must be one the slicer itself recognises, because an
+# unrecognised curr_bed_type does NOT error -- it silently falls back to
+# Cool Plate, i.e. to 35 C. "Cool Plate (SuperTack)" (the marketing name, and
+# what this tuple said at first) is exactly such a string: measured
+# 2026-07-23, it produced `curr_bed_type = Cool Plate` and M190 S35 while the
+# UI cheerfully reported SuperTack. The slicer's own name is "Supertack
+# Plate" (extracted from BambuStudio.dll alongside the other four), which
+# round-trips and gives the correct M190 S45.
+#
+# All five were verified by slicing the same cube once per plate and reading
+# the M190 back out: Cool 35, Supertack 45, Textured PEI 65, High Temp 65,
+# and Engineering refuses PLA outright (its PLA temp is 0) -- a loud failure,
+# which is the right behaviour. If you add a plate, verify it the same way;
+# do not trust the marketing name.
 BED_TYPES = ("Cool Plate", "Textured PEI Plate", "High Temp Plate",
-             "Engineering Plate", "Cool Plate (SuperTack)")
+             "Engineering Plate", "Supertack Plate")
 # The A1 in this lab has a Textured PEI Plate (confirmed by the user
 # 2026-07-21/22), and that is also what the A1 ships with -- so a printer
 # added with bed_type never set gets the plate that's actually there, rather
