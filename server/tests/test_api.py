@@ -62,7 +62,8 @@ class FakeService:
 
 class FakeRegistry:
     def __init__(self, services=None, duplicate=False, sd_file=None,
-                 sd_file_error=None, sd_upload_error=None, model_id=""):
+                 sd_file_error=None, sd_upload_error=None, model_id="",
+                 bed_type="Textured PEI Plate"):
         self._services = {s.serial: s for s in (services or [])}
         self.duplicate = duplicate
         self.added = []
@@ -75,6 +76,7 @@ class FakeRegistry:
         self.upload_sd_file_calls = []
         self.reconnect_calls = []
         self._model_id = model_id
+        self._bed_type = bed_type
 
     def printer_model(self, serial):
         # Mirrors PrinterRegistry.printer_model: "" for unknown printer or
@@ -82,6 +84,13 @@ class FakeRegistry:
         if serial not in self._services:
             return ""
         return self._model_id
+
+    def printer_bed_type(self, serial):
+        # Mirrors PrinterRegistry.printer_bed_type: the configured default
+        # even for an unknown printer -- never "" (see store.DEFAULT_BED_TYPE).
+        if serial not in self._services:
+            return "Textured PEI Plate"
+        return self._bed_type
 
     def summaries(self):
         return [s.summary() for s in self._services.values()]
@@ -108,7 +117,7 @@ class FakeRegistry:
         return True
 
     def update(self, serial, host=None, access_code=None, name="",
-               capture=False, model_id=None):
+               capture=False, model_id=None, bed_type=None):
         if serial not in self._services:
             return None
         if not (host and host.strip()):
@@ -116,6 +125,8 @@ class FakeRegistry:
         svc = self._services[serial]
         if model_id is not None:
             self._model_id = model_id
+        if bed_type is not None:
+            self._bed_type = bed_type
         self.updated.append((serial, host, access_code, name, capture))
         return svc.summary()
 
@@ -204,7 +215,8 @@ def test_list_printers_envelope(tmp_path):
     assert r.status_code == 200
     assert r.json() == {"printers": [{"serial": "S1", "gcode_state": "IDLE",
                                       "connection": "ok",
-                                      "report_age_s": 1.0}]}
+                                      "report_age_s": 1.0,
+                                      "bed_type": "Textured PEI Plate"}]}
 
 
 def test_list_printers_empty(tmp_path):
@@ -312,6 +324,30 @@ def test_edit_printer_missing_host_422(tmp_path):
     r = client(tmp_path, FakeRegistry([FakeService("S1")])).put(
         "/api/printers/S1", json={})
     assert r.status_code == 422  # pydantic rejects it before the route runs
+
+
+def test_edit_printer_accepts_and_persists_bed_type(tmp_path):
+    # This is the whole point of the route change: the field that fixes the
+    # measured 35 C-vs-65 C defect must actually be savable from the Edit
+    # form, not just from a hand-edited printers.json.
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).put("/api/printers/S1", json={
+        "host": "1.2.3.4", "bed_type": "Cool Plate"})
+    assert r.status_code == 200
+    assert r.json()["bed_type"] == "Cool Plate"
+    # Persists, not just echoed back: a fresh list reflects it too, which is
+    # what lets EditPrinterForm show the ACTUAL current plate on reopen
+    # instead of always showing the default and silently overwriting a
+    # deliberately-chosen plate on the next unrelated save.
+    r2 = client(tmp_path, reg).get("/api/printers")
+    assert r2.json()["printers"][0]["bed_type"] == "Cool Plate"
+
+
+def test_edit_printer_omitted_bed_type_keeps_the_current_one(tmp_path):
+    reg = FakeRegistry([FakeService("S1")], bed_type="High Temp Plate")
+    r = client(tmp_path, reg).put("/api/printers/S1", json={"host": "1.2.3.4"})
+    assert r.status_code == 200
+    assert r.json()["bed_type"] == "High Temp Plate"
 
 
 def test_edit_printer_blank_access_code_defaults_to_keep(tmp_path):

@@ -400,3 +400,48 @@ def test_nozzle_survives_a_save_load_round_trip(tmp_path):
     store.save([PrinterConfig(serial="s", host="h", access_code="a",
                               nozzle="0.6")])
     assert store.load()[0].nozzle == "0.6"
+
+
+# ---------------- bed type ----------------
+# MEASURED 2026-07-22: with curr_bed_type never set, Bambu Studio defaults to
+# Cool Plate, whose PLA temp is 35 C -- the gcode we produced carried
+# `M190 S35`. This lab's A1 has a Textured PEI Plate, which needs 65 C for
+# PLA. On real hardware: nozzle heated correctly to 205 C, the print reached
+# layer 2/100, then stalled at 5% with an HMS warning active -- consistent
+# with a failed first layer from a cold bed. Slicing the same cube twice
+# confirmed the fix with no hardware involved: curr_bed_type='Cool Plate' ->
+# M190 S35, curr_bed_type='Textured PEI Plate' -> M190 S65.
+
+def test_bed_type_defaults_to_textured_pei_plate():
+    # The A1 ships with a Textured PEI Plate, and that's what this lab's
+    # printer actually has (confirmed 2026-07-22) -- so an unconfigured
+    # printer must default to the plate that's really installed, not to
+    # Bambu Studio's own Cool Plate default that caused today's failure.
+    c = PrinterConfig(serial="s", host="h", access_code="a")
+    assert c.bed_type == "Textured PEI Plate"
+
+
+def test_bed_type_accepts_the_five_known_plates():
+    for b in ("Cool Plate", "Textured PEI Plate", "High Temp Plate",
+             "Engineering Plate", "Cool Plate (SuperTack)"):
+        c = PrinterConfig.from_dict(
+            {"serial": "s", "host": "h", "access_code": "a", "bed_type": b})
+        assert c.bed_type == b
+
+
+def test_bed_type_degrades_to_textured_pei_plate_on_junk():
+    # Same rule as nozzle: a bad value degrades to the safe default rather
+    # than raising. A wrong plate slices for the wrong temperature (this is
+    # the exact defect being fixed here), so the default has to be the plate
+    # actually installed, not the last thing typed.
+    for bad in ("cool plate", "", None, 35, ["Cool Plate"], "Cool Plate!"):
+        c = PrinterConfig.from_dict(
+            {"serial": "s", "host": "h", "access_code": "a", "bed_type": bad})
+        assert c.bed_type == "Textured PEI Plate"
+
+
+def test_bed_type_survives_a_save_load_round_trip(tmp_path):
+    store = PrinterStore(tmp_path / "printers.json")
+    store.save([PrinterConfig(serial="s", host="h", access_code="a",
+                              bed_type="Cool Plate")])
+    assert store.load()[0].bed_type == "Cool Plate"

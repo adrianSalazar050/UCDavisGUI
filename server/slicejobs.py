@@ -190,6 +190,12 @@ class SliceCoordinator:
             "name": output_name(filename), "source_name": filename,
             "preset": preset["id"], "preset_label": preset["label"],
             "material": material, "supports": bool(supports),
+            # Filled in by _do(), same as seconds/grams -- the printer's
+            # CONFIGURED plate (registry.printer_bed_type) is what actually
+            # gets patched into curr_bed_type, so this is read fresh there
+            # rather than captured now, exactly like model_id is re-read in
+            # _do() rather than reused from submit() time.
+            "bed_type": None,
             "created": self._clock(), "error": None,
             "seconds": None, "grams": None, "sd_path": None,
         }
@@ -294,8 +300,18 @@ class SliceCoordinator:
         process = flatten_profile(preset["process"], self._index)
         filament = flatten_profile(filament_name, self._index)
 
+        # MEASURED 2026-07-22: with curr_bed_type unset, Bambu Studio
+        # defaults to Cool Plate (35 C for PLA); this lab's A1 has a Textured
+        # PEI Plate (65 C) and a print with no bed adhesion stalled at 5%
+        # with an HMS warning. The printer cannot report which plate is
+        # fitted (see store.py's BED_TYPES), so it must be read from the
+        # printer's CONFIGURATION, not assumed -- same reasoning as
+        # printer_model above.
+        bed_type = self._registry.printer_bed_type(serial)
+        self._set(job_id, bed_type=bed_type)
+
         produced = self._run(self._exe, model_path, machine, process, filament,
-                             work, supports=supports)
+                             work, supports=supports, bed_type=bed_type)
         sliced = pathlib.Path(produced).read_bytes()
 
         meta = self._parse(sliced)

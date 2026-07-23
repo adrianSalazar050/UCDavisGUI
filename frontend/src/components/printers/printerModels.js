@@ -30,3 +30,18 @@ export const guessModelId = (serial) => {
     .find(([prefix]) => serial.startsWith(prefix));
   return hit ? hit[1] : "";
 };
+
+// Mirrors BED_TYPES in server/store.py exactly -- the server validates
+// against that list and degrades anything else to DEFAULT_BED_TYPE, this
+// list only populates the dropdown. Unlike PRINTER_MODELS there is no
+// "Unknown" entry: every printer has a plate actually installed, and a
+// wrong/missing curr_bed_type is the real, measured defect this field
+// exists to fix (Cool Plate's 35 C vs the Textured PEI Plate's 65 C this
+// lab's A1 needs for PLA -- see PrinterConfig.bed_type in server/store.py).
+export const BED_TYPES = [
+  "Cool Plate",
+  "Textured PEI Plate",
+  "High Temp Plate",
+  "Engineering Plate",
+  "Cool Plate (SuperTack)",
+];

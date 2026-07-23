@@ -18,6 +18,8 @@ import os
 import pathlib
 import subprocess
 
+from .store import DEFAULT_BED_TYPE
+
 log = logging.getLogger("server.slicer")
 
 
@@ -167,6 +169,7 @@ OUTPUT_NAME = "sliced.gcode.3mf"
 
 def run_slice(exe, model_path, machine: dict, process: dict, filament: dict,
               out_dir, *, supports: bool = False,
+              bed_type: str = DEFAULT_BED_TYPE,
               timeout_s: float = SLICE_TIMEOUT_S,
               runner=subprocess.run) -> pathlib.Path:
     """Slice `model_path` into out_dir/sliced.gcode.3mf and return its path.
@@ -186,6 +189,19 @@ def run_slice(exe, model_path, machine: dict, process: dict, filament: dict,
     # Pinned rather than assumed: the A1 vendor profile already defaults to
     # tree(auto), but a future profile might not, and the UI promises trees.
     process["support_type"] = "tree(auto)"
+    # MEASURED 2026-07-22: curr_bed_type left unset defaults to Cool Plate in
+    # Bambu Studio, whose PLA temp is 35 C (cool_plate_temp in the flattened
+    # filament profile). This lab's A1 has a Textured PEI Plate, which needs
+    # 65 C (textured_plate_temp) -- PLA does not adhere at 35 C. A CLI-sliced
+    # cube with this key unset heated the nozzle correctly (205 C), reached
+    # layer 2/100, then stalled at 5% with an HMS warning: a failed first
+    # layer from a cold bed. The gcode carried `M190 S35`. Slicing the same
+    # cube twice confirmed the fix: curr_bed_type='Cool Plate' -> M190 S35,
+    # curr_bed_type='Textured PEI Plate' -> M190 S65. Defaulting the
+    # parameter itself to DEFAULT_BED_TYPE (not leaving the key unset) is
+    # deliberate: a caller that forgets to pass bed_type must still get the
+    # plate that's actually installed, not reproduce this exact defect.
+    process["curr_bed_type"] = bed_type
 
     paths = {}
     for kind, cfg in (("machine", machine), ("process", process),

@@ -62,6 +62,36 @@ SERIAL_PREFIX_MODELS = {
 NOZZLES = ("0.2", "0.4", "0.6", "0.8")
 DEFAULT_NOZZLE = "0.4"
 
+# Build plates Bambu Studio recognises via the process key curr_bed_type.
+# Exact strings, matched literally -- Bambu Studio validates this key against
+# its own fixed vocabulary and there is no reason to expect it tolerates
+# case or spelling variants any more than curr_bed_type being ABSENT does.
+#
+# WHY THIS FIELD EXISTS AT ALL (measured 2026-07-22): the automatic-slicing
+# feature never set curr_bed_type, so Bambu Studio defaulted to Cool Plate --
+# whose PLA temperature, per the flattened "Generic PLA @BBL A1" filament
+# profile, is cool_plate_temp = 35. This lab's A1 has a Textured PEI Plate
+# (textured_plate_temp = 65), and PLA does not adhere at 35 C. On real
+# hardware a CLI-sliced cube started correctly, heated the nozzle to the
+# right 205 C, reached layer 2 of 100 -- then stalled at 5% with an HMS
+# warning active, consistent with a failed first layer from a cold bed. The
+# gcode we produced carried `M190 S35`. Slicing the same cube twice (no
+# hardware involved) confirmed the fix in isolation:
+#   curr_bed_type = 'Cool Plate'          -> M190 S35
+#   curr_bed_type = 'Textured PEI Plate'  -> M190 S65
+#
+# Exactly the same shape of problem as NOZZLES/model_id above: the printer
+# cannot report which plate is physically installed any more than it can
+# report its own model or nozzle diameter, so this can only ever be
+# CONFIGURED, never detected.
+BED_TYPES = ("Cool Plate", "Textured PEI Plate", "High Temp Plate",
+             "Engineering Plate", "Cool Plate (SuperTack)")
+# The A1 in this lab has a Textured PEI Plate (confirmed by the user
+# 2026-07-21/22), and that is also what the A1 ships with -- so a printer
+# added with bed_type never set gets the plate that's actually there, rather
+# than Bambu Studio's own Cool Plate default that caused today's failure.
+DEFAULT_BED_TYPE = "Textured PEI Plate"
+
 
 def model_name(model_id: str) -> str:
     """Friendly name for a model id, or the id itself when unknown. Never
@@ -154,6 +184,13 @@ class PrinterConfig:
     # nozzle slices for the wrong hardware, so an unparseable value must land
     # on the common case, not refuse to load the printer.
     nozzle: str = DEFAULT_NOZZLE
+    # Installed BUILD PLATE, matching curr_bed_type's exact accepted strings
+    # (see BED_TYPES above for the measured 35 C-vs-65 C consequence of
+    # getting this wrong). Degrades to DEFAULT_BED_TYPE rather than raising,
+    # same posture as nozzle: a wrong plate slices for the wrong temperature,
+    # so an unparseable value must land on the plate actually installed here,
+    # not refuse to load the printer.
+    bed_type: str = DEFAULT_BED_TYPE
 
     def __post_init__(self) -> None:
         self.serial = (self.serial or "").strip()
@@ -216,12 +253,15 @@ class PrinterConfig:
         nozzle = d.get("nozzle", DEFAULT_NOZZLE)
         if nozzle not in NOZZLES:  # covers wrong type, "0.5", "", None
             nozzle = DEFAULT_NOZZLE
+        bed_type = d.get("bed_type", DEFAULT_BED_TYPE)
+        if bed_type not in BED_TYPES:  # covers wrong type, "cool plate", "", None
+            bed_type = DEFAULT_BED_TYPE
         return cls(serial=d["serial"], host=d["host"],
                    access_code=d["access_code"], name=name, capture=capture,
                    camera_source=camera_source, camera_index=camera_index,
                    conf=conf, armed_classes=armed_classes,
                    detect_enabled=detect_enabled, roi=normalize_roi(d.get("roi")),
-                   model_id=model_id, nozzle=nozzle)
+                   model_id=model_id, nozzle=nozzle, bed_type=bed_type)
 
 
 class PrinterStore:

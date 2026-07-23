@@ -171,6 +171,37 @@ def test_run_slice_leaves_supports_off_by_default(tmp_path):
     assert written["enable_support"] == "0"
 
 
+# ---------------- bed type ----------------
+# MEASURED 2026-07-22: with curr_bed_type never set, Bambu Studio defaults to
+# Cool Plate (35 C for PLA); this lab's A1 has a Textured PEI Plate (65 C)
+# and a print with no bed adhesion stalled at 5% with an HMS warning. See
+# store.py's BED_TYPES for the full writeup.
+
+def test_run_slice_patches_curr_bed_type(tmp_path):
+    run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+              tmp_path, bed_type="Textured PEI Plate",
+              runner=_fake_runner(tmp_path, "sliced.gcode.3mf"))
+    written = json.loads((tmp_path / "process.json").read_text(encoding="utf-8"))
+    assert written["curr_bed_type"] == "Textured PEI Plate"
+
+
+def test_run_slice_defaults_curr_bed_type_to_the_textured_pei_plate(tmp_path):
+    # A caller that forgets to pass bed_type must still get the plate that's
+    # actually installed in this lab, not Bambu Studio's own Cool Plate
+    # default that caused today's failure.
+    run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+              tmp_path, runner=_fake_runner(tmp_path, "sliced.gcode.3mf"))
+    written = json.loads((tmp_path / "process.json").read_text(encoding="utf-8"))
+    assert written["curr_bed_type"] == "Textured PEI Plate"
+
+
+def test_run_slice_does_not_mutate_the_callers_process_dict_with_bed_type(tmp_path):
+    run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
+              tmp_path, bed_type="Cool Plate",
+              runner=_fake_runner(tmp_path, "sliced.gcode.3mf"))
+    assert "curr_bed_type" not in PROCESS
+
+
 def test_run_slice_raises_with_stderr_when_the_slicer_fails(tmp_path):
     runner = _fake_runner(tmp_path, "sliced.gcode.3mf", returncode=2,
                           stderr="got error when validate: boom")

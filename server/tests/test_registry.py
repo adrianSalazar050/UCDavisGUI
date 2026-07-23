@@ -514,6 +514,60 @@ def test_printer_nozzle_unknown_serial_defaults_to_04():
     assert reg().printer_nozzle("nope") == "0.4"
 
 
+# ---------------- bed type ----------------
+# Unlike nozzle, bed_type IS settable through update() -- see server/main.py's
+# EditPrinter model -- because the whole point of this field is to let a user
+# fix the measured 35 C-vs-65 C defect from the Edit form, not just from a
+# hand-edited printers.json.
+
+def test_update_sets_the_bed_type():
+    r = reg()
+    r.add(host="h", serial="S1", access_code="c")
+    r.update("S1", host="h", bed_type="Cool Plate")
+    assert r.printer_bed_type("S1") == "Cool Plate"
+
+
+def test_update_without_bed_type_keeps_the_current_one():
+    # The edit form round-trips every field; omitting bed_type must not wipe
+    # a plate the user set deliberately -- same reasoning as model_id.
+    r = reg()
+    r.add(host="h", serial="S1", access_code="c")
+    r.update("S1", host="h", bed_type="Cool Plate")
+    r.update("S1", host="h", name="renamed")
+    assert r.printer_bed_type("S1") == "Cool Plate"
+
+
+def test_update_invalid_bed_type_degrades_to_the_default():
+    # Same posture as store.py's from_dict: a wrong plate slices for the
+    # wrong temperature, so an unparseable value must land on the plate
+    # actually installed, not be accepted verbatim.
+    r = reg()
+    r.add(host="h", serial="S1", access_code="c")
+    r.update("S1", host="h", bed_type="cool plate")
+    assert r.printer_bed_type("S1") == "Textured PEI Plate"
+
+
+def test_printer_bed_type_returns_the_configured_value():
+    store = MemoryStore()
+    store.save([PrinterConfig(serial="S1", host="h", access_code="c",
+                              bed_type="High Temp Plate")])
+    r = reg(store)
+    r.load()
+    assert r.printer_bed_type("S1") == "High Temp Plate"
+
+
+def test_printer_bed_type_unknown_serial_defaults_to_textured_pei_plate():
+    assert reg().printer_bed_type("nope") == "Textured PEI Plate"
+
+
+def test_bed_type_survives_persistence():
+    store = MemoryStore()
+    r = reg(store)
+    r.add(host="h", serial="S1", access_code="c")
+    r.update("S1", host="h", bed_type="Cool Plate (SuperTack)")
+    assert store.load()[0].bed_type == "Cool Plate (SuperTack)"
+
+
 # ---------------- reconnect ----------------
 
 def test_reconnect_swaps_service_starts_new_and_stops_old():

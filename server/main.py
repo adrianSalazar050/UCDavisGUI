@@ -87,6 +87,13 @@ class EditPrinter(BaseModel):
     # None = not submitted, keep the stored model. "" = the user picked
     # Unknown. Distinct, so an old client omitting the field can't wipe it.
     model_id: str | None = None
+    # None = not submitted, keep the stored plate. Unlike model_id there is
+    # no "" Unknown sentinel here -- every printer HAS a plate installed, so
+    # registry.update() degrades any value outside store.BED_TYPES to
+    # DEFAULT_BED_TYPE rather than accepting it verbatim (see
+    # PrinterConfig.bed_type for why getting this wrong is a real, measured
+    # print failure: 35 C vs the 65 C this lab's Textured PEI Plate needs).
+    bed_type: str | None = None
 
 
 class DetectionUpdate(BaseModel):
@@ -135,6 +142,30 @@ def _with_detection(printers: list[dict], detection) -> list[dict]:
     return printers
 
 
+def _with_bed_type(printers: list[dict], registry) -> list[dict]:
+    """Attach each printer's CONFIGURED build plate to its summary.
+
+    Deliberately not part of svc.summary()/PrinterService/MockPrinter, the
+    way model_id is: nothing about the live MQTT connection needs bed_type
+    (see PrinterRegistry.printer_bed_type), so growing every service
+    implementation another constructor argument for it would be pure churn.
+    Reading it straight from the registry here, at request time, is the same
+    shape as _with_detection above.
+
+    This has to run everywhere summaries() does (GET /api/printers and both
+    /ws send sites), not just the PUT response: EditPrinterForm prefills its
+    form state from the printer summary it already has, not from the PUT
+    response of a save that hasn't happened yet. Without this, the form
+    would always show DEFAULT_BED_TYPE on open and silently overwrite a
+    deliberately-chosen plate the next time someone saves an unrelated field
+    (name, capture, ...) -- exactly the class of bug access_code's own
+    keep-blank-means-keep-current convention exists to avoid.
+    """
+    for p in printers:
+        p["bed_type"] = registry.printer_bed_type(p.get("serial"))
+    return printers
+
+
 def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
                detection=None, queue=None, slicer=None) -> FastAPI:
@@ -171,7 +202,8 @@ def create_app(registry, runs_dir: pathlib.Path,
 
     @app.get("/api/printers")
     def list_printers():
-        return {"printers": _with_detection(registry.summaries(), detection)}
+        printers = _with_bed_type(registry.summaries(), registry)
+        return {"printers": _with_detection(printers, detection)}
 
     @app.post("/api/printers", status_code=201)
     def add_printer(body: AddPrinter):
@@ -191,11 +223,16 @@ def create_app(registry, runs_dir: pathlib.Path,
             result = registry.update(serial, host=body.host,
                                      access_code=body.access_code,
                                      name=body.name, capture=body.capture,
-                                     model_id=body.model_id)
+                                     model_id=body.model_id,
+                                     bed_type=body.bed_type)
         except ValueError as e:
             raise HTTPException(400, str(e))
         if result is None:
             raise HTTPException(404, "unknown printer")
+        # svc.summary() doesn't carry bed_type (see _with_bed_type) -- attach
+        # it here too so the response the frontend awaits after a save
+        # reflects reality immediately, not just the next /ws tick.
+        result["bed_type"] = registry.printer_bed_type(serial)
         return result
 
     @app.delete("/api/printers/{serial}", status_code=204)
@@ -547,15 +584,18 @@ def create_app(registry, runs_dir: pathlib.Path,
     async def ws(sock: WebSocket):
         try:
             await sock.accept()
-            printers = _with_detection(registry.summaries(), detection)
+            printers = _with_detection(
+                _with_bed_type(registry.summaries(), registry), detection)
             await sock.send_text(json.dumps({"printers": printers}))
             last_sent, last_time = printers, time.monotonic()
             while True:
                 await asyncio.sleep(WS_POLL_S)
                 now = time.monotonic()
-                # summaries() must stay non-blocking: it runs on the event loop
-                # and a stall here would freeze every connected client.
-                printers = _with_detection(registry.summaries(), detection)
+                # summaries()/printer_bed_type must stay non-blocking: this
+                # runs on the event loop and a stall here would freeze every
+                # connected client. Both are quick, lock-guarded dict reads.
+                printers = _with_detection(
+                    _with_bed_type(registry.summaries(), registry), detection)
                 changed = _comparable(printers) != _comparable(last_sent)
                 if changed or now - last_time >= WS_HEARTBEAT_S:
                     await sock.send_text(json.dumps({"printers": printers}))

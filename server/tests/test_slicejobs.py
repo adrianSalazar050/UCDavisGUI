@@ -19,8 +19,10 @@ FAKE_META = {"seconds": 738, "grams": 3.75, "filaments": [],
 
 
 class FakeRegistry:
-    def __init__(self, model_id="N2S", nozzle="0.4"):
+    def __init__(self, model_id="N2S", nozzle="0.4",
+                 bed_type="Textured PEI Plate"):
         self._model_id, self._nozzle = model_id, nozzle
+        self._bed_type = bed_type
         self.uploaded = []
         self.fail_upload = None
 
@@ -32,6 +34,9 @@ class FakeRegistry:
 
     def printer_nozzle(self, serial):
         return self._nozzle
+
+    def printer_bed_type(self, serial):
+        return self._bed_type
 
     def upload_sd_file(self, serial, path, data):
         if self.fail_upload:
@@ -161,6 +166,36 @@ def test_supports_flag_reaches_the_runner(tmp_path):
     c.submit("AAA", "p.stl", b"x", "standard", "PLA", True)
     c.run_once()
     assert seen["supports"] is True
+
+
+def test_the_printers_configured_bed_type_reaches_the_runner(tmp_path):
+    # MEASURED 2026-07-22: run_slice with curr_bed_type unset defaults to
+    # Cool Plate (35 C for PLA); this lab's A1 has a Textured PEI Plate
+    # (65 C) and a print with no bed adhesion stalled at 5% with an HMS
+    # warning. _do() must read the PRINTER'S configured plate via the
+    # registry -- not some hardcoded default -- and pass it through.
+    seen = {}
+
+    def spy(exe, model, machine, process, filament, out_dir, **kw):
+        seen.update(kw)
+        out = pathlib.Path(out_dir) / "sliced.gcode.3mf"
+        out.write_bytes(b"x")
+        return out
+    c = make(tmp_path, run=spy,
+             registry=FakeRegistry(bed_type="High Temp Plate"))
+    c.submit("AAA", "p.stl", b"x", "standard", "PLA", False)
+    c.run_once()
+    assert seen["bed_type"] == "High Temp Plate"
+
+
+def test_bed_type_is_surfaced_on_the_job_record(tmp_path):
+    # Alongside material/supports, so the UI and the API can show what a job
+    # was actually sliced for.
+    reg = FakeRegistry(bed_type="Cool Plate (SuperTack)")
+    c = make(tmp_path, registry=reg)
+    job_id = c.submit("AAA", "p.stl", b"x", "standard", "PLA", False)
+    c.run_once()
+    assert c.get(job_id)["bed_type"] == "Cool Plate (SuperTack)"
 
 
 def test_jobs_are_listed_newest_first_and_filtered_by_serial(tmp_path):
