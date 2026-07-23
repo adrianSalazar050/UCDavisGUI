@@ -1169,6 +1169,42 @@ python -m pytest -q server/tests/test_detection.py
 cd frontend && npm test                 # ROI drag maths (vitest)
 ```
 
+### The desktop app (`desktop/`) — for people who won't run a terminal
+
+Everything above assumes a checkout, a Python env, and a command line. `desktop/`
+packages the same server into an **installable app**: an Electron shell that
+spawns the backend — frozen by PyInstaller, so no Python on the target machine —
+and opens a window on it. Build recipes: `desktop/README.md` (Windows) and
+`desktop/LINUX-BUILD.md` (Mint/AppImage); design:
+`docs/superpowers/specs/2026-07-22-electron-desktop-packaging-design.md`.
+
+```bash
+powershell -ExecutionPolicy Bypass -File desktop\build-windows.ps1   # -> .exe
+bash desktop/build-linux.sh                                          # -> .AppImage (needs Docker)
+```
+
+Three things about it are load-bearing and easy to get wrong if you touch it:
+
+- **It is a narrower app than `python -m server`.** `desktop/launcher.py` passes
+  `detection=None`, so the detector never spawns and torch/ultralytics are
+  excluded from the bundle (`requirements-desktop.txt` also swaps
+  `opencv-python` → `-headless`, which drops the `libGL.so.1` dependency that
+  breaks a plain build inside an AppImage). Scope is the dashboard, the queue,
+  and SD upload. Slicing still auto-enables *if* Bambu Studio is installed.
+- **The port is chosen per launch, never 8000.** `main.js::getFreePort()` binds
+  `:0` and hands the number to the backend via `BAMBU_PORT`. This is not
+  fussiness: with a fixed 8000 the readiness poll happily succeeds against a
+  *dev server already on 8000* and Electron then shows you the wrong backend —
+  observed on the dev box, which is why the fixed port was removed.
+- **State goes to a per-user directory, never beside the executable**
+  (`%APPDATA%\BambuMonitor`, `~/.config/BambuMonitor`), because an AppImage is
+  mounted read-only. `launcher.py::data_dir()` resolves it; Electron passes it
+  as `BAMBU_DATA_DIR`.
+
+Verified 2026-07-22 on Windows: the frozen backend serves standalone, and the
+packaged app spawns it on a free port and reaps it on quit. **The AppImage has
+never been built or run** — the dev box has no Docker (§11).
+
 ---
 
 ## 9. Data and file layout

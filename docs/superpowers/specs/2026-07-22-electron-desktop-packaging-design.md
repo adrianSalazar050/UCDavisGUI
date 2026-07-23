@@ -1,7 +1,19 @@
 # Electron desktop packaging — design
 
+> **STATUS: SHIPPED (2026-07-22), with one part unbuilt.** Written before
+> implementation; `desktop/` now exists — `launcher.py`, `bambu-backend.spec`,
+> `main.js`, and the build scripts. The **Windows installer was built and
+> verified** (frozen backend serves standalone; the packaged app spawns it and
+> reaps it on quit). The **Linux AppImage has never been built or run** — the
+> dev machine has no Docker/WSL — so `build-linux.sh` + `Dockerfile.build` are
+> untested. See `desktop/LINUX-BUILD.md` and `master.md` §8.
+>
+> One thing it got wrong in advance: §4 specified a fixed port 8000. That was
+> replaced by a per-launch free port (`main.js::getFreePort()`) after the fixed
+> port collided with the dev server already on 8000 and the readiness poll
+> silently talked to *that* backend. Do not reinstate a fixed port.
+
 **Date:** 2026-07-22
-**Status:** approved, pre-implementation
 **Scope owner:** adrianSalazar050
 
 ## 1. Goal
@@ -119,10 +131,13 @@ Responsibilities:
 - Create the `BrowserWindow` and `loadURL('http://127.0.0.1:8000')`. Standard
   chrome (menu trimmed to essentials), product name **"Bambu Monitor"**, app
   icon.
-- **Port:** fixed **8000**. If the bind fails (port in use) the backend exits;
-  the readiness poll times out and the user sees the error dialog. An
-  auto-pick-free-port fallback (backend prints the chosen port on stdout,
-  Electron reads it) is a documented future enhancement, not in this pass.
+- **Port:** ~~fixed 8000~~ — **as built, a per-launch free port.**
+  `getFreePort()` binds `:0` on loopback, releases it, and passes the number to
+  the backend as `BAMBU_PORT`. The fixed port was removed during implementation:
+  with the dev server already on 8000, the frozen backend could not bind, exited,
+  and the readiness poll *succeeded against the dev server*, so Electron would
+  have displayed the wrong backend. A per-launch port removes that entire class
+  of failure.
 - **Shutdown:** on `window-all-closed` and `before-quit`, terminate the backend
   child (`SIGTERM`, then kill after a grace period; `taskkill /T` on Windows to
   get the whole tree).
