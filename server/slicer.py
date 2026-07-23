@@ -247,6 +247,67 @@ def profiles_root(exe: str, env=None, system=None, home=None) -> pathlib.Path:
     return beside
 
 
+# Models whose bed slings in Y, so "eject the plate forward" is meaningful.
+# P1/X1 are CoreXY -- their bed only moves in Z, and a Y move there would be
+# nonsense, so they are deliberately absent.
+_BED_SLINGER_MODELS = ("Bambu Lab A1", "Bambu Lab A1 mini")
+
+# Matches the feedrate of the stock end-gcode park move.
+_EJECT_FEEDRATE = 3600
+
+
+def _max_printable_y(machine: dict):
+    """Largest Y in `printable_area` (['0x0','256x0','256x256','0x256'] -> 256),
+    or None if it is missing or unparseable. None means "skip the move" -- we
+    would rather do nothing than send the bed somewhere invented."""
+    area = machine.get("printable_area")
+    if not isinstance(area, (list, tuple)):
+        return None
+    ys = []
+    for point in area:
+        if not isinstance(point, str) or "x" not in point:
+            return None
+        try:
+            ys.append(float(point.split("x", 1)[1]))
+        except ValueError:
+            return None
+    if not ys:
+        return None
+    top = max(ys)
+    return top if top > 0 else None
+
+
+def bed_forward_gcode(machine: dict) -> str | None:
+    """G-code appended to a bed-slinger's end gcode to park the plate FULLY
+    forward, so an automated lifter (or a hand) can reach it. None when the
+    machine isn't an A1-family printer or its bed size can't be read.
+
+    Two measured details make this what it is (2026-07-23):
+
+    * The A1 parks at Y180 on a 256 mm bed -- only ~70% forward. (The mini's
+      Y180 already IS its max, so there the block is a harmless no-op; deriving
+      the value keeps both models on one code path.)
+    * The stock end gcode's last lines are `M400` / `M18 X Y Z`, so anything
+      appended runs AFTER the steppers are disabled and would silently do
+      nothing. Hence the M17 to re-enable them first.
+
+    Only Y moves: the stock gcode parks the toolhead off to the side (X-48 on
+    the A1), and dragging it back over the plate would defeat the purpose.
+    """
+    if machine.get("printer_model") not in _BED_SLINGER_MODELS:
+        return None
+    top = _max_printable_y(machine)
+    if top is None:
+        return None
+    y = f"{top:g}"
+    return ("\n; --- move plate fully forward for removal ---\n"
+            "M17 ; re-enable steppers (the stock end gcode disabled them)\n"
+            "G90 ; absolute, or the move below would be a relative jog\n"
+            f"G1 Y{y} F{_EJECT_FEEDRATE}\n"
+            "M400\n"
+            "M18 X Y Z ; disable again\n")
+
+
 def build_argv(exe, model_path, machine_json, process_json, filament_json,
                out_name, out_dir) -> list:
     """The invocation verified by hand on 2026-07-22.
@@ -310,6 +371,15 @@ def run_slice(exe, model_path, machine: dict, process: dict, filament: dict,
     # deliberate: a caller that forgets to pass bed_type must still get the
     # plate that's actually installed, not reproduce this exact defect.
     process["curr_bed_type"] = bed_type
+
+    # Park the plate fully forward at the end so an automated lifter (or a
+    # hand) can reach it. A no-op for anything that isn't an A1-family
+    # bed-slinger -- see bed_forward_gcode.
+    eject = bed_forward_gcode(machine)
+    if eject:
+        machine = dict(machine)  # never mutate the caller's cached profile
+        machine["machine_end_gcode"] = \
+            f"{machine.get('machine_end_gcode', '')}{eject}"
 
     paths = {}
     for kind, cfg in (("machine", machine), ("process", process),

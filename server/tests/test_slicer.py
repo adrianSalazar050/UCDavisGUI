@@ -4,9 +4,9 @@ import subprocess
 
 import pytest
 
-from server.slicer import (ProfileIndex, SliceError, build_argv,
-                           find_slicer, flatten_profile, profiles_root,
-                           run_slice)
+from server.slicer import (ProfileIndex, SliceError, bed_forward_gcode,
+                           build_argv, find_slicer, flatten_profile,
+                           profiles_root, run_slice)
 
 
 def test_flatten_merges_parent_then_child():
@@ -410,3 +410,79 @@ def test_run_slice_turns_an_oserror_into_a_slice_error(tmp_path):
     with pytest.raises(SliceError, match="could not run the slicer"):
         run_slice("bs.exe", tmp_path / "m.stl", MACHINE, PROCESS, FILAMENT,
                   tmp_path, runner=runner)
+
+
+# --- end-of-print "plate fully forward" for the A1 family -------------------
+# Measured 2026-07-23: the A1 parks at Y180 of a 256 bed (~70% forward), while
+# the mini's Y180 IS its max. The stock end gcode's last lines are M400 /
+# M18 X Y Z, so anything appended must re-enable the steppers first or it runs
+# after the motors are off and does nothing.
+
+A1 = {"name": "m", "printer_model": "Bambu Lab A1",
+      "printable_area": ["0x0", "256x0", "256x256", "0x256"]}
+A1_MINI = {"name": "m", "printer_model": "Bambu Lab A1 mini",
+           "printable_area": ["0x0", "180x0", "180x180", "0x180"]}
+P1S = {"name": "m", "printer_model": "Bambu Lab P1S",
+       "printable_area": ["0x0", "256x0", "256x256", "0x256"]}
+
+
+def test_bed_forward_moves_the_a1_to_its_max_y():
+    got = bed_forward_gcode(A1)
+    assert "G1 Y256" in got
+
+
+def test_bed_forward_moves_the_mini_to_its_max_y():
+    # 180 is already where the mini parks -- a harmless no-op, and keeping both
+    # models on one derived code path beats special-casing the A1.
+    assert "G1 Y180" in bed_forward_gcode(A1_MINI)
+
+
+def test_bed_forward_re_enables_the_steppers_before_moving():
+    # The whole point: the stock end gcode disabled them with M18.
+    got = bed_forward_gcode(A1)
+    assert got.index("M17") < got.index("G1 Y256")
+    assert "G90" in got          # absolute, or Y256 would be a relative jog
+
+
+def test_bed_forward_does_not_move_x():
+    # Stock parks the toolhead off to the side; dragging it back over the plate
+    # would defeat the purpose.
+    for line in bed_forward_gcode(A1).splitlines():
+        if line.strip().startswith("G1 "):
+            assert " X" not in line
+
+
+def test_bed_forward_skips_corexy_printers():
+    # P1/X1 beds only move in Z -- a Y "eject" is meaningless there.
+    assert bed_forward_gcode(P1S) is None
+
+
+def test_bed_forward_skips_an_unknown_or_missing_model():
+    assert bed_forward_gcode({"printable_area": ["0x0", "256x256"]}) is None
+    assert bed_forward_gcode({"printer_model": "Something Else"}) is None
+
+
+def test_bed_forward_skips_a_malformed_printable_area():
+    # Degrade to "no change", never to a bad move.
+    for bad in (None, [], "256x256", ["nonsense"], ["0x0", "256xNaN"],
+                ["0x0", "0x0"]):
+        assert bed_forward_gcode(
+            {"printer_model": "Bambu Lab A1", "printable_area": bad}) is None
+
+
+def test_run_slice_appends_the_bed_forward_block_for_an_a1(tmp_path):
+    machine = dict(A1, machine_end_gcode="M400\nM18 X Y Z")
+    run_slice("bs.exe", tmp_path / "m.stl", machine, PROCESS, FILAMENT,
+              tmp_path, runner=_fake_runner(tmp_path, "sliced.gcode.3mf"))
+    written = json.loads((tmp_path / "machine.json").read_text(encoding="utf-8"))
+    assert "G1 Y256" in written["machine_end_gcode"]
+    assert written["machine_end_gcode"].startswith("M400")   # stock kept first
+    assert machine["machine_end_gcode"] == "M400\nM18 X Y Z"  # caller untouched
+
+
+def test_run_slice_leaves_a_corexy_machine_end_gcode_alone(tmp_path):
+    machine = dict(P1S, machine_end_gcode="M400\nM18 X Y Z")
+    run_slice("bs.exe", tmp_path / "m.stl", machine, PROCESS, FILAMENT,
+              tmp_path, runner=_fake_runner(tmp_path, "sliced.gcode.3mf"))
+    written = json.loads((tmp_path / "machine.json").read_text(encoding="utf-8"))
+    assert written["machine_end_gcode"] == "M400\nM18 X Y Z"
