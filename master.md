@@ -78,21 +78,37 @@ which machine it means.
 | Camera frame | 1680x1080 | 1536x1080 |
 | Bed sits in frame | top half | bottom ~60% |
 
-Verified on the **A1 mini**, and *not* re-checked on the A1: the
-`file:///sdcard/<filename>` start-print URL scheme (§5.4), `stop_print()`'s
+Verified on the **A1 mini**, and *not* re-checked on the A1: `stop_print()`'s
 `PREPARE → FAILED` transition (§3.1), and the entire domain-adaptation dataset
-and checkpoint (§12 — all of it shot on the mini, in a different room).
+and checkpoint (§12 — all of it shot on the mini, in a different room). The
+`file:///sdcard/<filename>` start-print URL scheme (§5.4) *was* re-checked on
+the A1, 2026-07-23 — see below.
 
 Verified on the **A1** (2026-07-21): MQTT connect + state, FTPS login/LIST, the
-camera stream, and the ROI geometry above. The FTPS **upload** is implemented
-and tested but has not written to a real card on either machine (§10).
+camera stream, and the ROI geometry above.
 
-**Not verified on any hardware:** that a CLI-sliced `.gcode.3mf` (§6) is
-accepted and printed by a real printer. The container's shape is verified —
-this repo's own `threemf.parse_slice_info` reads it, and the whole pipeline
-runs end to end over HTTP against a mock printer — but nobody has slid the
-result onto a real card and pressed Start. This is deliberate: there were
-people working near the printer while this was built, and it would move.
+Verified on the **A1** (2026-07-23): FTPS **STOR** — a 43,976-byte
+`.gcode.3mf` was written to the card and read back with an identical MD5, and
+the `Metadata/plate_1.gcode.md5` sidecar inside it matched the actual gcode
+(§10). Also verified: the printer **accepts and starts** a CLI-sliced
+`.gcode.3mf` (§6). `POST .../queue/{id}/start` returned `started: true`, the
+printer echoed `cube.gcode.3mf` back as `subtask_name`, reported
+`total_layer_num: 100` (correct for a 20 mm cube at 0.20 mm), went
+`IDLE → RUNNING`, heated the nozzle to 205 °C, and reached layer 2.
+
+**What that same print did next is not a clean result.** It stalled at layer
+2 of 100 (5%) with HMS `0300_1100_0002_0001` active and made no further
+progress for roughly 5 minutes; the operator stopped it, and the HMS cleared
+on stop. Nothing was shown on the printer's screen, so **the cause of the
+stall is a hypothesis, not a confirmed fact.** The leading explanation, found
+afterward: the slicer was never told which build plate is installed, so it
+heated the bed for a Cool Plate (35 °C) instead of this printer's actual
+Textured PEI Plate (65 °C) — see §6.7. That bug is fixed in software and
+verified through `SliceCoordinator` against a fake registry, but the fix
+itself has **not yet been re-run on the real printer.**
+
+**Not yet verified on any hardware:** a full print, started from a
+CLI-sliced `.gcode.3mf`, completing cleanly end to end.
 
 Everything in `server/` is printer-model-agnostic — it never encodes a bed size
 or a frame geometry. The model-specific values are the ROI (§4.1) and the
@@ -723,9 +739,11 @@ printer. No upload: jobs already reference microSD files, so this is one MQTT
 `project_file` command via `BambuLink.start_print`.
 
 **The URL scheme is `file:///sdcard/<filename>`, verified on a real A1 mini
-(2026-07-19). Not yet re-verified on the A1** now in use — same firmware family,
-so it very probably behaves identically, but "probably" is not what the rest of
-this section means by *verified*. Confirm it before trusting a queued start.
+(2026-07-19), and now also re-verified on the A1** in current use: a
+CLI-sliced job (§6) was started through this exact route on 2026-07-23 —
+`started: true`, the printer echoing the filename back as `subtask_name`, and
+a transition to `RUNNING`. (That same print later stalled at layer 2 for
+reasons unrelated to this route — see §1.1 and §6.7.)
 Both public references are wrong for this printer — OpenBambuAPI's `mqtt.md`
 documents `file:///mnt/sdcard` (that is the X1) and `davglass/bambu-cli` sends
 `ftp:///<path>`. The candidates were tried against the hardware:
@@ -918,6 +936,22 @@ the card with no queue entry for it — recoverable from the SD Files page, and
 the job reports `failed` even though the upload succeeded; this is a known,
 accepted gap rather than something the coordinator tries to paper over.
 
+**The upload step's own false-failure trap, found on hardware (2026-07-23).**
+`ftplib.FTP_TLS.storbinary` calls `conn.unwrap()` after sending, which waits
+for the peer's TLS `close_notify` — and this printer never sends one.
+Measured with a 120 s socket timeout: `sendall` finished in 1.74 s, `unwrap`
+then blocked for the full 120 s and raised, while the server's own `226
+Transfer complete` was already sitting there, read back in 0.04 s. The upload
+had **succeeded** and the route reported it as a `502` anyway — on the
+slicing path this fires on the *normal* case every time, so a successful
+upload was marked failed and the job never reached the queue.
+`ImplicitFTP_TLS.storbinary` (§3.2) now attempts the unwrap with a bounded
+`UNWRAP_TIMEOUT_S = 2.0` and tolerates its failure, letting the server's own
+`226` reply be the verdict instead — the same thing `fetch_file`'s
+`retrbinary` path already did correctly, since a `RETR`'s data-connection
+close naturally delivers `close_notify`. Re-verified on hardware afterward:
+`upload_file` returned in 3.96 s with a byte-identical file. See §11.
+
 Jobs are **runtime-only, never persisted** — the same reasoning as "arm is
 runtime-only" (§4.5): a half-finished slice pointing at a deleted temp
 directory must not survive a restart. The *result* is durable, because it
@@ -964,6 +998,48 @@ boots, still monitors, still prints files already on a card.
 that path no longer exists, so a stale env var can't shadow a good default
 install), then the default Windows install paths, and returns `None` rather
 than raising — a supported outcome, not an error.
+
+### 6.7 The build plate must be configured, not detected
+
+Slicing needs to know which physical plate is on the printer, because Bambu
+Studio's flattened process profile keys the bed temperature off it
+(`curr_bed_type`) rather than off the material alone: the "Generic PLA @BBL
+A1" filament profile alone carries `cool_plate_temp = 35`,
+`supertack_plate_temp = 45`, `textured_plate_temp = 65`, `hot_plate_temp =
+65`, `eng_plate_temp = 0` — one material, five different bed temperatures,
+selected entirely by which plate is fitted.
+
+**The printer doesn't report which plate is installed, any more than it
+reports its own model (§5.3) or nozzle (§6.4).** So, exactly like those two,
+`PrinterConfig.bed_type` is a **configured** field — one of `BED_TYPES`
+(`"Cool Plate"`, `"Textured PEI Plate"`, `"High Temp Plate"`, `"Engineering
+Plate"`, `"Cool Plate (SuperTack)"`), degrading to `DEFAULT_BED_TYPE =
+"Textured PEI Plate"` on anything unparseable — the plate this lab's A1
+actually ships with, confirmed by the operator. Unlike `nozzle`, `bed_type`
+*is* editable straight from the Edit Printer form, because fixing this from
+the UI — not a hand-edited `printers.json` — is the point.
+`registry.printer_bed_type(serial)` mirrors `printer_nozzle`/`printer_model`
+and never returns `""` for the same reason those don't.
+
+**Getting this wrong was a real, measured failure, not a theoretical one.**
+Before this field existed, `run_slice` never set `curr_bed_type` at all, so
+Bambu Studio silently defaulted to `Cool Plate`. On real hardware
+(2026-07-23) a CLI-sliced cube heated its bed to 35 °C — the gcode carried
+`M190 S35` — PLA does not reliably stick to a cold bed, and that same print
+stalled at layer 2 (§1.1; the stall's cause is recorded there as a
+hypothesis, since nothing on the printer's screen confirmed it). Slicing the
+same cube twice with `curr_bed_type` set, no hardware involved, confirmed the
+fix in isolation: `'Cool Plate' → M190 S35`, `'Textured PEI Plate' → M190
+S65`. **That fix has not yet been re-run on the real printer** — §1.1 records
+that distinction; treat it as fixed-in-software, not fixed-and-confirmed,
+until someone slices and starts another print with it.
+
+`run_slice(..., bed_type=)` patches `curr_bed_type` into a **copy** of the
+flattened process dict, the same pattern already used for
+`enable_support`/`support_type` — the caller's cached profile is never
+mutated. `SliceCoordinator._do` reads `registry.printer_bed_type(serial)` and
+threads it through, and surfaces the value on the job record next to
+`material`/`supports` so a finished job shows which plate it was sliced for.
 
 ---
 
@@ -1306,8 +1382,8 @@ the failure happened here:
 Each guard was verified by deliberately breaking the thing it protects and
 watching it fail — a doc test that has never been seen to fail is decoration.
 
-**What is not covered anywhere:** every React component, the FTPS `STOR`
-against real hardware (the note below), and the dataset scripts (§3.1).
+**What is not covered anywhere:** every React component, and the dataset
+scripts (§3.1).
 
 The dataset/training scripts (§3.1) are **not** unit-tested — they are one-shot
 research tools whose output is checked by looking at it, and their real
@@ -1319,27 +1395,31 @@ an injectable seam — `service_factory` in the registry, `spawn`/`clock` in
 `detection_loop`, `clock` in the controller and `StatusReader`. Parsers and path
 guards are pure functions.
 
-**Not covered:** the FTPS **STOR** against real hardware. `sdcard.upload_file`'s
-control flow is fully tested against a fake FTP object and the whole route was
-exercised end to end under `--mock`, but as of 2026-07-21 no byte has been
-written to a real card — the printer was mid-print and a write to the
-filesystem it streams gcode from was not worth the risk. The *read* half
-(login, implicit TLS, session reuse, LIST) **is** verified live, mid-print, on
-2026-07-21, and STOR reuses exactly that connection machinery. Verify it before
-relying on it.
+**FTPS STOR is now verified on real hardware (2026-07-23).** A 43,976-byte
+`.gcode.3mf` was written to the A1's microSD card and read back with an
+identical MD5, and the `Metadata/plate_1.gcode.md5` sidecar inside it matched
+the actual gcode. STOR reuses exactly the implicit-TLS/session-reuse
+connection machinery the read half (login, MLSD/LIST) was already verified
+live against on 2026-07-21. This same run caught and fixed a false-failure
+trap in `storbinary`'s TLS unwrap that had been silently turning successful
+uploads into reported `502`s — see §6.7 and §11.
 
-**Also not covered: a CLI-sliced `.gcode.3mf` actually starting and printing on
-real hardware (§6).** What *is* verified: the CLI produces a `.gcode.3mf`
-whose `Metadata/plate_1.gcode` and `slice_info.config` this repo's own
-`threemf.parse_slice_info` reads correctly, and the whole pipeline — slice →
-upload → queue, with the right provenance `model_id` — runs end to end over
-HTTP against a mock printer. What is **not** verified: that the printer
-accepts and prints the result. This is the first thing that makes STOR (above)
-load-bearing rather than theoretical — a slice job's upload step is the first
-real caller of it. Nobody has started one; the printer was in active use near
-people while this was built, and running the hardware gate would have moved
-it. Per §1.1, treat this as unverified until someone runs it and updates that
-table.
+**A CLI-sliced `.gcode.3mf` is now verified to START on real hardware
+(2026-07-23) — but a full print completing cleanly is still not verified.**
+The CLI produces a `.gcode.3mf` whose `Metadata/plate_1.gcode` and
+`slice_info.config` this repo's own `threemf.parse_slice_info` reads
+correctly, and the whole pipeline — slice → upload → queue, with the right
+provenance `model_id` — runs end to end over HTTP against a mock printer.
+What is now **also** verified: the real printer accepts and starts the
+result. `POST .../queue/{id}/start` returned `started: true`, the printer
+echoed the filename back as `subtask_name`, reported the correct
+`total_layer_num`, went `IDLE → RUNNING`, heated the nozzle correctly, and
+reached layer 2. What is **still not verified**: that print stalled at layer
+2/5% with an HMS active and was stopped by the operator, so nobody has yet
+watched a CLI-sliced job finish cleanly. The leading (but unconfirmed)
+explanation for the stall is the bed-temperature bug fixed in §6.7. Per
+§1.1, treat "a full print completing" as unverified until someone runs it
+and updates that section.
 
 ---
 
@@ -1402,6 +1482,17 @@ table.
 - **Implicit vs explicit FTPS, and TLS session reuse.** Both are documented
   traps in `server/sdcard.py`; a login that succeeds and then hangs on LIST is
   the session-reuse one.
+- **`storbinary`'s TLS unwrap waits for a `close_notify` this printer never
+  sends.** Measured on hardware (2026-07-23): `sendall` finished in 1.74 s,
+  then stdlib `FTP_TLS.storbinary`'s `conn.unwrap()` blocked for the full
+  120 s socket timeout and raised — while the server's own `226 Transfer
+  complete` had already arrived and could be read back in 0.04 s. The upload
+  had **succeeded** and the route reported a `502` anyway, which fired on the
+  *normal* slicing path every time. `ImplicitFTP_TLS.storbinary` now bounds
+  the unwrap attempt (`UNWRAP_TIMEOUT_S = 2.0`) and tolerates its failure,
+  trusting the server's own `226` reply instead (§6.5). Baffling to hit
+  cold — the upload looks and logs exactly like a real failure right up
+  until you notice the file is already sitting on the card.
 - **A corrupt config file must never stop the boot.** Both `PrinterStore` and
   `QueueStore` degrade to empty with a warning — if the server won't start you
   have no UI left to fix it with.
@@ -1436,6 +1527,13 @@ table.
   live profile index with a fully anchored regex and its label read back off
   whatever matched — never hardcoded, and never matched with independent
   `startswith`/`endswith` checks, which a decoy profile name can fool.
+- **The build plate type is not reported and must be configured.** §6.7. Same
+  shape as `model_id` (§5.3) and `nozzle` (§6.4): the printer cannot say which
+  plate is physically installed, so `slicer.py` has to be told
+  (`PrinterConfig.bed_type`). Getting it wrong is not cosmetic — measured on
+  hardware (2026-07-23), an unset `curr_bed_type` defaulted to Cool Plate's
+  35 °C bed target on a printer with a Textured PEI Plate (needs 65 °C), and
+  the resulting print's first layer failed to stick, stalling at layer 2.
 
 ---
 

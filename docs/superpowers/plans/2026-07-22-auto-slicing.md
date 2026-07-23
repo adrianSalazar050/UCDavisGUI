@@ -2,14 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **STATUS: Tasks 1–11 SHIPPED (2026-07-22); Task 12 deliberately outstanding.**
+> **STATUS: Tasks 1–11 SHIPPED (2026-07-22); Task 12 executed 2026-07-23.**
 > Implements `docs/superpowers/specs/2026-07-22-auto-slicing-design.md`, whose
 > banner records what this plan got wrong in advance. Task 12 — slicing
-> something on the real A1, starting it from the queue, and recording what
-> happened — was intentionally not run: people were working near the printer
-> while this was built, and it would have moved. It remains the only step
-> that can prove a CLI-sliced `.gcode.3mf` is actually accepted by the
-> printer; see `master.md` §1.1 and §10.
+> something on the real A1 and starting it from the queue — ran on
+> 2026-07-23: FTPS STOR and the printer's acceptance of a CLI-sliced
+> `.gcode.3mf` are now verified (`master.md` §1.1, §10). The print reached
+> layer 2 of 100 and then stalled at 5%, and was stopped by the operator; the
+> leading, unconfirmed explanation is a bed-temperature bug (`master.md`
+> §6.7), fixed in software but not yet re-verified on hardware. **A full
+> clean print completing end to end remains outstanding** — that step, and
+> only that step, is still unrun.
 > Historical record, not maintained. **`master.md` is authoritative wherever
 > this file disagrees with it.**
 >

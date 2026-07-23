@@ -41,6 +41,20 @@
 >   "unknown never blocks" convention as `printer_model`/`printer_nozzle` —
 >   not a 404). Fixed by dropping the check; only `slicer is None` 404s.
 >
+> **Hardware gate run 2026-07-23 (`master.md` §1.1).** FTPS STOR and a
+> CLI-sliced `.gcode.3mf` starting on a real printer — both marked
+> unverified in §8/§9 below at the time this was written — are now verified
+> on the A1: the upload wrote a byte-identical file, and `POST
+> .../queue/{id}/start` accepted the result, echoed it back as
+> `subtask_name`, and reached layer 2 of 100. The print then stalled at
+> layer 2/5% and was stopped by the operator. The leading (but unconfirmed)
+> explanation is that `curr_bed_type` was never set, so PLA heated for a
+> Cool Plate (35 °C) instead of this A1's actual Textured PEI Plate
+> (65 °C) — now fixed as `PrinterConfig.bed_type` (`master.md` §6.7), though
+> that fix itself has not yet been re-run on hardware. A full clean print
+> completing end to end remains outstanding. See `master.md` §1.1 and §10
+> for the verified facts, and the companion plan's STATUS for Task 12.
+>
 > Historical record, not maintained. **`master.md` is authoritative wherever
 > this file disagrees with it.**
 >
@@ -374,23 +388,26 @@ keeping with §9 of `master.md`:
 | Routes | Via `TestClient` against a fake registry, including 404-when-inert |
 | `PrinterConfig.nozzle` | Validation and degradation to `"0.4"` |
 
-**Not covered, and it must stay marked so:** that a CLI-sliced `.gcode.3mf`
-actually starts and prints on the real A1. §2 proves the container has the right
-shape and that our own parser reads it; it does **not** prove the printer accepts
-it. Per the discipline in `master.md` §1.1, that stays *unverified* until someone
-runs it on hardware, and this document should be updated when they do.
-
-This also interacts with an existing gap: FTPS **STOR** has never written to a
-real card (§9 of `master.md`). This feature makes STOR load-bearing, so the
-hardware gate covers both — upload, then start.
+**Updated 2026-07-23 — partially covered now.** The hardware gate described
+below ran: FTPS **STOR** wrote to a real A1 card and read back
+byte-identical, and a CLI-sliced `.gcode.3mf` was accepted, started, and
+reached layer 2 of 100. What is **still not covered**: a full print
+completing cleanly. That attempt stalled at layer 2/5% with an HMS active
+and was stopped by the operator; see `master.md` §1.1 for the exact sequence
+and why the stall's cause is recorded there as a hypothesis (a
+bed-temperature bug, fixed but not re-verified on hardware — §9 below)
+rather than a confirmed fact.
 
 ---
 
 ## 9. Risks
 
-- **The printer may reject a CLI-sliced 3mf.** The likeliest cause would be
-  metadata Bambu Studio's GUI writes that the CLI doesn't. `plate_1.gcode.md5`
-  is present, which is the checksum most likely to be verified. Untested (§8).
+- **The printer may reject a CLI-sliced 3mf.** Resolved 2026-07-23: it does
+  not reject it. `plate_1.gcode.md5` being present was the right guess — the
+  printer started the job normally. What was *not* anticipated: a slicing bug
+  unrelated to the container format (unset `curr_bed_type`, see `master.md`
+  §6.7) is the leading, unconfirmed explanation for why that print stalled at
+  layer 2. See `master.md` §1.1 and §10.
 - **Profile names are version-dependent.** `0.16mm Optimal @BBL A1` exists in
   this install; a future Bambu Studio may rename it. Mitigated by filtering
   `slice/options` to presets that actually resolve (§4.3), so the failure is a
