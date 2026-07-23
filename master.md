@@ -1394,6 +1394,13 @@ Three things about it are load-bearing and easy to get wrong if you touch it:
   `opencv-python` → `-headless`, which drops the `libGL.so.1` dependency that
   breaks a plain build inside an AppImage). Scope is the dashboard, the queue,
   and SD upload. Slicing still auto-enables *if* Bambu Studio is installed.
+  Because that narrowing is invisible from the client, every summary carries
+  **`detection_available`** (`_with_detection`). Without it the UI cannot tell
+  "no capture printer marked yet" from "this build has no detector" — both are
+  just a missing `detection` object — and it told desktop users to mark a
+  capture printer, which cannot conjure a detector that was never bundled
+  (reported 2026-07-23). The Detection page and the Dashboard camera
+  placeholder now say the feature isn't in this build instead.
 - **The port is chosen per launch, never 8000.** `main.js::getFreePort()` binds
   `:0` and hands the number to the backend via `BAMBU_PORT`. This is not
   fussiness: with a fixed 8000 the readiness poll happily succeeds against a
