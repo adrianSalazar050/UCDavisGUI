@@ -398,7 +398,7 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 | `queue.py` | Per-printer job list + `queues.json` | `PrintQueue`, `QueueStore`, `MemoryQueueStore` |
 | `sdcard.py` | microSD over FTPS (read + upload) | `list_dir`, `fetch_file`, `upload_file`, `normalize_path`, `ImplicitFTP_TLS`, `SdError`, `parse_mlsd`, `parse_list_lines` |
 | `threemf.py` | Parsing a sliced `.gcode.3mf` | `parse_slice_info`, `SLICE_INFO_PATH` |
-| `slicer.py` | Locating Bambu Studio, resolving vendor profiles, running the CLI (§6) | `find_slicer`, `profiles_root`, `ProfileIndex`, `flatten_profile`, `build_argv`, `run_slice`, `SliceError`, `SlicerNotFound`, `SLICE_TIMEOUT_S`, `OUTPUT_NAME` |
+| `slicer.py` | Locating Bambu Studio, resolving vendor profiles, running the CLI (§6) | `find_slicer`, `profiles_root`, `ProfileIndex`, `flatten_profile`, `build_argv`, `run_slice`, `bed_forward_gcode`, `SliceError`, `SlicerNotFound`, `SLICE_TIMEOUT_S`, `OUTPUT_NAME` |
 | `slicepresets.py` | Curated quality tiers + filament mapping (§6.3) | `TIERS`, `MACHINE_TOKENS`, `PROCESS_TOKENS`, `MATERIALS`, `machine_profile_name`, `resolve_preset`, `available_presets`, `filament_profile_name`, `available_filaments`, `detect_loaded_filament` |
 | `slicejobs.py` | Slice job records, states, the worker thread (§6.4) | `SliceCoordinator`, `output_name`, `MODEL_EXTS`, `MAX_FINISHED_JOBS`, `TICK_S` |
 | `runs.py` | Finding the newest captured frame | `find_active_run`, `newest_frame`, `ACTIVE_WINDOW_S` |
@@ -1105,6 +1105,69 @@ mutated. `SliceCoordinator._do` reads `registry.printer_bed_type(serial)` and
 threads it through, and surfaces the value on the job record next to
 `material`/`supports` so a finished job shows which plate it was sliced for.
 
+### 6.8 End-of-print: park the plate fully forward
+
+Every `.gcode.3mf` sliced through the dashboard for an **A1 or A1 mini** now
+ends with the build plate slung **fully forward**, so an automated plate
+lifter (or a hand) can reach it — the usual print-farm modification. Always
+on for those two models; there is no toggle and no config field, because it
+is a property of the machine, not of the job.
+
+**Why only A1 and A1 mini.** `_BED_SLINGER_MODELS` in `server/slicer.py`
+gates on exactly `"Bambu Lab A1"` / `"Bambu Lab A1 mini"`. P1/X1 are CoreXY —
+their bed only moves in Z, so a Y "eject" move is meaningless there — and
+they are deliberately excluded rather than silently getting a no-op move.
+
+**Max Y is derived, not hardcoded.** Measured 2026-07-23: the A1 parks at
+`Y180` on a **256 mm** bed at the end of the stock gcode — only ~70% forward.
+The A1 mini's `Y180` already *is* its max (180 mm bed), so the same block is
+a harmless no-op there. `_max_printable_y()` reads the max Y out of the
+machine profile's own `printable_area`
+(`['0x0','256x0','256x256','0x256'] -> 256`) instead of hardcoding per model,
+which is what lets both models share one code path — and returns `None`
+(skip the move entirely) on anything missing or unparseable, the same
+"degrade to no change, never to an invented position" rule as elsewhere in
+this section.
+
+**The load-bearing trap: steppers are already off.** The stock end gcode's
+*last two lines* are `M400` / `M18 X Y Z` — disabling the steppers. Anything
+appended after that runs with the motors off and silently does nothing.
+`bed_forward_gcode()` re-enables them with `M17` before moving, then disables
+them again afterward so the machine is left in the same state the stock
+gcode intended:
+
+```gcode
+G1 X-48 Y180 F3600   <- stock park
+M400
+M18 X Y Z            <- stock disables steppers
+M17                  <- ours re-enables
+G90
+G1 Y256 F3600        <- fully forward
+M400
+M18 X Y Z
+```
+
+**Only Y moves.** The stock gcode parks the toolhead off to the side
+(`X-48` on the A1) specifically so it's clear of the plate; dragging it back
+over the plate on the way out would defeat the purpose of clearing it.
+
+**Why the config is patched, not the emitted gcode.** `run_slice` appends the
+block to `machine["machine_end_gcode"]` — on a **copy** of the machine dict,
+never the caller's cached profile, the same pattern already used for
+`enable_support`/`support_type`/`curr_bed_type` above — *before* invoking the
+slicer, alongside those. Because the slicer generates `plate_1.gcode` from
+that config, it computes `Metadata/plate_1.gcode.md5` (§10) over our block
+for free, so the checksum the printer verifies on start stays valid.
+Post-processing the already-sliced `plate_1.gcode` inside the zip would have
+produced a mismatched checksum instead.
+
+**Verified by slicing a real cube** (2026-07-23): the produced gcode ends
+exactly as shown above. **Not verified:** that the plate physically ends up
+where an automated lifter expects on real hardware — the gcode is confirmed,
+the mechanical outcome needs an actual print, and per §1.1's discipline it
+stays in that state until someone runs one. Design record:
+`docs/superpowers/specs/2026-07-23-bed-forward-eject-design.md`.
+
 ---
 
 ## 7. Frontend
@@ -1627,6 +1690,12 @@ produced. See §1.1 for the complete account of both bugs and both attempts.
   is contention, not a code bug; if the detector goes down unexpectedly,
   check what else might be watching the camera before assuming §11's other
   camera gotchas apply.
+- **Appending to a Bambu machine's end gcode runs after the steppers are
+  already off.** §6.8. The stock end gcode's last two lines are `M400` /
+  `M18 X Y Z`, so a naive append executes with the motors disabled and
+  silently does nothing — no error, the move just never happens. Any code
+  that appends to `machine_end_gcode` must `M17` first, the way
+  `bed_forward_gcode()` does.
 
 ---
 

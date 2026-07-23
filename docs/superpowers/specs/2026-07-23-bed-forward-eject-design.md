@@ -1,11 +1,14 @@
 # End-of-print "plate fully forward" for the A1 family — design
 
-> **STATUS: PROPOSED (2026-07-23).** Agreed in brainstorming; implementation
-> follows immediately in the same session. Small enough that this document is
-> both the design and the plan — there is no separate implementation plan.
+> **STATUS: SHIPPED (2026-07-23, commit `88a9e1c`).** Implemented as designed
+> below. Verified by slicing a real cube: the produced gcode matches §3's
+> block exactly, `M17` re-enabling the steppers before the move. **Not yet
+> verified on hardware** — the gcode is confirmed, but whether the plate
+> physically ends up where an automated lifter expects still needs an actual
+> print.
 >
-> Historical record, not maintained. **`master.md` is authoritative wherever
-> this file disagrees with it.**
+> Historical record, not maintained. **`master.md` §6.8 is authoritative
+> wherever this file disagrees with it.**
 
 Date: 2026-07-23
 
