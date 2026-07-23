@@ -1323,3 +1323,71 @@ def test_summaries_flag_detection_as_available_when_it_is_wired(tmp_path):
     c, _ = det_client(tmp_path, FakeDetection())
     p = c.get("/api/printers").json()["printers"][0]
     assert p["detection_available"] is True
+
+
+# --- shared-password auth --------------------------------------------------
+# Only engaged when the server is bound beyond loopback (see __main__'s
+# fail-closed rule). auth=None -- the desktop app and dev path -- must leave
+# every route open exactly as before.
+
+from server.auth import Auth
+
+
+def auth_client(tmp_path, password="hunter2"):
+    from server.main import create_app
+    a = Auth(password)
+    return TestClient(create_app(DetRegistry([FakeService("S1")]), tmp_path,
+                                 auth=a)), a
+
+
+def test_auth_none_leaves_every_route_open(tmp_path):
+    c, _ = det_client(tmp_path, None)
+    assert c.get("/api/printers").status_code == 200
+
+
+def test_api_requires_a_session_when_auth_is_on(tmp_path):
+    c, _ = auth_client(tmp_path)
+    assert c.get("/api/printers").status_code == 401
+
+
+def test_login_with_the_right_password_opens_the_api(tmp_path):
+    c, _ = auth_client(tmp_path)
+    assert c.post("/api/login", json={"password": "hunter2"}).status_code == 200
+    # TestClient keeps the cookie, so the next call rides the session
+    assert c.get("/api/printers").status_code == 200
+
+
+def test_login_with_a_wrong_password_is_401_and_opens_nothing(tmp_path):
+    c, _ = auth_client(tmp_path)
+    assert c.post("/api/login", json={"password": "nope"}).status_code == 401
+    assert c.get("/api/printers").status_code == 401
+
+
+def test_the_login_route_itself_is_reachable_without_a_session(tmp_path):
+    c, _ = auth_client(tmp_path)
+    # 401 for a bad password, NOT 401 for "no session" -- otherwise nobody
+    # could ever log in.
+    assert c.post("/api/login", json={"password": "nope"}).status_code == 401
+
+
+def test_logout_ends_the_session(tmp_path):
+    c, _ = auth_client(tmp_path)
+    c.post("/api/login", json={"password": "hunter2"})
+    assert c.post("/api/logout").status_code == 200
+    assert c.get("/api/printers").status_code == 401
+
+
+def test_the_websocket_is_protected_too(tmp_path):
+    # The whole reason auth is a cookie and not a bearer token: /ws must be
+    # covered by the same mechanism.
+    c, _ = auth_client(tmp_path)
+    with pytest.raises(Exception):
+        with c.websocket_connect("/ws"):
+            pass
+
+
+def test_the_websocket_opens_once_logged_in(tmp_path):
+    c, _ = auth_client(tmp_path)
+    c.post("/api/login", json={"password": "hunter2"})
+    with c.websocket_connect("/ws") as ws:
+        assert "printers" in ws.receive_json()

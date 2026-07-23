@@ -229,3 +229,28 @@ export async function cancelSliceJob(id) {
     `/api/slice/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await detail(res));
 }
+
+// --- authentication ---------------------------------------------------------
+// Only engaged when the server is bound beyond loopback (it sets a session
+// cookie; see server/auth.py). On a localhost/desktop server these are inert:
+// checkAuth() reports authed and login() is never reached.
+
+// Is a session needed right now? Probes a protected route rather than adding a
+// dedicated endpoint, so it stays true whatever the server's auth config is.
+export async function checkAuth() {
+  const res = await fetch("/api/printers");
+  return res.status !== 401;
+}
+
+export async function login(password) {
+  const res = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+export async function logout() {
+  await fetch("/api/logout", { method: "POST" });
+}

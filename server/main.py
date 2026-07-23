@@ -11,7 +11,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import (FastAPI, File, Form, HTTPException, UploadFile,
+from fastapi import (FastAPI, File, Form, HTTPException, Request, UploadFile,
                      WebSocket, WebSocketDisconnect)
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -202,9 +202,13 @@ def _with_nozzle(printers: list[dict], registry) -> list[dict]:
     return printers
 
 
+class LoginBody(BaseModel):
+    password: str = ""
+
+
 def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
-               detection=None, queue=None, slicer=None) -> FastAPI:
+               detection=None, queue=None, slicer=None, auth=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake). `queue` is
     anything with add(serial, job), remove(serial, id) -> bool,
@@ -235,6 +239,47 @@ def create_app(registry, runs_dir: pathlib.Path,
                 component.stop()
 
     app = FastAPI(title="bambu-monitor", lifespan=lifespan)
+
+    # --- authentication ---------------------------------------------------
+    # auth=None means inert (same convention as queue/detection/slicer): the
+    # desktop app and the dev workflow bind loopback, where there is nowhere to
+    # type a password and nothing beyond this machine can reach us anyway.
+    # __main__ refuses to bind a non-loopback host WITHOUT an auth, so "served
+    # to the LAN" and "password required" cannot come apart.
+    def _needs_session(path: str) -> bool:
+        # Only the API. The static frontend must stay reachable or the login
+        # page could never load, and /api/login must stay open or nobody could
+        # ever obtain a session.
+        return path.startswith("/api/") and path != "/api/login"
+
+    @app.middleware("http")
+    async def _require_session(request, call_next):
+        if auth is not None and _needs_session(request.url.path):
+            if not auth.valid(request.cookies.get(auth.COOKIE)):
+                return JSONResponse({"detail": "authentication required"},
+                                    status_code=401)
+        return await call_next(request)
+
+    @app.post("/api/login")
+    def login(body: LoginBody, response: Response):
+        if auth is None:
+            return {"ok": True}          # nothing to log into
+        token = auth.login(body.password)
+        if token is None:
+            raise HTTPException(401, "wrong password")
+        # HttpOnly so page scripts can't read it; SameSite=Lax is enough for a
+        # same-origin dashboard. Not Secure -- there is no TLS on the LAN, a
+        # limitation recorded in the design spec.
+        response.set_cookie(auth.COOKIE, token, httponly=True,
+                            samesite="lax", path="/")
+        return {"ok": True}
+
+    @app.post("/api/logout")
+    def logout(request: Request, response: Response):
+        if auth is not None:
+            auth.logout(request.cookies.get(auth.COOKIE))
+            response.delete_cookie(auth.COOKIE, path="/")
+        return {"ok": True}
 
     @app.get("/api/printers")
     def list_printers():
@@ -622,6 +667,13 @@ def create_app(registry, runs_dir: pathlib.Path,
 
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
+        # Checked HERE, not in the HTTP middleware above: that middleware only
+        # sees http-scope requests, so a WebSocket would sail straight past it.
+        # This is also why the session is a cookie -- browsers cannot set
+        # headers on a WS handshake, but cookies ride it automatically.
+        if auth is not None and not auth.valid(sock.cookies.get(auth.COOKIE)):
+            await sock.close(code=1008)   # policy violation
+            return
         try:
             await sock.accept()
             printers = _with_detection(

@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import pathlib
 import signal
+import sys
 
 import uvicorn
 
+from .auth import Auth, is_loopback
 from .detection import (DEFAULT_INTERVAL_S, DetectionCoordinator,
                         DetectorSupervisor, MockDetectorRunner)
 from .main import create_app
@@ -69,6 +72,29 @@ def mock_factory(runs_dir: pathlib.Path):
     return make
 
 
+def build_auth(host: str, password: str | None):
+    """-> an Auth, or None when no authentication is needed.
+
+    THE FAIL-CLOSED RULE. Binding anywhere but loopback puts printer control --
+    stop a print, upload a file, start a job -- on the network. Doing that
+    without a password must not be possible by forgetting a flag, so this
+    EXITS rather than starting up unprotected.
+
+    Loopback needs no password: nothing off this machine can reach it, and the
+    desktop app (which spawns its own backend on a random local port) would
+    have nowhere to type one. A password on loopback is still honoured if you
+    want one.
+    """
+    if password:
+        return Auth(password)
+    if is_loopback(host):
+        return None
+    raise SystemExit(
+        f"refusing to bind {host} without a password: that would expose "
+        "printer control to the network. Set the BAMBU_PASSWORD environment "
+        "variable, or bind 127.0.0.1 (the default) to keep it to this machine.")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         prog="python -m server",
@@ -83,6 +109,11 @@ def main() -> int:
                    help="capture output dir (default runs/, or runs-mock/ "
                         "with --mock)")
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--host", default="127.0.0.1",
+                   help="interface to bind (default: %(default)s, this machine "
+                        "only). Use 0.0.0.0 to serve the dashboard to the LAN "
+                        "-- that REQUIRES the BAMBU_PASSWORD environment "
+                        "variable to be set")
     p.add_argument("--detect-interval", type=float, default=DEFAULT_INTERVAL_S,
                    help="seconds between detector captures (default: "
                         "%(default)s)")
@@ -157,16 +188,18 @@ def main() -> int:
                 slicer = SliceCoordinator(
                     registry, queue, exe, index, work_dir=runs_dir / "_slice")
 
+    auth = build_auth(a.host, os.environ.get("BAMBU_PASSWORD"))
+
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
     app = create_app(registry, runs_dir, dist, detection=coordinator,
-                     queue=queue, slicer=slicer)
+                     queue=queue, slicer=slicer, auth=auth)
     # uvicorn re-raises the signal it caught using whatever handler was
     # installed beforehand. SIGBREAK's OS default kills the process outright
     # (skipping `finally`), so map it to KeyboardInterrupt like SIGINT gets.
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, signal.default_int_handler)
     try:
-        uvicorn.run(app, host="127.0.0.1", port=a.port)
+        uvicorn.run(app, host=a.host, port=a.port)
     finally:
         registry.stop_all()
     return 0
