@@ -1,5 +1,6 @@
 import Dashboard from "../pages/Dashboard.jsx";
 import Detection from "../pages/Detection.jsx";
+import History from "../pages/History.jsx";
 import Overview from "../pages/Overview.jsx";
 import Queue from "../pages/Queue.jsx";
 import SdFiles from "../pages/SdFiles.jsx";
@@ -18,6 +19,8 @@ export const pages = {
   // Before queue: slicing feeds the queue.
   slice: { title: "Slice", group: "Monitor", component: Slice },
   queue: { title: "Queue", group: "Monitor", component: Queue },
+  // After queue: history is what the queue turns into once a job has run.
+  history: { title: "History", group: "Monitor", component: History },
 };
 
 export function navGroups() {
