@@ -443,3 +443,29 @@ def test_piece_badges_add_and_remove(led):
                         applied_by="operator")
     assert [b["code"] for b in led.piece_badges(piece["id"])] == ["warped"]
     assert led.remove_piece_badge(piece["id"], badge_id_for("warped"))
+
+
+def test_an_unknown_applier_cannot_apply_a_non_auto_badge(led):
+    """Fail-closed: only an explicit human source may apply a non-auto badge.
+    A machine identity that is not exactly 'detector' -- a typo, or a new
+    applier added later -- must be RESTRICTED, not silently allowed."""
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    for applier in ("robot", "Detector", "system", "monitor"):
+        with pytest.raises(ValueError):
+            led.add_run_badge(run_id, badge_id_for("warped"),
+                              applied_by=applier)
+    # And the explicit human still may.
+    led.add_run_badge(run_id, badge_id_for("warped"), applied_by="operator")
+    assert [b["code"] for b in led.run_badges(run_id)] == ["warped"]
+
+
+def test_bulk_rejects_a_bad_override_index_before_any_write(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 3)
+    with pytest.raises(ValueError):
+        led.set_pieces_bulk(run_id, "good",
+                            overrides=[{"index_in_run": "not-a-number",
+                                        "status": "scrap"}])
+    # The blanket 'good' write must have rolled back with the bad override.
+    assert {p["status"] for p in led.pieces_for(run_id)} == {
+        "pending_inspection"}

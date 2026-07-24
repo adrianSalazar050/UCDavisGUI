@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from .ledger import badge_id_for
+from .ledger import DETECTOR, badge_id_for
 from .printer import BUSY_STATES
 
 log = logging.getLogger("server.runlog")
@@ -139,7 +139,7 @@ class RunRecorder:
                                   kind="hms_raised", source="server",
                                   payload={"code": code})
             self.ledger.add_run_badge(run_id, badge_id_for("hms_error"),
-                                      applied_by="detector",
+                                      applied_by=DETECTOR,
                                       note=f"HMS {code}")
         for code in sorted(before - now):
             self.ledger.add_event(printer_serial=serial, run_id=run_id,
@@ -166,7 +166,7 @@ class RunRecorder:
                                        "end_state": end_state})
         if end_state == "STOPPED_BY_MONITOR":
             self.ledger.add_run_badge(run["id"], badge_id_for("autostop"),
-                                      applied_by="detector")
+                                      applied_by=DETECTOR)
         copies = run.get("copies_planned") or 1
         self.ledger.create_pieces(run["id"], int(copies),
                                   part_id=run.get("part_id"),

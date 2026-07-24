@@ -188,6 +188,18 @@ END_STATES = ("FINISH", "FAILED", "STOPPED_BY_MONITOR",
 
 PIECE_STATUSES = ("pending_inspection", "good", "rework", "scrap")
 
+# Who applies a badge. DETECTOR is the automated system's identity (the
+# recorder writes machine-observed badges under it); OPERATOR is a human.
+DETECTOR = "detector"
+OPERATOR = "operator"
+# Sources that count as a human hand and may apply ANY badge. The check is
+# fail-closed on purpose: anything NOT in this set -- "detector", a typo, a
+# machine identity added later -- is treated as automated and may apply only
+# `auto` badges. The whole "auto badges only for the system" permission model
+# hangs on this one comparison, so a novel or misspelled applier must default
+# to the RESTRICTED permissions, never the permissive ones.
+HUMAN_APPLIERS = frozenset({OPERATOR})
+
 
 def _checked(fields: dict, allowed: frozenset) -> dict:
     """Reject any key outside the allowlist, then hand back the fields.
@@ -658,10 +670,19 @@ class Ledger:
         """
         if status not in PIECE_STATUSES:
             raise ValueError(f"unknown piece status {status!r}")
+        # Validate BOTH fields of every override up front, so a bad one raises
+        # a clean ValueError before any write rather than a KeyError/TypeError
+        # from inside the transaction -- the status path already did this, and
+        # an unparseable index_in_run must fail the same way, not midway.
         for override in overrides or []:
             if override.get("status") not in PIECE_STATUSES:
                 raise ValueError(
                     f"unknown piece status {override.get('status')!r}")
+            try:
+                int(override["index_in_run"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError(
+                    f"override needs an integer index_in_run: {override!r}")
         ts = self._clock()
         # The blanket set and every override are ONE transaction: a plate must
         # never end up half "all good" and half its old verdict because the
@@ -692,9 +713,10 @@ class Ledger:
         badge = self._badge(badge_id)
         if badge is None:
             raise ValueError(f"unknown badge {badge_id!r}")
-        if applied_by == "detector" and not badge["auto"]:
+        if applied_by not in HUMAN_APPLIERS and not badge["auto"]:
             # The split that makes piece-level verdicts meaningful: the
-            # system may only apply badges it can actually observe.
+            # system may only apply badges it can actually observe. Fail
+            # closed -- an unrecognised applier is treated as automated.
             raise ValueError(
                 f"{badge['code']} is not an automatic badge; only a human "
                 "can apply it")
