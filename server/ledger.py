@@ -125,6 +125,38 @@ MIGRATIONS = {
 }
 
 
+# A fixed namespace so a badge's id is a pure function of its code. Phase 4
+# pulls this same catalogue down from Supabase; deriving the id from the code
+# means that pull upserts onto the rows seeded here instead of creating a
+# second, differently-keyed set of every badge.
+BADGE_NAMESPACE = uuid.UUID("6f1b6a2e-0a1e-5c9d-9f3a-6b1c2d3e4f50")
+
+# (code, label, severity, auto)
+# `auto` means the SYSTEM may apply it. Only run-level signals qualify: a
+# detection is {cls, conf, box} in frame pixels with no association to a model
+# on the plate, and an HMS code describes the machine, not a part. Everything
+# else is a human judgement about one physical piece.
+SEED_BADGES = (
+    ("spaghetti",       "Spaghetti",        "defect",  True),
+    ("stringing",       "Stringing",        "warning", True),
+    ("hms_error",       "HMS error",        "warning", True),
+    ("autostop",        "Stopped by monitor", "defect", True),
+    ("layer_shift",     "Layer shift",      "defect",  False),
+    ("warped",          "Warped",           "defect",  False),
+    ("poor_adhesion",   "Poor bed adhesion", "defect", False),
+    ("under_extrusion", "Under-extrusion",  "defect",  False),
+    ("over_extrusion",  "Over-extrusion",   "warning", False),
+    ("nozzle_clog",     "Nozzle clog",      "defect",  False),
+    ("detached",        "Detached from plate", "defect", False),
+    ("rework",          "Needs rework",     "warning", False),
+    ("scrap",           "Scrapped",         "defect",  False),
+)
+
+
+def badge_id_for(code: str) -> str:
+    return uuid.uuid5(BADGE_NAMESPACE, code).hex
+
+
 def now_iso() -> str:
     """ISO-8601 UTC, millisecond resolution. Second resolution let two
     events written in the same recorder tick collide, which matters for any
@@ -165,6 +197,7 @@ class Ledger:
         self._tx_depth = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._open_or_quarantine()
+        self._seed_badges()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), check_same_thread=False,
@@ -366,6 +399,26 @@ class Ledger:
         with self.transaction() as conn:
             cur = conn.execute(sql, params)
             return cur.rowcount
+
+    def _seed_badges(self) -> None:
+        """Idempotent: INSERT OR IGNORE on a deterministic id, so reopening
+        the database is a no-op and a later cloud pull lands on these rows.
+        One transaction() for the whole batch (isolation_level is None, so a
+        bare executemany would autocommit per row and a lone commit() is a
+        no-op) -- all rows land together or none do."""
+        ts = self._clock()
+        with self.transaction() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO badges "
+                "(id, code, label, severity, auto, archived, "
+                " created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+                [(badge_id_for(code), code, label, severity, int(auto), ts, ts)
+                 for code, label, severity, auto in SEED_BADGES])
+
+    def badges(self) -> list[dict]:
+        return self.query(
+            "SELECT * FROM badges WHERE archived = 0 ORDER BY code")
 
     def close(self) -> None:
         """Closing twice is safe -- sqlite3.Connection.close() is a no-op on

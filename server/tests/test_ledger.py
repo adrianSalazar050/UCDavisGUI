@@ -5,7 +5,8 @@ import threading
 import pytest
 
 from server import ledger as ledger_module
-from server.ledger import SCHEMA_VERSION, TABLES, Ledger
+from server.ledger import SCHEMA_VERSION, TABLES, Ledger, SEED_BADGES, \
+    badge_id_for
 
 
 @pytest.fixture
@@ -216,3 +217,38 @@ def test_a_half_migrated_database_is_quarantined_too(tmp_path):
     finally:
         ledger.close()
     assert len(list(tmp_path.glob("ledger.db.corrupt-*"))) == 1
+
+
+def test_seeds_the_badge_catalogue(led):
+    codes = {b["code"] for b in led.badges()}
+    assert codes == {code for code, _, _, _ in SEED_BADGES}
+
+
+def test_seed_badge_ids_are_deterministic(tmp_path):
+    a = Ledger(tmp_path / "a.db")
+    b = Ledger(tmp_path / "b.db")
+    try:
+        ids_a = {x["code"]: x["id"] for x in a.badges()}
+        ids_b = {x["code"]: x["id"] for x in b.badges()}
+        assert ids_a == ids_b
+        assert ids_a["spaghetti"] == badge_id_for("spaghetti")
+    finally:
+        a.close()
+        b.close()
+
+
+def test_reseeding_does_not_duplicate(tmp_path):
+    path = tmp_path / "ledger.db"
+    first = Ledger(path)
+    count = len(first.badges())
+    first.close()
+    second = Ledger(path)
+    try:
+        assert len(second.badges()) == count
+    finally:
+        second.close()
+
+
+def test_only_auto_badges_are_marked_auto(led):
+    auto = {b["code"] for b in led.badges() if b["auto"]}
+    assert auto == {"spaghetti", "stringing", "hms_error", "autostop"}
