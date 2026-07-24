@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 from .ledger import DETECTOR, badge_id_for
 from .printer import BUSY_STATES
@@ -23,6 +24,10 @@ from .printer import BUSY_STATES
 log = logging.getLogger("server.runlog")
 
 TICK_S = 1.0
+
+# How long to wait for a printer to report its state after a restart before
+# giving up and closing its orphaned run UNKNOWN. See _reconcile_pending.
+RECONCILE_DEADLINE_S = 30.0
 
 # gcode_state values that mean the print is over. FAILED is included because
 # master.md section 3.1 verified on hardware that a STOPPED print reports
@@ -36,20 +41,36 @@ class RunRecorder:
     attribution simply never fires, which is what the desktop build gets."""
 
     def __init__(self, registry, ledger, *, detection=None,
-                 tick_s: float = TICK_S):
+                 tick_s: float = TICK_S,
+                 reconcile_deadline_s: float = RECONCILE_DEADLINE_S,
+                 clock=time.monotonic):
         self.registry = registry
         self.ledger = ledger
         self.detection = detection
         self._tick_s = tick_s
+        self._reconcile_deadline_s = reconcile_deadline_s
+        self._clock = clock
         self._prev: dict[str, dict] = {}
+        # run_id -> serial for runs open when this recorder started. Resolved
+        # LAZILY on ticks (see _reconcile_pending), never synchronously at
+        # start(): at startup the MQTT links have not delivered a report, so a
+        # printer that is physically mid-print still looks idle. Closing then
+        # would mislabel a running print UNKNOWN and split it from its
+        # attributed queue row -- a real, hardware-confirmed bug.
+        self._pending: dict[str, str] = {}
+        self._reconcile_until: float | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
     # ---------------- the tick ----------------
 
     def tick(self) -> None:
-        for summary in self.registry.summaries() or []:
-            serial = summary.get("serial")
+        summaries = self.registry.summaries() or []
+        by_serial = {s["serial"]: s for s in summaries
+                     if isinstance(s, dict) and s.get("serial")}
+        self._reconcile_pending(by_serial)
+        for summary in summaries:
+            serial = summary.get("serial") if isinstance(summary, dict) else None
             if not serial:
                 continue
             try:
@@ -212,38 +233,62 @@ class RunRecorder:
             except Exception as e:  # noqa: BLE001
                 log.exception("run recorder tick failed: %s", e)
 
-    def reconcile_startup(self) -> None:
-        """Close runs left open by a restart.
-
-        A row with end_state NULL means "printing right now". After a restart
-        that is only true if the printer still says so; otherwise the row
-        would stay open forever and poison every "what is running" query from
-        then on. UNKNOWN is the honest verdict -- we genuinely do not know how
-        that print ended, and MQTT has no history to replay.
-        """
+    def _arm_reconcile(self) -> None:
+        """Snapshot the runs open before this session. _reconcile_pending
+        resolves them once printers report -- see _pending's comment for why
+        this is deferred rather than done here and now."""
         try:
-            live = set()
-            for summary in self.registry.summaries() or []:
-                state = (summary.get("gcode_state") or "").upper()
-                if state in BUSY_STATES and summary.get("serial"):
-                    live.add(summary["serial"])
-            for run in self.ledger.open_runs():
-                if run["printer_serial"] in live:
-                    continue
-                self.ledger.close_run(run["id"], end_state="UNKNOWN")
-                self.ledger.add_event(
-                    printer_serial=run["printer_serial"], run_id=run["id"],
-                    kind="state_change", source="server",
-                    payload={"end_state": "UNKNOWN",
-                             "reason": "server restarted while this run was "
-                                       "open; its outcome was never observed"})
-                log.warning("closed orphaned run %s for %s as UNKNOWN",
-                            run["id"], run["printer_serial"])
+            self._pending = {r["id"]: r["printer_serial"]
+                             for r in self.ledger.open_runs()}
+            self._reconcile_until = self._clock() + self._reconcile_deadline_s
         except Exception as e:  # noqa: BLE001
-            log.exception("startup reconciliation failed: %s", e)
+            log.exception("arming startup reconciliation failed: %s", e)
+
+    def _reconcile_pending(self, by_serial: dict) -> None:
+        """Resolve each run left open by a restart, ONCE its printer reports.
+
+        Only a printer whose summary shows connection == "ok" gives a verdict:
+        busy  -> still printing; leave the run open so _begin re-adopts it and
+                 its source/attribution survives the restart. Drop pending.
+        idle  -> the print ended while we were down; close UNKNOWN.
+        A printer not yet reporting (connection not ok) stays pending and is
+        retried next tick, until the deadline -- then closed UNKNOWN, because
+        an open row that never resolves poisons every 'what is running' query
+        forever and UNKNOWN is the honest verdict.
+        """
+        if not self._pending:
+            return
+        overdue = (self._reconcile_until is not None
+                   and self._clock() >= self._reconcile_until)
+        for run_id, serial in list(self._pending.items()):
+            summ = by_serial.get(serial)
+            if summ is not None and summ.get("connection") == "ok":
+                state = (summ.get("gcode_state") or "").upper()
+                if state in BUSY_STATES:
+                    del self._pending[run_id]   # still live; _begin adopts it
+                else:
+                    self._close_orphan(run_id, serial,
+                                       "the printer was idle after the restart")
+                    del self._pending[run_id]
+            elif overdue:
+                self._close_orphan(
+                    run_id, serial,
+                    "the printer never reported after the restart")
+                del self._pending[run_id]
+
+    def _close_orphan(self, run_id: str, serial: str, reason: str) -> None:
+        self.ledger.close_run(run_id, end_state="UNKNOWN")
+        self.ledger.add_event(
+            printer_serial=serial, run_id=run_id, kind="state_change",
+            source="server",
+            payload={"end_state": "UNKNOWN",
+                     "reason": f"server restarted while this run was open; "
+                               f"{reason}"})
+        log.warning("closed orphaned run %s for %s as UNKNOWN (%s)",
+                    run_id, serial, reason)
 
     def start(self) -> None:
-        self.reconcile_startup()
+        self._arm_reconcile()
         self._thread.start()
 
     def stop(self) -> None:

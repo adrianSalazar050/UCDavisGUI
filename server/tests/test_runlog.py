@@ -23,10 +23,10 @@ class FakeRegistry:
 
 
 def summary(serial="S1", name="A1", state="IDLE", layer=None, total=None,
-            hms=(), subtask=None):
+            hms=(), subtask=None, connection="ok"):
     return {"serial": serial, "name": name, "gcode_state": state,
             "layer_num": layer, "total_layer_num": total, "hms": list(hms),
-            "subtask_name": subtask}
+            "subtask_name": subtask, "connection": connection}
 
 
 @pytest.fixture
@@ -217,23 +217,62 @@ def test_grams_stay_null_when_nothing_was_planned(led):
     assert run["actual_grams_basis"] is None
 
 
-def test_reconcile_startup_closes_a_run_left_open_by_a_restart(led):
-    stale = led.open_run(printer_serial="S1", printer_name="A1",
-                         source="queue")
-    rec = RunRecorder(FakeRegistry([[summary(state="IDLE")]]), led)
-    rec.reconcile_startup()
-    run = led.get_run(stale)
-    assert run["end_state"] == "UNKNOWN"
-    kinds = [e["kind"] for e in led.events_for(stale)]
-    assert "state_change" in kinds
+def test_restart_mid_print_preserves_attribution(led):
+    """THE regression test. A queue-attributed run is open (started before the
+    restart). On restart the printer reports RUNNING -- the run must stay open,
+    keep source=queue, and NOT spawn a duplicate."""
+    existing = led.open_run(printer_serial="S1", printer_name="A1",
+                            source="queue", queue_job_id="j1",
+                            copies_planned=1, planned_grams=5.0)
+    rec = RunRecorder(FakeRegistry([
+        [summary(state="RUNNING", layer=3, total=100)]]), led)
+    rec._arm_reconcile()
+    rec.tick()
+    runs = led.list_runs()
+    assert len(runs) == 1, "the restart split the print into two runs"
+    assert runs[0]["id"] == existing
+    assert runs[0]["source"] == "queue"
+    assert runs[0]["end_state"] is None
 
 
-def test_reconcile_startup_leaves_a_genuinely_running_print_alone(led):
-    live = led.open_run(printer_serial="S1", printer_name="A1",
-                        source="queue")
-    rec = RunRecorder(FakeRegistry([[summary(state="RUNNING")]]), led)
-    rec.reconcile_startup()
-    assert led.get_run(live)["end_state"] is None
+def test_a_printer_not_yet_reporting_is_not_closed_prematurely(led):
+    """The bug's core: at startup the MQTT report has not arrived, so
+    connection is not 'ok'. The open run must NOT be closed on that
+    uncertainty."""
+    existing = led.open_run(printer_serial="S1", source="queue")
+    rec = RunRecorder(FakeRegistry([
+        [summary(state="IDLE", connection="disconnected")]]), led)
+    rec._arm_reconcile()
+    rec.tick()
+    assert led.get_run(existing)["end_state"] is None
+
+
+def test_a_confirmed_idle_printer_closes_its_orphan(led):
+    """Printer connected and reporting idle -> the print really did end while
+    we were down -> close UNKNOWN."""
+    existing = led.open_run(printer_serial="S1", source="queue")
+    rec = RunRecorder(FakeRegistry([
+        [summary(state="IDLE", connection="ok")]]), led)
+    rec._arm_reconcile()
+    rec.tick()
+    assert led.get_run(existing)["end_state"] == "UNKNOWN"
+
+
+def test_an_unreporting_printer_is_closed_after_the_deadline(led):
+    """A printer that never reports can't be confirmed -- after the deadline,
+    close the orphan UNKNOWN rather than leak an open row forever."""
+    existing = led.open_run(printer_serial="S1", source="queue")
+    now = [1000.0]
+    rec = RunRecorder(FakeRegistry([
+        [summary(state="IDLE", connection="disconnected")],
+        [summary(state="IDLE", connection="disconnected")]]), led,
+        reconcile_deadline_s=30.0, clock=lambda: now[0])
+    rec._arm_reconcile()
+    rec.tick()
+    assert led.get_run(existing)["end_state"] is None, "closed before deadline"
+    now[0] = 1031.0
+    rec.tick()
+    assert led.get_run(existing)["end_state"] == "UNKNOWN"
 
 
 def test_a_ledger_that_raises_never_escapes_the_tick(led):
