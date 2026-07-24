@@ -1,12 +1,17 @@
 # ERP Traceability Phase 1 — Local Ledger + Run Recording Implementation Plan
 
-> **STATUS: SHIPPED (2026-07-24), Tasks 1–17.** Phase 1 of
-> `docs/superpowers/specs/2026-07-24-erp-traceability-design.md` landed as
-> written below and was verified on the `--mock` server end to end (run
-> opened, layer progress tracked, closed FINISH, a piece created, served over
-> `/api/runs`). **Task 18, the real-hardware gate, is outstanding** — no
-> genuine print has been recorded yet, so per §1.1's discipline the feature
-> stays unverified on hardware until someone runs one.
+> **STATUS: SHIPPED (2026-07-24), Tasks 1–17, plus one post-ship fix.**
+> Phase 1 of `docs/superpowers/specs/2026-07-24-erp-traceability-design.md`
+> landed as written below, verified on `--mock` end to end, and then
+> **exercised on the real A1**: a `cube` print was recorded live (run opened,
+> real layer progress tracked to 86/100+, `connection=ok`). That run first
+> surfaced a genuine bug — a server restart mid-print split the print into a
+> mislabeled `UNKNOWN` row plus a duplicate unattributed one, losing
+> attribution. **Fixed** (commit `497082e`): reconciliation is now deferred
+> and connection-aware, so attribution survives a restart. Real-hardware
+> confirmation that a print recorded end to end reaches `FINISH` with pieces
+> (Task 18) is still worth capturing once the live print completes, but the
+> recording path is now exercised on hardware.
 >
 > Historical record from the moment of writing, not maintained afterwards.
 > **`master.md` is authoritative wherever this file disagrees with it.**
