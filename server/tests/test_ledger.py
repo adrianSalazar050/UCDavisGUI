@@ -319,3 +319,35 @@ def test_list_runs_is_newest_first_and_filterable(led):
     ids = [r["id"] for r in led.list_runs()]
     assert set(ids) == {a, b}
     assert [r["id"] for r in led.list_runs(serial="S2")] == [b]
+
+
+def test_add_event_records_payload_as_json(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.add_event(printer_serial="S1", run_id=run_id, kind="hms_raised",
+                  source="server", payload={"code": "0300_1100_0002_0001"})
+    events = led.events_for(run_id)
+    assert len(events) == 1
+    assert events[0]["kind"] == "hms_raised"
+    assert events[0]["payload"] == {"code": "0300_1100_0002_0001"}
+
+
+def test_events_are_returned_oldest_first(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    for kind in ("state_change", "hms_raised", "hms_cleared"):
+        led.add_event(printer_serial="S1", run_id=run_id, kind=kind,
+                      source="server")
+    assert [e["kind"] for e in led.events_for(run_id)] == [
+        "state_change", "hms_raised", "hms_cleared"]
+
+
+def test_duplicate_client_uuid_is_ignored(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    first = led.add_event(printer_serial="S1", run_id=run_id,
+                          kind="operator_note", source="operator",
+                          client_uuid="abc")
+    second = led.add_event(printer_serial="S1", run_id=run_id,
+                           kind="operator_note", source="operator",
+                           client_uuid="abc")
+    assert first is not None
+    assert second is None, "a repeated client_uuid created a second row"
+    assert len(led.events_for(run_id)) == 1

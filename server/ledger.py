@@ -531,6 +531,42 @@ class Ledger:
         params += [int(limit), int(offset)]
         return self.query(sql, params)
 
+    # ---------------- events ----------------
+
+    def add_event(self, *, printer_serial: str, kind: str, source: str,
+                  run_id: str | None = None, payload=None,
+                  ts: str | None = None,
+                  client_uuid: str | None = None) -> str | None:
+        """Append an event. Returns its id, or None when `client_uuid`
+        duplicates one already stored.
+
+        Returning None rather than raising is what makes an ingesting client's
+        "retry until it works" safe: a resend after a timeout that actually
+        landed is a silent no-op, not an error and not a second row.
+        """
+        stamp = ts or self._clock()
+        event_id = new_id()
+        try:
+            self.execute(
+                "INSERT INTO run_events (id, run_id, printer_serial, ts, "
+                "kind, payload, source, client_uuid, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (event_id, run_id, printer_serial, stamp, kind,
+                 json.dumps(payload) if payload is not None else None,
+                 source, client_uuid, stamp, stamp))
+        except sqlite3.IntegrityError:
+            return None
+        return event_id
+
+    def events_for(self, run_id: str) -> list[dict]:
+        rows = self.query(
+            "SELECT * FROM run_events WHERE run_id = ? ORDER BY ts, rowid",
+            (run_id,))
+        for row in rows:
+            row["payload"] = (json.loads(row["payload"])
+                              if row["payload"] else None)
+        return rows
+
     def close(self) -> None:
         """Closing twice is safe -- sqlite3.Connection.close() is a no-op on
         a connection that is already closed. Calling query()/execute()
