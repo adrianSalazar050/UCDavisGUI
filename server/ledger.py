@@ -16,9 +16,15 @@ Timestamps are ISO-8601 UTC strings and ids are uuid4 hex strings, both stored
 as TEXT. That is deliberate: the same rows are destined for Postgres columns of
 type timestamptz and uuid in a later phase, and TEXT round-trips into both
 without a conversion layer.
+
+Boot invariant (master.md section 11): the server must always be able to
+start. A migration that dies partway through must leave the file exactly as
+it was before it started, never half-upgraded -- see Ledger._migrate and
+Ledger.transaction below.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import json
 import logging
@@ -40,7 +46,12 @@ TABLES = (
 # Forward-only: never edit a shipped migration, always append a new one.
 MIGRATIONS = {
     1: [
-        "CREATE TABLE schema_version (version INTEGER NOT NULL)",
+        # id + CHECK(id = 1) makes this a real singleton: at most one row can
+        # ever exist, so "the current version" is never ambiguous and never
+        # needs an ORDER BY/MAX to find, and an UPDATE targeting id=1 can
+        # never silently affect zero rows once the row exists.
+        "CREATE TABLE schema_version "
+        "(id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)",
         "CREATE TABLE ledger_meta (key TEXT PRIMARY KEY, value TEXT)",
         """CREATE TABLE badges (
              id TEXT PRIMARY KEY,
@@ -115,10 +126,12 @@ MIGRATIONS = {
 
 
 def now_iso() -> str:
-    """ISO-8601 UTC, second-resolution, always with a +00:00 offset so the
-    value is unambiguous in Postgres later."""
-    return _dt.datetime.now(_dt.timezone.utc).replace(
-        microsecond=0).isoformat()
+    """ISO-8601 UTC, millisecond resolution. Second resolution let two
+    events written in the same recorder tick collide, which matters for any
+    consumer that sorts by ts alone with no other tiebreaker. Always carries
+    a +00:00 offset so the value is unambiguous once it lands in a Postgres
+    timestamptz later."""
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="milliseconds")
 
 
 def new_id() -> str:
@@ -132,12 +145,24 @@ class Ledger:
     volume here is a handful of rows per print, and FastAPI's threadpool plus
     RunRecorder's thread both write, so the simplest thing that is definitely
     correct wins. The lock is never held across anything but SQLite calls.
+
+    Note this buys nothing across OTHER connections/processes by itself --
+    that is what PRAGMA journal_mode=WAL and busy_timeout are for (see
+    _connect). Inside this process there is exactly one connection, so it is
+    self._lock, not SQLite, doing the serializing; a second reader in this
+    same process is blocked by the lock, same as a writer would be.
     """
 
-    def __init__(self, path, *, clock=now_iso):
+    def __init__(self, path: pathlib.Path, *, clock=now_iso):
         self.path = pathlib.Path(path)
         self._clock = clock
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        # Depth of nested transaction() calls on the thread currently
+        # holding self._lock. RLock lets the same thread re-enter (so
+        # execute()/query() can be called from inside a transaction()
+        # block); this counter is what stops a nested call from issuing a
+        # second BEGIN, which SQLite rejects. See transaction().
+        self._tx_depth = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._connect()
         self._migrate()
@@ -146,9 +171,31 @@ class Ledger:
         conn = sqlite3.connect(str(self.path), check_same_thread=False,
                                timeout=5.0)
         conn.row_factory = sqlite3.Row
-        # WAL so a reader is never blocked by the recorder's write; busy_timeout
-        # so a contended write waits rather than raising "database is locked".
-        conn.execute("PRAGMA journal_mode=WAL")
+        # Full manual transaction control. sqlite3's default (legacy)
+        # isolation_level implicitly opens a transaction before a DML
+        # statement but NOT before DDL -- a bare CREATE TABLE commits on its
+        # own the instant it runs, no matter how you wrap it, which is
+        # exactly what made the old _migrate non-atomic (tables could commit
+        # before the schema_version stamp that was meant to travel with
+        # them). isolation_level = None turns that implicit behaviour off
+        # entirely, so transaction() (and _migrate, which uses it) can group
+        # CREATE TABLE statements and the version stamp into one real
+        # BEGIN/COMMIT unit -- SQLite's DDL genuinely is transactional once
+        # you ask for the transaction yourself.
+        conn.isolation_level = None
+        # WAL and busy_timeout matter for OTHER connections on this same
+        # file (a second process, a future admin CLI) so a writer never
+        # blocks a reader at the SQLite level. Read the pragma's own answer
+        # back and warn rather than assume it stuck: some filesystems
+        # (network shares, and some cloud-synced folders -- this repo lives
+        # inside OneDrive) silently refuse WAL, and PRAGMA journal_mode
+        # reports whatever mode it actually landed in instead of raising.
+        mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if mode.lower() != "wal":
+            log.warning(
+                "requested journal_mode=WAL but sqlite reports %r for %s -- "
+                "the filesystem may not support WAL; continuing in %s mode",
+                mode, self.path, mode)
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
@@ -162,24 +209,68 @@ class Ledger:
             current = 0
             if have:
                 row = self._conn.execute(
-                    "SELECT version FROM schema_version").fetchone()
+                    "SELECT version FROM schema_version WHERE id = 1"
+                ).fetchone()
                 current = row["version"] if row else 0
+            creating = current == 0
             for version in sorted(MIGRATIONS):
                 if version <= current:
                     continue
-                for statement in MIGRATIONS[version]:
-                    self._conn.execute(statement)
-                if version == 1:
+                # One transaction per version: every CREATE TABLE/INDEX for
+                # this version and the version stamp that records it landed
+                # either all commit together or none do. Without this, a
+                # crash between the last CREATE TABLE and the stamp leaves
+                # tables-with-no-version-row -- the next boot sees
+                # current = 0, replays this same version, and dies on
+                # "table already exists", permanently. transaction() makes
+                # that window disappear.
+                with self.transaction():
+                    for statement in MIGRATIONS[version]:
+                        self._conn.execute(statement)
                     self._conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (?)",
-                        (version,))
+                        "INSERT OR REPLACE INTO schema_version (id, version) "
+                        "VALUES (1, ?)", (version,))
+                if creating:
+                    log.info("ledger database created at schema version %d",
+                             version)
                 else:
-                    self._conn.execute(
-                        "UPDATE schema_version SET version = ?", (version,))
-                self._conn.commit()
-                log.info("ledger migrated to schema version %d", version)
+                    log.info("ledger migrated to schema version %d", version)
 
     # ---------------- low-level ----------------
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """One all-or-nothing unit of work spanning multiple statements:
+        commits if the block runs to completion, rolls back if it raises.
+        _migrate uses this so a version's CREATE TABLEs and its
+        schema_version stamp land together or not at all. Later callers use
+        it the same way -- writing N piece rows for a run, or closing a run
+        alongside its final event, as one unit.
+
+        Re-entrant: calling transaction() again, or calling execute()/
+        query(), from inside an already-open transaction() block joins that
+        same transaction rather than issuing a second BEGIN (SQLite rejects
+        a nested BEGIN outright). That is why self._lock is a
+        threading.RLock and not a plain Lock -- a plain Lock would deadlock
+        the instant code inside this `with` block called self.execute() or
+        self.query(), both of which also take the lock.
+        """
+        with self._lock:
+            outermost = self._tx_depth == 0
+            if outermost:
+                self._conn.execute("BEGIN")
+            self._tx_depth += 1
+            try:
+                yield self._conn
+            except BaseException:
+                if outermost:
+                    self._conn.execute("ROLLBACK")
+                raise
+            else:
+                if outermost:
+                    self._conn.execute("COMMIT")
+            finally:
+                self._tx_depth -= 1
 
     def query(self, sql: str, params=()) -> list[dict]:
         with self._lock:
@@ -187,11 +278,22 @@ class Ledger:
         return [dict(r) for r in rows]
 
     def execute(self, sql: str, params=()) -> int:
-        with self._lock:
-            cur = self._conn.execute(sql, params)
-            self._conn.commit()
+        """A single statement as its own transaction: commits on success,
+        rolls back on failure, so a caught error (a later task turns a
+        duplicate client_uuid's IntegrityError into a None return) never
+        leaves an open write transaction sitting on the shared connection --
+        that used to be enough on its own to make a second connection block
+        with "database is locked"."""
+        with self.transaction() as conn:
+            cur = conn.execute(sql, params)
             return cur.rowcount
 
     def close(self) -> None:
+        """Closing twice is safe -- sqlite3.Connection.close() is a no-op on
+        a connection that is already closed. Calling query()/execute()
+        AFTER close() is not: it raises sqlite3.ProgrammingError, so a
+        caller that keeps a background thread alive (RunRecorder, later)
+        must tolerate that at shutdown rather than assume close() waits for
+        in-flight callers."""
         with self._lock:
             self._conn.close()
