@@ -254,3 +254,82 @@ export async function login(password) {
 export async function logout() {
   await fetch("/api/logout", { method: "POST" });
 }
+
+// --- traceability -------------------------------------------------------
+// All of these 404 when the server was built without a ledger, the same
+// "None means inert" convention the slice routes use.
+
+export async function fetchRuns(serial, { limit = 50 } = {}) {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (serial) query.set("serial", serial);
+  const res = await fetch(`/api/runs?${query}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// { run, events, pieces (each with .badges), badges }
+export async function fetchRun(runId) {
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function patchRun(runId, body) {
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function patchPiece(pieceId, body) {
+  const res = await fetch(`/api/pieces/${encodeURIComponent(pieceId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// One action for a whole plate. overrides: [{ index_in_run, status }]
+export async function bulkPieces(runId, { status, inspected_by, overrides }) {
+  const res = await fetch(
+    `/api/runs/${encodeURIComponent(runId)}/pieces/bulk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, inspected_by, overrides: overrides ?? [] }),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function fetchBadges() {
+  const res = await fetch("/api/badges");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function addPieceBadge(pieceId, code) {
+  const res = await fetch(
+    `/api/pieces/${encodeURIComponent(pieceId)}/badges`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function removePieceBadge(pieceId, code) {
+  const res = await fetch(
+    `/api/pieces/${encodeURIComponent(pieceId)}/badges`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
