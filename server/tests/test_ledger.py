@@ -351,3 +351,95 @@ def test_duplicate_client_uuid_is_ignored(led):
     assert first is not None
     assert second is None, "a repeated client_uuid created a second row"
     assert len(led.events_for(run_id)) == 1
+
+
+def test_create_pieces_makes_one_row_per_copy(led):
+    run_id = led.open_run(printer_serial="S1", source="queue",
+                          copies_planned=4)
+    assert led.create_pieces(run_id, 4) == 4
+    pieces = led.pieces_for(run_id)
+    assert [p["index_in_run"] for p in pieces] == [1, 2, 3, 4]
+    assert {p["status"] for p in pieces} == {"pending_inspection"}
+
+
+def test_create_pieces_is_idempotent(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 3)
+    assert led.create_pieces(run_id, 3) == 0
+    assert len(led.pieces_for(run_id)) == 3
+
+
+def test_set_piece_records_the_inspector(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 1)
+    piece = led.pieces_for(run_id)[0]
+    assert led.set_piece(piece["id"], status="scrap", inspected_by="adrian")
+    updated = led.pieces_for(run_id)[0]
+    assert updated["status"] == "scrap"
+    assert updated["inspected_by"] == "adrian"
+    assert updated["inspected_at"] is not None
+
+
+def test_set_piece_rejects_an_unknown_status(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 1)
+    piece = led.pieces_for(run_id)[0]
+    with pytest.raises(ValueError):
+        led.set_piece(piece["id"], status="excellent")
+
+
+def test_bulk_applies_a_status_with_per_index_overrides(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 8)
+    changed = led.set_pieces_bulk(run_id, "good", inspected_by="adrian",
+                                  overrides=[{"index_in_run": 3,
+                                              "status": "scrap"}])
+    assert changed == 8
+    by_index = {p["index_in_run"]: p["status"]
+                for p in led.pieces_for(run_id)}
+    assert by_index[3] == "scrap"
+    assert by_index[1] == by_index[8] == "good"
+
+
+def test_piece_counts_rolls_up_by_run(led):
+    a = led.open_run(printer_serial="S1", source="queue")
+    b = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(a, 3)
+    led.create_pieces(b, 1)
+    for piece in led.pieces_for(a)[:2]:
+        led.set_piece(piece["id"], status="good")
+    counts = led.piece_counts([a, b])
+    assert counts[a] == {"total": 3, "good": 2, "scrap": 0, "rework": 0,
+                         "pending": 1}
+    assert counts[b]["pending"] == 1
+    assert led.piece_counts([]) == {}
+
+
+def test_run_badges_add_and_remove(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.add_run_badge(run_id, badge_id_for("spaghetti"),
+                      applied_by="detector")
+    assert [b["code"] for b in led.run_badges(run_id)] == ["spaghetti"]
+    # Applying the same badge twice is not an error and not a second row.
+    led.add_run_badge(run_id, badge_id_for("spaghetti"),
+                      applied_by="detector")
+    assert len(led.run_badges(run_id)) == 1
+    assert led.remove_run_badge(run_id, badge_id_for("spaghetti"))
+    assert led.run_badges(run_id) == []
+
+
+def test_a_non_auto_badge_cannot_be_applied_by_the_detector(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    with pytest.raises(ValueError):
+        led.add_run_badge(run_id, badge_id_for("warped"),
+                          applied_by="detector")
+
+
+def test_piece_badges_add_and_remove(led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 1)
+    piece = led.pieces_for(run_id)[0]
+    led.add_piece_badge(piece["id"], badge_id_for("warped"),
+                        applied_by="operator")
+    assert [b["code"] for b in led.piece_badges(piece["id"])] == ["warped"]
+    assert led.remove_piece_badge(piece["id"], badge_id_for("warped"))

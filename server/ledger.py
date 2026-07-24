@@ -186,6 +186,8 @@ RUN_WRITABLE = frozenset({
 END_STATES = ("FINISH", "FAILED", "STOPPED_BY_MONITOR",
               "STOPPED_BY_OPERATOR", "START_UNCONFIRMED", "UNKNOWN")
 
+PIECE_STATUSES = ("pending_inspection", "good", "rework", "scrap")
+
 
 def _checked(fields: dict, allowed: frozenset) -> dict:
     """Reject any key outside the allowlist, then hand back the fields.
@@ -566,6 +568,181 @@ class Ledger:
             row["payload"] = (json.loads(row["payload"])
                               if row["payload"] else None)
         return rows
+
+    # ---------------- pieces ----------------
+
+    def create_pieces(self, run_id: str, count: int, *,
+                      part_id=None, order_line_id=None) -> int:
+        """One row per planned copy, all pending_inspection. Returns how many
+        were created; 0 if they already exist.
+
+        INSERT OR IGNORE against the UNIQUE(run_id, index_in_run) constraint
+        makes this idempotent, which matters because a run can reach a
+        terminal state twice in the recorder's view (FAILED then IDLE) and
+        must not grow a second set of pieces.
+
+        Even on a FAILED run these default to pending_inspection rather than
+        scrap: a failed print sometimes still yields usable parts, and that is
+        the operator's call to make, not the recorder's.
+        """
+        ts = self._clock()
+        rows = [(new_id(), run_id, part_id, order_line_id, i,
+                 "pending_inspection", ts, ts)
+                for i in range(1, int(count) + 1)]
+        # One transaction() for the batch (isolation_level is None, so a
+        # bare executemany would autocommit per row and a lone commit() is a
+        # no-op): all N pieces land together or none do.
+        with self.transaction() as conn:
+            cur = conn.executemany(
+                "INSERT OR IGNORE INTO pieces (id, run_id, part_id, "
+                "order_line_id, index_in_run, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+            return cur.rowcount
+
+    def pieces_for(self, run_id: str) -> list[dict]:
+        return self.query(
+            "SELECT * FROM pieces WHERE run_id = ? ORDER BY index_in_run",
+            (run_id,))
+
+    def piece_counts(self, run_ids) -> dict[str, dict]:
+        """-> {run_id: {total, good, scrap, rework, pending}} for the given
+        runs, in ONE grouped query rather than one query per run: the history
+        list renders 50 rows at a time and a per-row query there is 50 round
+        trips for a column."""
+        run_ids = list(run_ids)
+        if not run_ids:
+            return {}
+        marks = ", ".join("?" for _ in run_ids)
+        rows = self.query(
+            f"SELECT run_id, status, COUNT(*) AS n FROM pieces "
+            f"WHERE run_id IN ({marks}) GROUP BY run_id, status", run_ids)
+        out: dict[str, dict] = {}
+        for row in rows:
+            bucket = out.setdefault(row["run_id"], {
+                "total": 0, "good": 0, "scrap": 0, "rework": 0, "pending": 0})
+            bucket["total"] += row["n"]
+            key = row["status"] if row["status"] in (
+                "good", "scrap", "rework") else "pending"
+            bucket[key] += row["n"]
+        return out
+
+    def set_piece(self, piece_id: str, *, status: str | None = None,
+                  inspected_by: str | None = None,
+                  notes: str | None = None) -> bool:
+        if status is not None and status not in PIECE_STATUSES:
+            raise ValueError(f"unknown piece status {status!r}")
+        ts = self._clock()
+        sets, params = ["updated_at = ?"], [ts]
+        if status is not None:
+            sets += ["status = ?", "inspected_at = ?"]
+            params += [status, ts]
+        if inspected_by is not None:
+            sets.append("inspected_by = ?")
+            params.append(inspected_by)
+        if notes is not None:
+            sets.append("notes = ?")
+            params.append(notes)
+        params.append(piece_id)
+        return self.execute(
+            f"UPDATE pieces SET {', '.join(sets)} WHERE id = ?", params) > 0
+
+    def set_pieces_bulk(self, run_id: str, status: str, *,
+                        inspected_by: str | None = None,
+                        overrides=None) -> int:
+        """Set every piece of a run to `status`, then apply per-index
+        exceptions. Returns the number of pieces touched.
+
+        This exists because a plate of eight good parts has to be ONE action.
+        If confirming a plate is tedious the verdicts stop being entered, and
+        piece-level traceability quietly becomes fiction.
+        """
+        if status not in PIECE_STATUSES:
+            raise ValueError(f"unknown piece status {status!r}")
+        for override in overrides or []:
+            if override.get("status") not in PIECE_STATUSES:
+                raise ValueError(
+                    f"unknown piece status {override.get('status')!r}")
+        ts = self._clock()
+        # The blanket set and every override are ONE transaction: a plate must
+        # never end up half "all good" and half its old verdict because the
+        # process died between the two statements. Validate all overrides
+        # first (above) so a bad one raises before any write, not midway.
+        with self.transaction() as conn:
+            touched = conn.execute(
+                "UPDATE pieces SET status = ?, inspected_at = ?, "
+                "inspected_by = COALESCE(?, inspected_by), updated_at = ? "
+                "WHERE run_id = ?",
+                (status, ts, inspected_by, ts, run_id)).rowcount
+            for override in overrides or []:
+                conn.execute(
+                    "UPDATE pieces SET status = ?, inspected_at = ?, "
+                    "inspected_by = COALESCE(?, inspected_by), updated_at = ? "
+                    "WHERE run_id = ? AND index_in_run = ?",
+                    (override["status"], ts, inspected_by, ts, run_id,
+                     int(override["index_in_run"])))
+        return touched
+
+    # ---------------- badges ----------------
+
+    def _badge(self, badge_id: str) -> dict | None:
+        rows = self.query("SELECT * FROM badges WHERE id = ?", (badge_id,))
+        return rows[0] if rows else None
+
+    def _check_badge(self, badge_id: str, applied_by: str) -> dict:
+        badge = self._badge(badge_id)
+        if badge is None:
+            raise ValueError(f"unknown badge {badge_id!r}")
+        if applied_by == "detector" and not badge["auto"]:
+            # The split that makes piece-level verdicts meaningful: the
+            # system may only apply badges it can actually observe.
+            raise ValueError(
+                f"{badge['code']} is not an automatic badge; only a human "
+                "can apply it")
+        return badge
+
+    def add_run_badge(self, run_id: str, badge_id: str, *,
+                      applied_by: str, note: str | None = None) -> None:
+        self._check_badge(badge_id, applied_by)
+        ts = self._clock()
+        self.execute(
+            "INSERT OR IGNORE INTO run_badges (id, run_id, badge_id, "
+            "applied_by, applied_at, note, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (new_id(), run_id, badge_id, applied_by, ts, note, ts, ts))
+
+    def remove_run_badge(self, run_id: str, badge_id: str) -> bool:
+        return self.execute(
+            "DELETE FROM run_badges WHERE run_id = ? AND badge_id = ?",
+            (run_id, badge_id)) > 0
+
+    def run_badges(self, run_id: str) -> list[dict]:
+        return self.query(
+            "SELECT b.code, b.label, b.severity, rb.badge_id, rb.applied_by, "
+            "rb.applied_at, rb.note FROM run_badges rb "
+            "JOIN badges b ON b.id = rb.badge_id WHERE rb.run_id = ? "
+            "ORDER BY b.code", (run_id,))
+
+    def add_piece_badge(self, piece_id: str, badge_id: str, *,
+                        applied_by: str, note: str | None = None) -> None:
+        self._check_badge(badge_id, applied_by)
+        ts = self._clock()
+        self.execute(
+            "INSERT OR IGNORE INTO piece_badges (id, piece_id, badge_id, "
+            "applied_by, applied_at, note, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (new_id(), piece_id, badge_id, applied_by, ts, note, ts, ts))
+
+    def remove_piece_badge(self, piece_id: str, badge_id: str) -> bool:
+        return self.execute(
+            "DELETE FROM piece_badges WHERE piece_id = ? AND badge_id = ?",
+            (piece_id, badge_id)) > 0
+
+    def piece_badges(self, piece_id: str) -> list[dict]:
+        return self.query(
+            "SELECT b.code, b.label, b.severity, pb.badge_id, pb.applied_by, "
+            "pb.applied_at, pb.note FROM piece_badges pb "
+            "JOIN badges b ON b.id = pb.badge_id WHERE pb.piece_id = ? "
+            "ORDER BY b.code", (piece_id,))
 
     def close(self) -> None:
         """Closing twice is safe -- sqlite3.Connection.close() is a no-op on
