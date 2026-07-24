@@ -212,7 +212,38 @@ class RunRecorder:
             except Exception as e:  # noqa: BLE001
                 log.exception("run recorder tick failed: %s", e)
 
+    def reconcile_startup(self) -> None:
+        """Close runs left open by a restart.
+
+        A row with end_state NULL means "printing right now". After a restart
+        that is only true if the printer still says so; otherwise the row
+        would stay open forever and poison every "what is running" query from
+        then on. UNKNOWN is the honest verdict -- we genuinely do not know how
+        that print ended, and MQTT has no history to replay.
+        """
+        try:
+            live = set()
+            for summary in self.registry.summaries() or []:
+                state = (summary.get("gcode_state") or "").upper()
+                if state in BUSY_STATES and summary.get("serial"):
+                    live.add(summary["serial"])
+            for run in self.ledger.open_runs():
+                if run["printer_serial"] in live:
+                    continue
+                self.ledger.close_run(run["id"], end_state="UNKNOWN")
+                self.ledger.add_event(
+                    printer_serial=run["printer_serial"], run_id=run["id"],
+                    kind="state_change", source="server",
+                    payload={"end_state": "UNKNOWN",
+                             "reason": "server restarted while this run was "
+                                       "open; its outcome was never observed"})
+                log.warning("closed orphaned run %s for %s as UNKNOWN",
+                            run["id"], run["printer_serial"])
+        except Exception as e:  # noqa: BLE001
+            log.exception("startup reconciliation failed: %s", e)
+
     def start(self) -> None:
+        self.reconcile_startup()
         self._thread.start()
 
     def stop(self) -> None:

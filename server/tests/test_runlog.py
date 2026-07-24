@@ -215,3 +215,33 @@ def test_grams_stay_null_when_nothing_was_planned(led):
     run = led.list_runs()[0]
     assert run["actual_grams"] is None
     assert run["actual_grams_basis"] is None
+
+
+def test_reconcile_startup_closes_a_run_left_open_by_a_restart(led):
+    stale = led.open_run(printer_serial="S1", printer_name="A1",
+                         source="queue")
+    rec = RunRecorder(FakeRegistry([[summary(state="IDLE")]]), led)
+    rec.reconcile_startup()
+    run = led.get_run(stale)
+    assert run["end_state"] == "UNKNOWN"
+    kinds = [e["kind"] for e in led.events_for(stale)]
+    assert "state_change" in kinds
+
+
+def test_reconcile_startup_leaves_a_genuinely_running_print_alone(led):
+    live = led.open_run(printer_serial="S1", printer_name="A1",
+                        source="queue")
+    rec = RunRecorder(FakeRegistry([[summary(state="RUNNING")]]), led)
+    rec.reconcile_startup()
+    assert led.get_run(live)["end_state"] is None
+
+
+def test_a_ledger_that_raises_never_escapes_the_tick(led):
+    class Exploding:
+        def __getattr__(self, name):
+            def boom(*a, **k):
+                raise RuntimeError("ledger on fire")
+            return boom
+
+    rec = RunRecorder(FakeRegistry([[summary(state="RUNNING")]]), Exploding())
+    rec.tick()   # must not raise
