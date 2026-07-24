@@ -506,3 +506,74 @@ def test_detection_loop_writes_a_full_frame_when_cropping(tmp_path):
         np.frombuffer((tmp_path / "latest.jpg").read_bytes(), np.uint8),
         cv2.IMREAD_COLOR)
     assert written.shape[:2] == (100, 200)         # full frame, not the crop
+
+
+# --- ONNX backend helpers ---------------------------------------------------
+# Pure array maths, so they test with no .onnx file and no onnxruntime.
+# Verified against ultralytics 2026-07-23: same counts, boxes within 1px,
+# confidences within 0.001 -- PROVIDED both see the same input geometry. See
+# the design spec: ultralytics predict uses rect inference while an exported
+# ONNX graph is fixed square, so confidence thresholds do NOT transfer.
+
+def test_letterbox_pads_to_a_square_and_reports_its_geometry():
+    frame = np.zeros((1080, 1680, 3), np.uint8)   # the A1 camera's shape
+    out, ratio, px, py = detect.letterbox(frame, 640)
+    assert out.shape == (640, 640, 3)
+    assert ratio == pytest.approx(640 / 1680)
+    assert px == 0                      # wide image -> padded top/bottom only
+    assert py > 0
+
+
+def test_letterbox_pads_the_other_axis_for_a_tall_frame():
+    out, ratio, px, py = detect.letterbox(np.zeros((800, 400, 3), np.uint8), 640)
+    assert out.shape == (640, 640, 3)
+    assert py == 0 and px > 0
+
+
+def test_letterbox_of_an_already_square_frame_adds_no_padding():
+    out, ratio, px, py = detect.letterbox(np.zeros((640, 640, 3), np.uint8), 640)
+    assert out.shape == (640, 640, 3)
+    assert (px, py) == (0, 0) and ratio == pytest.approx(1.0)
+
+
+def test_decode_yolo_output_finds_the_peak_and_drops_the_rest():
+    # (1, 4+nc, 8400): rows 0-3 are cx,cy,w,h; the rest are per-class scores.
+    raw = np.zeros((1, 6, 10), np.float32)        # 2 classes, 10 anchors
+    raw[0, :4, 3] = [100, 200, 40, 20]
+    raw[0, 4, 3] = 0.9                            # class 0 strong
+    raw[0, 5, 7] = 0.10                           # class 1 weak
+    xywh, conf, cls = detect.decode_yolo_output(raw, 0.25)
+    assert len(conf) == 1
+    assert cls[0] == 0
+    assert conf[0] == pytest.approx(0.9)
+    assert list(xywh[0]) == [100, 200, 40, 20]
+
+
+def test_decode_yolo_output_returns_empty_when_nothing_clears_the_threshold():
+    raw = np.zeros((1, 5, 4), np.float32)
+    raw[0, 4, :] = 0.1
+    xywh, conf, cls = detect.decode_yolo_output(raw, 0.25)
+    assert len(conf) == 0 and len(xywh) == 0
+
+
+def test_scale_boxes_back_undoes_the_letterbox():
+    frame = np.zeros((1080, 1680, 3), np.uint8)
+    _, ratio, px, py = detect.letterbox(frame, 640)
+    # A box on the original image, mapped forward then back, must round-trip.
+    orig = np.array([[840.0, 540.0, 200.0, 100.0]])
+    fwd = orig * ratio
+    fwd[:, 0] += px
+    fwd[:, 1] += py
+    back = detect.scale_boxes_back(fwd, ratio, px, py)
+    assert back[0] == pytest.approx(orig[0], abs=0.01)
+
+
+def test_pick_backend_follows_the_weights_extension():
+    assert detect.pick_backend("auto", "model.onnx") == "onnx"
+    assert detect.pick_backend("auto", "best.pt") == "ultralytics"
+
+
+def test_pick_backend_honours_an_explicit_choice():
+    # Forcing matters: it's how you compare the two paths on one machine.
+    assert detect.pick_backend("onnx", "best.pt") == "onnx"
+    assert detect.pick_backend("ultralytics", "model.onnx") == "ultralytics"

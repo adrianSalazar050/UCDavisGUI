@@ -356,6 +356,142 @@ def mock_infer(frame):
               "box": [frame.shape[1] // 2, frame.shape[0] // 2, 8, 8]}], annotated)
 
 
+# --- ONNX backend ----------------------------------------------------------
+# Runs the detector without PyTorch, so it works on a machine with no GPU and
+# no 4.7 GB CUDA install (onnxruntime is 44 MB). A BACKEND SWAP, NOT A MODEL
+# CHANGE -- everything master.md 12 says about detector quality still stands.
+#
+# THE ONE TRAP, measured 2026-07-23. ultralytics' predict() uses RECT inference:
+# it letterboxes to a stride-aligned, aspect-preserving size (640x416 for a
+# 1680x1080 frame). An exported ONNX graph has a fixed SQUARE input. Same
+# detection, same weights: 0.312 on the torch path, 0.521 here. The runtimes
+# agree to 0.001 when fed identical geometry -- the gap is the geometry. So a
+# `conf` threshold tuned on one backend DOES NOT TRANSFER to the other, which
+# matters because the deployed threshold is 0.25 and that example straddles it.
+
+LETTERBOX_GREY = 114        # what ultralytics pads with; keep them identical
+# ultralytics' own NMS default (DEFAULT_CFG.iou), not the 0.45 that most YOLO
+# examples use. Measured 2026-07-23: at 0.45 this backend suppressed a second,
+# overlapping box on a frame where the torch path kept it -- a lower IoU
+# threshold suppresses MORE. Matching the value makes the two agree.
+NMS_IOU = 0.7
+
+
+def letterbox(frame, size: int, colour: int = LETTERBOX_GREY):
+    """Resize `frame` into a square `size`x`size` canvas, preserving aspect
+    ratio and padding the short axis. -> (padded, ratio, pad_x, pad_y), which
+    is everything scale_boxes_back needs to undo it."""
+    h, w = frame.shape[:2]
+    ratio = min(size / h, size / w)
+    nw, nh = round(w * ratio), round(h * ratio)
+    resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    dw, dh = (size - nw) / 2, (size - nh) / 2
+    top, bottom = round(dh - 0.1), round(dh + 0.1)
+    left, right = round(dw - 0.1), round(dw + 0.1)
+    padded = cv2.copyMakeBorder(resized, top, bottom, left, right,
+                                cv2.BORDER_CONSTANT, value=(colour,) * 3)
+    return padded, ratio, left, top
+
+
+def decode_yolo_output(raw, conf: float):
+    """YOLOv8's raw head -> (xywh, scores, class_ids) above `conf`.
+
+    `raw` is (1, 4+num_classes, num_anchors): the first four rows are box
+    centre-x, centre-y, width, height (in letterboxed pixels), the rest are
+    per-class scores. Transposed here so each row is one candidate.
+    """
+    pred = np.asarray(raw)[0].T                  # (anchors, 4+nc)
+    xywh, scores = pred[:, :4], pred[:, 4:]
+    class_ids = scores.argmax(1)
+    best = scores.max(1)
+    keep = best >= conf
+    return xywh[keep], best[keep], class_ids[keep]
+
+
+def scale_boxes_back(xywh, ratio: float, pad_x: int, pad_y: int):
+    """Undo letterbox(): letterboxed coordinates -> original-image pixels."""
+    out = np.asarray(xywh, dtype=np.float64).copy()
+    out[:, 0] = (out[:, 0] - pad_x) / ratio
+    out[:, 1] = (out[:, 1] - pad_y) / ratio
+    out[:, 2] = out[:, 2] / ratio
+    out[:, 3] = out[:, 3] / ratio
+    return out
+
+
+def pick_backend(backend: str, weights) -> str:
+    """Resolve --backend. 'auto' follows the weights extension, which is the
+    unsurprising thing; an explicit value forces one, which is how you compare
+    the two paths on the same machine."""
+    if backend and backend != "auto":
+        return backend
+    return "onnx" if str(weights).lower().endswith(".onnx") else "ultralytics"
+
+
+def draw_detections(frame, detections):
+    """Annotated copy, replacing ultralytics' result.plot() (which needs torch).
+    Boxes are centre-form, matching detections_from_result."""
+    out = frame.copy()
+    for d in detections:
+        cx, cy, w, h = d["box"]
+        x1, y1 = int(cx - w / 2), int(cy - h / 2)
+        x2, y2 = int(cx + w / 2), int(cy + h / 2)
+        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        label = f"{d['cls']} {d['conf']:.2f}"
+        cv2.putText(out, label, (x1, max(0, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    return out
+
+
+def make_onnx_infer(weights, conf, imgsz, names=None):
+    """Build the inference closure on onnxruntime. Same contract as
+    make_yolo_infer: infer(frame) -> (detections, annotated_frame).
+
+    onnxruntime is imported lazily, exactly as ultralytics is, so importing
+    detect.py stays free of both.
+    """
+    import onnxruntime as ort            # heavy, lazy on purpose
+
+    sess = ort.InferenceSession(str(weights),
+                                providers=["CPUExecutionProvider"])
+    input_name = sess.get_inputs()[0].name
+    # An exported graph carries its class names in metadata; fall back to
+    # indices so a stripped model still produces usable labels.
+    if names is None:
+        meta = sess.get_modelmeta().custom_metadata_map or {}
+        try:
+            names = {int(k): v for k, v in eval(meta.get("names", "{}")).items()}
+        except Exception:
+            names = {}
+
+    def infer(frame):
+        padded, ratio, pad_x, pad_y = letterbox(frame, imgsz)
+        blob = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        blob = np.expand_dims(blob.transpose(2, 0, 1), 0)
+        raw = sess.run(None, {input_name: blob})[0]
+
+        xywh, scores, class_ids = decode_yolo_output(raw, conf)
+        detections = []
+        if len(xywh):
+            # cv2.dnn.NMSBoxes wants top-left form. OpenCV is already a
+            # dependency, so this needs nothing extra.
+            tl = np.stack([xywh[:, 0] - xywh[:, 2] / 2,
+                           xywh[:, 1] - xywh[:, 3] / 2,
+                           xywh[:, 2], xywh[:, 3]], 1)
+            keep = cv2.dnn.NMSBoxes(tl.tolist(), scores.tolist(), conf, NMS_IOU)
+            keep = np.asarray(keep).flatten() if len(keep) else []
+            boxes = scale_boxes_back(xywh, ratio, pad_x, pad_y)
+            for i in keep:
+                cid = int(class_ids[i])
+                detections.append({
+                    "cls": names.get(cid, str(cid)),
+                    "conf": float(scores[i]),
+                    "box": [float(v) for v in boxes[i]],
+                })
+        return detections, draw_detections(frame, detections)
+
+    return infer
+
+
 def make_yolo_infer(weights, conf, imgsz, device):
     """Build the real inference closure. YOLO/torch import is deferred to here
     so importing detect.py (and its unit tests) never needs a CUDA runtime."""
@@ -454,6 +590,13 @@ def main() -> int:
                         "outside is ignored, which removes background false "
                         "positives. Default: the whole frame.")
     p.add_argument("--device", default="0" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--backend", choices=("auto", "onnx", "ultralytics"),
+                   default="auto",
+                   help="inference runtime. 'auto' (default) picks onnx for "
+                        "a .onnx file and ultralytics otherwise. NOTE: a conf "
+                        "threshold tuned on one backend does NOT transfer to "
+                        "the other -- they letterbox differently (see "
+                        "make_onnx_infer)")
     p.add_argument("--mock", action="store_true")
     a = p.parse_args()
 
@@ -494,7 +637,12 @@ def main() -> int:
             # than being a hard startup failure.
             cam = WebcamSource(a.camera)
 
-        infer = make_yolo_infer(a.weights, a.conf, a.imgsz, a.device)
+        backend = pick_backend(a.backend, a.weights)
+        log.info("inference backend: %s (%s)", backend, a.weights)
+        if backend == "onnx":
+            infer = make_onnx_infer(a.weights, a.conf, a.imgsz)
+        else:
+            infer = make_yolo_infer(a.weights, a.conf, a.imgsz, a.device)
         try:
             detection_loop(cam.grab, infer, a.out, camera=a.camera, conf=a.conf,
                            interval_s=a.interval, stop_event=stop, roi=roi)
