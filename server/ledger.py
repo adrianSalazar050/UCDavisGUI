@@ -170,6 +170,38 @@ def new_id() -> str:
     return uuid.uuid4().hex
 
 
+# Columns update_run() will write. An allowlist rather than "whatever the
+# caller passed", because these values arrive from HTTP request bodies and an
+# unchecked key would be interpolated straight into SQL.
+RUN_WRITABLE = frozenset({
+    "printer_name",
+    "order_line_id", "part_id", "recipe_id", "spool_id",
+    "queue_job_id", "slice_job_id", "sd_path", "subtask_name",
+    "planned_seconds", "planned_grams", "copies_planned",
+    "bed_type", "nozzle", "material",
+    "last_layer", "total_layers", "end_state", "ended_at",
+    "actual_grams", "actual_grams_basis", "stopped_by_monitor", "source",
+})
+
+END_STATES = ("FINISH", "FAILED", "STOPPED_BY_MONITOR",
+              "STOPPED_BY_OPERATOR", "START_UNCONFIRMED", "UNKNOWN")
+
+
+def _checked(fields: dict, allowed: frozenset) -> dict:
+    """Reject any key outside the allowlist, then hand back the fields.
+
+    ONE copy of this on purpose. These keys arrive from HTTP request bodies
+    and are interpolated into SQL by the callers below, so this check is the
+    whole thing standing between a request and `DROP TABLE`. Three
+    hand-written copies of a security check is three chances to write one of
+    them slightly differently.
+    """
+    bad = set(fields) - allowed
+    if bad:
+        raise ValueError(f"not writable columns: {sorted(bad)}")
+    return fields
+
+
 class Ledger:
     """One SQLite file, one connection, one lock.
 
@@ -419,6 +451,85 @@ class Ledger:
     def badges(self) -> list[dict]:
         return self.query(
             "SELECT * FROM badges WHERE archived = 0 ORDER BY code")
+
+    # ---------------- runs ----------------
+
+    def open_run(self, *, printer_serial: str, printer_name: str = "",
+                 source: str = "unattributed", **fields) -> str:
+        """Insert an open run (end_state NULL) and return its id."""
+        _checked(fields, RUN_WRITABLE)
+        ts = self._clock()
+        run_id = new_id()
+        cols = ["id", "printer_serial", "printer_name", "source",
+                "started_at", "created_at", "updated_at"]
+        vals = [run_id, printer_serial, printer_name or "", source, ts, ts, ts]
+        for key, value in fields.items():
+            cols.append(key)
+            vals.append(value)
+        placeholders = ", ".join("?" for _ in cols)
+        self.execute(f"INSERT INTO print_runs ({', '.join(cols)}) "
+                     f"VALUES ({placeholders})", vals)
+        return run_id
+
+    def find_open_run(self, printer_serial: str) -> dict | None:
+        rows = self.query(
+            "SELECT * FROM print_runs WHERE printer_serial = ? "
+            "AND end_state IS NULL ORDER BY started_at DESC LIMIT 1",
+            (printer_serial,))
+        return rows[0] if rows else None
+
+    def open_runs(self) -> list[dict]:
+        return self.query(
+            "SELECT * FROM print_runs WHERE end_state IS NULL")
+
+    def update_run(self, run_id: str, **fields) -> None:
+        _checked(fields, RUN_WRITABLE)
+        if not fields:
+            return
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        params = list(fields.values()) + [self._clock(), run_id]
+        self.execute(
+            f"UPDATE print_runs SET {sets}, updated_at = ? WHERE id = ?",
+            params)
+
+    def close_run(self, run_id: str, *, end_state: str,
+                  ended_at: str | None = None, **fields) -> None:
+        """Set the terminal state, but ONLY on a run that is still open.
+
+        The `end_state IS NULL` predicate is what makes this idempotent. Both
+        the recorder and the start route can reach a close for the same run
+        (a start that verifies, then the printer going terminal a second
+        later), and the FIRST verdict is the true one -- a later re-close
+        would otherwise overwrite FINISH with whatever the next poll saw.
+        """
+        if end_state not in END_STATES:
+            raise ValueError(f"unknown end_state {end_state!r}")
+        _checked(fields, RUN_WRITABLE)
+        ts = self._clock()
+        sets = ["end_state = ?", "ended_at = ?", "updated_at = ?"]
+        params: list = [end_state, ended_at or ts, ts]
+        for key, value in fields.items():
+            sets.append(f"{key} = ?")
+            params.append(value)
+        self.execute(
+            f"UPDATE print_runs SET {', '.join(sets)} "
+            f"WHERE id = ? AND end_state IS NULL",
+            params + [run_id])
+
+    def get_run(self, run_id: str) -> dict | None:
+        rows = self.query("SELECT * FROM print_runs WHERE id = ?", (run_id,))
+        return rows[0] if rows else None
+
+    def list_runs(self, *, serial: str | None = None, limit: int = 50,
+                  offset: int = 0) -> list[dict]:
+        sql = "SELECT * FROM print_runs"
+        params: list = []
+        if serial:
+            sql += " WHERE printer_serial = ?"
+            params.append(serial)
+        sql += " ORDER BY started_at DESC, rowid DESC LIMIT ? OFFSET ?"
+        params += [int(limit), int(offset)]
+        return self.query(sql, params)
 
     def close(self) -> None:
         """Closing twice is safe -- sqlite3.Connection.close() is a no-op on

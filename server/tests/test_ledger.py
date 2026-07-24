@@ -252,3 +252,70 @@ def test_reseeding_does_not_duplicate(tmp_path):
 def test_only_auto_badges_are_marked_auto(led):
     auto = {b["code"] for b in led.badges() if b["auto"]}
     assert auto == {"spaghetti", "stringing", "hms_error", "autostop"}
+
+
+def test_open_run_returns_an_id_and_leaves_it_open(led):
+    run_id = led.open_run(printer_serial="S1", printer_name="A1",
+                          source="unattributed")
+    run = led.get_run(run_id)
+    assert run["end_state"] is None
+    assert run["printer_serial"] == "S1"
+    assert run["printer_name"] == "A1"
+    assert run["started_at"] is not None
+
+
+def test_find_open_run_finds_only_the_open_one(led):
+    closed = led.open_run(printer_serial="S1", printer_name="A1",
+                          source="queue")
+    led.close_run(closed, end_state="FINISH")
+    assert led.find_open_run("S1") is None
+
+    open_id = led.open_run(printer_serial="S1", printer_name="A1",
+                           source="queue")
+    assert led.find_open_run("S1")["id"] == open_id
+    assert led.find_open_run("S2") is None
+
+
+def test_update_run_sets_only_named_fields(led):
+    run_id = led.open_run(printer_serial="S1", printer_name="A1",
+                          source="queue")
+    led.update_run(run_id, last_layer=42, total_layers=100)
+    run = led.get_run(run_id)
+    assert run["last_layer"] == 42
+    assert run["total_layers"] == 100
+    assert run["source"] == "queue"
+
+
+def test_update_run_rejects_an_unknown_column(led):
+    run_id = led.open_run(printer_serial="S1", printer_name="A1",
+                          source="queue")
+    with pytest.raises(ValueError):
+        led.update_run(run_id, drop_table="oops")
+
+
+def test_close_run_stamps_end_state_and_ended_at(led):
+    run_id = led.open_run(printer_serial="S1", printer_name="A1",
+                          source="queue")
+    led.close_run(run_id, end_state="FINISH")
+    run = led.get_run(run_id)
+    assert run["end_state"] == "FINISH"
+    assert run["ended_at"] is not None
+
+
+def test_close_run_is_idempotent(led):
+    run_id = led.open_run(printer_serial="S1", printer_name="A1",
+                          source="queue")
+    led.close_run(run_id, end_state="FINISH")
+    first = led.get_run(run_id)["ended_at"]
+    led.close_run(run_id, end_state="FAILED")
+    again = led.get_run(run_id)
+    assert again["end_state"] == "FINISH", "a closed run was reopened"
+    assert again["ended_at"] == first
+
+
+def test_list_runs_is_newest_first_and_filterable(led):
+    a = led.open_run(printer_serial="S1", printer_name="A1", source="queue")
+    b = led.open_run(printer_serial="S2", printer_name="A1m", source="queue")
+    ids = [r["id"] for r in led.list_runs()]
+    assert set(ids) == {a, b}
+    assert [r["id"] for r in led.list_runs(serial="S2")] == [b]
