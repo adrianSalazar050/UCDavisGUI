@@ -35,11 +35,12 @@ import uuid
 
 log = logging.getLogger("server.ledger")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 TABLES = (
     "schema_version", "ledger_meta", "badges", "print_runs",
     "run_events", "pieces", "run_badges", "piece_badges",
+    "parts", "part_recipes",
 )
 
 # Applied in order; each entry is the list of statements for that version.
@@ -121,6 +122,33 @@ MIGRATIONS = {
              created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
              synced_at TEXT,
              UNIQUE(piece_id, badge_id))""",
+    ],
+    2: [
+        """CREATE TABLE parts (
+             id TEXT PRIMARY KEY,
+             part_number TEXT NOT NULL,
+             revision TEXT NOT NULL DEFAULT 'A',
+             name TEXT NOT NULL DEFAULT '',
+             notes TEXT,
+             model_filename TEXT, model_sha256 TEXT, model_bytes INTEGER,
+             archived INTEGER NOT NULL DEFAULT 0,
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+             synced_at TEXT,
+             UNIQUE(part_number, revision))""",
+        """CREATE TABLE part_recipes (
+             id TEXT PRIMARY KEY,
+             part_id TEXT NOT NULL,
+             name TEXT NOT NULL DEFAULT '',
+             preset_tier TEXT, filament_material TEXT,
+             nozzle TEXT, bed_type TEXT,
+             supports INTEGER NOT NULL DEFAULT 0,
+             copies_per_plate INTEGER NOT NULL DEFAULT 1,
+             expected_seconds REAL, expected_grams REAL,
+             is_default INTEGER NOT NULL DEFAULT 0,
+             archived INTEGER NOT NULL DEFAULT 0,
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+             synced_at TEXT)""",
+        "CREATE INDEX ix_recipes_part ON part_recipes(part_id)",
     ],
 }
 

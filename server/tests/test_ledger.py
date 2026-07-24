@@ -469,3 +469,46 @@ def test_bulk_rejects_a_bad_override_index_before_any_write(led):
     # The blanket 'good' write must have rolled back with the bad override.
     assert {p["status"] for p in led.pieces_for(run_id)} == {
         "pending_inspection"}
+
+
+# ---------------- schema v2: parts + part_recipes ----------------
+
+def test_schema_upgrades_v1_to_v2_without_data_loss(tmp_path):
+    """A ledger created at v1 (Phase 1) must gain the parts tables on reopen
+    and keep its existing rows."""
+    import sqlite3 as _sq
+    path = tmp_path / "ledger.db"
+    con = _sq.connect(str(path)); con.execute("PRAGMA journal_mode=WAL")
+    con.execute("CREATE TABLE schema_version (id INTEGER PRIMARY KEY "
+                "CHECK (id = 1), version INTEGER NOT NULL)")
+    con.execute("INSERT INTO schema_version (id, version) VALUES (1, 1)")
+    con.execute("CREATE TABLE print_runs (id TEXT PRIMARY KEY, "
+                "printer_serial TEXT, end_state TEXT)")
+    con.execute("INSERT INTO print_runs (id, printer_serial) VALUES ('r1','S1')")
+    # A real Phase-1 ledger also has `badges` (Ledger.__init__ seeds it on
+    # every open) -- included here so this synthetic v1 file matches what a
+    # genuine v1 database looks like, instead of crashing _seed_badges().
+    con.execute("""CREATE TABLE badges (
+             id TEXT PRIMARY KEY,
+             code TEXT NOT NULL UNIQUE,
+             label TEXT NOT NULL,
+             severity TEXT NOT NULL,
+             auto INTEGER NOT NULL DEFAULT 0,
+             archived INTEGER NOT NULL DEFAULT 0,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL)""")
+    con.commit(); con.close()
+
+    led = Ledger(path)
+    try:
+        assert led.query("SELECT version FROM schema_version")[0]["version"] == SCHEMA_VERSION
+        names = {r["name"] for r in led.query(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"parts", "part_recipes"} <= names
+        assert led.query("SELECT id FROM print_runs")[0]["id"] == "r1"
+    finally:
+        led.close()
+
+
+def test_fresh_database_is_at_v2(led):
+    assert led.query("SELECT version FROM schema_version")[0]["version"] == 2
