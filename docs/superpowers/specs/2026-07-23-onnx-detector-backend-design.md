@@ -1,10 +1,13 @@
 # ONNX inference backend for the failure detector — design
 
-> **STATUS: PROPOSED (2026-07-23).** Agreed in brainstorming after the
-> measurements in §2; implementation follows.
+> **STATUS: SHIPPED (2026-07-23, commit `7534649`).** Landed as designed
+> below: `make_onnx_infer` + the pure helpers + `--backend`, verified against
+> ultralytics on six real A1 frames with zero mismatches (max confidence
+> difference 0.0005) once the two gotchas in §2.2 and the NMS IoU below were
+> accounted for.
 >
-> Historical record, not maintained. **`master.md` is authoritative wherever
-> this file disagrees with it.**
+> Historical record, not maintained. **`master.md` §3.1/§4/§11/§12 are
+> authoritative wherever this file disagrees with them.**
 
 Date: 2026-07-23
 

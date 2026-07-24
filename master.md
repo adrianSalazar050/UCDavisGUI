@@ -313,6 +313,34 @@ Headless. Grab → infer → write, forever.
   *lazily* so unit tests can import `detect.py` with no CUDA runtime.
 - `detections_from_result(result, names)` → `[{cls, conf, box:[x,y,w,h]}]`
   (xywh = center x, center y, width, height).
+- `make_onnx_infer(weights, conf, imgsz, names=None)` — a second inference
+  backend, on **onnxruntime** instead of torch, so the detector runs on any
+  machine, not only one with an NVIDIA GPU: onnxruntime is **44 MB** installed
+  and needs no GPU, against **4,684 MB** for the CUDA torch build it stands in
+  for. Mirrors `make_yolo_infer`'s contract exactly —
+  `infer(frame) -> (detections, annotated_frame)` — so `detection_loop` is
+  unchanged either way, and onnxruntime is imported *lazily*, like ultralytics.
+  Verified against ultralytics on six real A1 camera frames: **zero
+  mismatches, max confidence difference 0.0005**. This is a **backend swap,
+  not a model change** — §12's conclusions about detector quality are
+  unaffected. Export with `yolo export format=onnx imgsz=640 opset=12`; output
+  shape is `(1, 4+num_classes, num_anchors)`.
+- `letterbox(frame, size)` / `decode_yolo_output(raw, conf)` /
+  `scale_boxes_back(xywh, ratio, pad_x, pad_y)` — the maths behind
+  `make_onnx_infer`, factored into **pure helpers** so it tests with no model
+  file and no onnxruntime installed: resize-and-pad to a square input, decode
+  the raw YOLO head above `conf`, then map boxes back to original-image
+  pixels. NMS itself uses `cv2.dnn.NMSBoxes` (OpenCV was already a
+  dependency) at `NMS_IOU = 0.7` — ultralytics' own default
+  (`DEFAULT_CFG.iou`), **not** the 0.45 most YOLO examples use; see §11 for
+  why that distinction is load-bearing.
+- `draw_detections(frame, detections)` — draws boxes + labels with cv2,
+  replacing ultralytics' `result.plot()`, which needs torch and so can't be
+  used on the ONNX path.
+- `pick_backend(backend, weights)` — resolves the `--backend` CLI flag
+  (`auto`/`onnx`/`ultralytics`; default `auto`, which picks `onnx` for a
+  `.onnx` weights file and `ultralytics` for anything else). An explicit value
+  forces one, which is how the two backends get compared on the same machine.
 - `mock_infer(frame)` — always "sees" spaghetti at conf 0.9, so the whole
   arm → sustain → stop path is exercisable with no camera and no weights.
 - `write_status` / `write_frame` / `_atomic_write_bytes` — temp file +
@@ -584,6 +612,21 @@ Every tick, `detect.py` grabs one frame, runs inference, and writes both
  "detections": [{"cls": "spaghetti", "conf": 0.91, "box": [320, 180, 64, 40]}],
  "error": null}
 ```
+
+**Two interchangeable inference backends.** `detection_loop` takes `infer` as
+an injected closure, and both `make_yolo_infer` (ultralytics/torch) and
+`make_onnx_infer` (onnxruntime) satisfy the exact same
+`infer(frame) -> (detections, annotated_frame)` contract, selected by
+`pick_backend()`/`--backend` (§3.1) — the loop itself never changes. **A
+`conf` threshold tuned on one backend does not transfer to the other.**
+ultralytics' `predict()` on a `.pt` uses rect inference (aspect-preserving,
+stride-padded — e.g. 640×416 for a 1680×1080 frame); an exported `.onnx`
+graph has a fixed **square** 640×640 input. Measured 2026-07-23 on the same
+detection, same weights: **0.312** on the torch path, **0.521** on ONNX — a
+gap the deployed 0.25 threshold straddles. The two runtimes agree to 0.001
+once fed identical geometry, so the gap is the geometry, not the runtime, but
+switching `--backend` still means re-tuning `--conf`, never assuming the old
+number carries over.
 
 **Cadence.** The loop is interval-based: `--interval` (default **5.0 seconds**)
 sets the target period between frames. After a grab+infer takes `dt`, the loop
@@ -1786,6 +1829,23 @@ produced. See §1.1 for the complete account of both bugs and both attempts.
   `@app.middleware("http")` guard that covers every other route: FastAPI's
   HTTP middleware never sees websocket scope, so it silently would not have
   applied.
+- **The ONNX backend's NMS IoU is 0.7, not the 0.45 most YOLO examples use.**
+  §3.1, §4.1. `NMS_IOU` matches ultralytics' own default (`DEFAULT_CFG.iou`)
+  on purpose. Measured 2026-07-23: at 0.45 `make_onnx_infer` suppressed a
+  second, overlapping box that the torch path kept on the same frame — the
+  *only* parity mismatch found in the whole exercise — because a **lower**
+  IoU threshold suppresses **more** boxes, not fewer. Matching ultralytics'
+  0.7 fixed it. Don't "fix" this back to 0.45; it looks like the standard
+  value and it is the wrong one for parity with this repo's torch path.
+- **A `conf` threshold does not transfer between the ONNX and ultralytics
+  backends.** §3.1, §4.1. ultralytics' `.pt` inference is rect (aspect-
+  preserving, stride-padded); an exported `.onnx` graph is fixed-square
+  640×640. Same detection, same weights, measured 2026-07-23: **0.312** on
+  torch, **0.521** on ONNX — a 0.21 gap straddling the deployed 0.25
+  threshold. The runtimes agree to 0.001 once fed identical geometry, so this
+  is a geometry difference, not a bug in either backend; but it means
+  switching `--backend` requires re-tuning `--conf`, and an old number carried
+  over unchanged can silently change whether auto-stop fires.
 
 ---
 
@@ -1795,6 +1855,12 @@ The most important open problem, and the thing that governs the next phase of
 work. **The public-data detector does not work on the A1's built-in camera.**
 A first domain-adaptation pass (§12.3) fixes that measurably but is **not yet
 deployable for auto-stop** — read §12.4 before quoting any of it.
+
+The ONNX inference backend (§3.1, §4.1) changes **none** of this. It is a
+backend swap — the same weights, the same detections, run without torch —
+not a model change, so every conclusion below (the domain gap, the circular
+first eval, the tiny disjoint-split re-run, the unmet exit criterion) applies
+identically regardless of which backend produced the numbers.
 
 ### 12.1 The gap, measured
 
