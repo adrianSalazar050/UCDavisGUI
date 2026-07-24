@@ -641,17 +641,19 @@ And add these methods to `Ledger`:
 ```python
     def _seed_badges(self) -> None:
         """Idempotent: INSERT OR IGNORE on a deterministic id, so reopening
-        the database is a no-op and a later cloud pull lands on these rows."""
+        the database is a no-op and a later cloud pull lands on these rows.
+        One transaction() for the whole batch (isolation_level is None, so a
+        bare executemany would autocommit per row and a lone commit() is a
+        no-op) -- all rows land together or none do."""
         ts = self._clock()
-        with self._lock:
-            self._conn.executemany(
+        with self.transaction() as conn:
+            conn.executemany(
                 "INSERT OR IGNORE INTO badges "
                 "(id, code, label, severity, auto, archived, "
                 " created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
                 [(badge_id_for(code), code, label, severity, int(auto), ts, ts)
                  for code, label, severity, auto in SEED_BADGES])
-            self._conn.commit()
 
     def badges(self) -> list[dict]:
         return self.query(
@@ -661,7 +663,7 @@ And add these methods to `Ledger`:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest server/tests/test_ledger.py -q`
-Expected: PASS (9 passed)
+Expected: PASS (16 passed — 12 from Tasks 1-2 plus the 4 new badge tests)
 
 - [ ] **Step 5: Commit**
 
