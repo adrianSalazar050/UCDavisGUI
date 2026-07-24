@@ -1140,12 +1140,14 @@ and these methods to `Ledger`:
         rows = [(new_id(), run_id, part_id, order_line_id, i,
                  "pending_inspection", ts, ts)
                 for i in range(1, int(count) + 1)]
-        with self._lock:
-            cur = self._conn.executemany(
+        # One transaction() for the batch (isolation_level is None, so a bare
+        # executemany would autocommit per row and a lone commit() is a
+        # no-op): all N pieces land together or none do.
+        with self.transaction() as conn:
+            cur = conn.executemany(
                 "INSERT OR IGNORE INTO pieces (id, run_id, part_id, "
                 "order_line_id, index_in_run, status, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
-            self._conn.commit()
             return cur.rowcount
 
     def pieces_for(self, run_id: str) -> list[dict]:
@@ -1212,18 +1214,23 @@ and these methods to `Ledger`:
                 raise ValueError(
                     f"unknown piece status {override.get('status')!r}")
         ts = self._clock()
-        touched = self.execute(
-            "UPDATE pieces SET status = ?, inspected_at = ?, "
-            "inspected_by = COALESCE(?, inspected_by), updated_at = ? "
-            "WHERE run_id = ?",
-            (status, ts, inspected_by, ts, run_id))
-        for override in overrides or []:
-            self.execute(
+        # The blanket set and every override are ONE transaction: a plate must
+        # never end up half "all good" and half its old verdict because the
+        # process died between the two statements. Validate all overrides
+        # first (above) so a bad one raises before any write, not midway.
+        with self.transaction() as conn:
+            touched = conn.execute(
                 "UPDATE pieces SET status = ?, inspected_at = ?, "
                 "inspected_by = COALESCE(?, inspected_by), updated_at = ? "
-                "WHERE run_id = ? AND index_in_run = ?",
-                (override["status"], ts, inspected_by, ts, run_id,
-                 int(override["index_in_run"])))
+                "WHERE run_id = ?",
+                (status, ts, inspected_by, ts, run_id)).rowcount
+            for override in overrides or []:
+                conn.execute(
+                    "UPDATE pieces SET status = ?, inspected_at = ?, "
+                    "inspected_by = COALESCE(?, inspected_by), updated_at = ? "
+                    "WHERE run_id = ? AND index_in_run = ?",
+                    (override["status"], ts, inspected_by, ts, run_id,
+                     int(override["index_in_run"])))
         return touched
 
     # ---------------- badges ----------------
@@ -1292,7 +1299,7 @@ and these methods to `Ledger`:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest server/tests/test_ledger.py -q`
-Expected: PASS (28 passed)
+Expected: PASS (35 passed — 26 prior plus 9 new piece/badge tests)
 
 - [ ] **Step 5: Commit**
 
