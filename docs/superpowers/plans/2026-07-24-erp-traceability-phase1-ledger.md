@@ -8,10 +8,15 @@
 > surfaced a genuine bug — a server restart mid-print split the print into a
 > mislabeled `UNKNOWN` row plus a duplicate unattributed one, losing
 > attribution. **Fixed** (commit `497082e`): reconciliation is now deferred
-> and connection-aware, so attribution survives a restart. Real-hardware
-> confirmation that a print recorded end to end reaches `FINISH` with pieces
-> (Task 18) is still worth capturing once the live print completes, but the
-> recording path is now exercised on hardware.
+> and connection-aware, so attribution survives a restart.
+>
+> **Task 18 hardware gate — PASSED (2026-07-24).** The `cube` print recorded
+> end to end on the real A1: run opened, layer progress tracked to `100/100`,
+> `end_state = FINISH` on the terminal transition, one piece created
+> (`pending_inspection`). The one thing not yet captured: a *queue-attributed*
+> run reaching FINISH — that `cube` recorded as `unattributed` because the
+> server was restarted mid-print before the reconcile fix landed (the very bug
+> the fix now prevents). The recording path itself is confirmed on hardware.
 >
 > Historical record from the moment of writing, not maintained afterwards.
 > **`master.md` is authoritative wherever this file disagrees with it.**

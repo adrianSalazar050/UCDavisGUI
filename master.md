@@ -2084,10 +2084,16 @@ print at the printer's own screen is indistinguishable from a genuine failure
 (§3.1), so `end_state` defaults to the honest `FAILED` and is correctable from
 the History page.
 
-Verified on the `--mock` server end to end (2026-07-24): a mock print was
-observed opening a run, tracking layer progress in place, closing `FINISH` on
-the terminal transition, and creating a piece — all served over `/api/runs`.
-**Not yet verified on real hardware**: no genuine print has been recorded.
+**Verified on the real A1 end to end (2026-07-24).** A `cube` print was
+recorded from start to finish: a run opened, layer progress tracked in place
+to `100/100`, `end_state = FINISH` on the terminal transition, and one piece
+created (`pending_inspection`). The v1→v2 migration (§14) also ran in place on
+this same real `ledger.db` with its existing runs preserved. One caveat on
+that run: it recorded as `unattributed` rather than `queue`, because the
+server was restarted mid-print *before* the reconciliation fix landed — the
+exact bug that fix now prevents. The recording path itself (open → track →
+FINISH → piece) is confirmed on hardware; a *queue-attributed* run reaching
+FINISH is the one thing still worth capturing on a future clean run.
 
 Design: `docs/superpowers/specs/2026-07-24-erp-traceability-design.md`. The
 parts catalogue (Phase 2) is §14 below; filament spools (Phase 3), Supabase
