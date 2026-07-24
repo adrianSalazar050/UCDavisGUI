@@ -512,3 +512,33 @@ def test_schema_upgrades_v1_to_v2_without_data_loss(tmp_path):
 
 def test_fresh_database_is_at_v2(led):
     assert led.query("SELECT version FROM schema_version")[0]["version"] == 2
+
+
+# ---------------- parts ----------------
+
+def test_create_and_find_part(led):
+    pid = led.create_part(part_number="BRK-100", revision="A", name="Bracket")
+    assert led.find_part("BRK-100", "A")["id"] == pid
+    assert led.get_part(pid)["name"] == "Bracket"
+    assert led.find_part("BRK-100", "B") is None
+
+
+def test_a_new_revision_is_allowed_but_a_duplicate_is_not(led):
+    import sqlite3 as _sq
+    led.create_part(part_number="BRK-100", revision="A")
+    led.create_part(part_number="BRK-100", revision="B")
+    with pytest.raises(_sq.IntegrityError):
+        led.create_part(part_number="BRK-100", revision="A")
+
+
+def test_update_part_rejects_unknown_column(led):
+    pid = led.create_part(part_number="X", revision="A")
+    with pytest.raises(ValueError):
+        led.update_part(pid, drop="oops")
+
+
+def test_archive_hides_a_part(led):
+    pid = led.create_part(part_number="X", revision="A")
+    led.archive_part(pid)
+    assert led.list_parts() == []
+    assert len(led.list_parts(include_archived=True)) == 1

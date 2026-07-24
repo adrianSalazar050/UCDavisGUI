@@ -216,6 +216,17 @@ END_STATES = ("FINISH", "FAILED", "STOPPED_BY_MONITOR",
 
 PIECE_STATUSES = ("pending_inspection", "good", "rework", "scrap")
 
+# Columns create_part()/update_part() will write. part_number and revision
+# are ordinarily set once at creation (as explicit named params on
+# create_part, not through **fields) but are included here too so a rare
+# catalogue correction -- fixing a typo'd part number -- can still go
+# through update_part's single _checked() guard rather than needing a
+# second, uncontrolled code path.
+PART_WRITABLE = frozenset({
+    "name", "notes", "model_filename", "model_sha256", "model_bytes",
+    "part_number", "revision",
+})
+
 # Who applies a badge. DETECTOR is the automated system's identity (the
 # recorder writes machine-observed badges under it); OPERATOR is a human.
 DETECTOR = "detector"
@@ -797,6 +808,65 @@ class Ledger:
             "pb.applied_at, pb.note FROM piece_badges pb "
             "JOIN badges b ON b.id = pb.badge_id WHERE pb.piece_id = ? "
             "ORDER BY b.code", (piece_id,))
+
+    # ---------------- parts ----------------
+
+    def create_part(self, *, part_number: str, revision: str = "A",
+                    name: str = "", notes: str | None = None,
+                    **fields) -> str:
+        """Insert a catalogue part and return its id.
+
+        UNIQUE(part_number, revision) on the table (schema v2) is what
+        actually enforces "no duplicate revision" -- this raises
+        sqlite3.IntegrityError on a collision rather than silently upserting,
+        because a part catalogue entry is meant to be created once and
+        revised by adding a new row, not overwritten in place.
+        """
+        _checked(fields, PART_WRITABLE)
+        ts = self._clock()
+        part_id = new_id()
+        cols = ["id", "part_number", "revision", "name", "notes",
+                "created_at", "updated_at"]
+        vals = [part_id, part_number, revision, name, notes, ts, ts]
+        for key, value in fields.items():
+            cols.append(key)
+            vals.append(value)
+        placeholders = ", ".join("?" for _ in cols)
+        self.execute(f"INSERT INTO parts ({', '.join(cols)}) "
+                     f"VALUES ({placeholders})", vals)
+        return part_id
+
+    def get_part(self, part_id: str) -> dict | None:
+        rows = self.query("SELECT * FROM parts WHERE id = ?", (part_id,))
+        return rows[0] if rows else None
+
+    def find_part(self, part_number: str, revision: str) -> dict | None:
+        rows = self.query(
+            "SELECT * FROM parts WHERE part_number = ? AND revision = ?",
+            (part_number, revision))
+        return rows[0] if rows else None
+
+    def list_parts(self, *, include_archived: bool = False) -> list[dict]:
+        sql = "SELECT * FROM parts"
+        if not include_archived:
+            sql += " WHERE archived = 0"
+        sql += " ORDER BY part_number, revision"
+        return self.query(sql)
+
+    def update_part(self, part_id: str, **fields) -> None:
+        _checked(fields, PART_WRITABLE)
+        if not fields:
+            return
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        params = list(fields.values()) + [self._clock(), part_id]
+        self.execute(
+            f"UPDATE parts SET {sets}, updated_at = ? WHERE id = ?", params)
+
+    def archive_part(self, part_id: str) -> None:
+        ts = self._clock()
+        self.execute(
+            "UPDATE parts SET archived = 1, updated_at = ? WHERE id = ?",
+            (ts, part_id))
 
     def close(self) -> None:
         """Closing twice is safe -- sqlite3.Connection.close() is a no-op on
