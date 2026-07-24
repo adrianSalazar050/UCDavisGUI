@@ -12,17 +12,26 @@ import hashlib
 import ntpath
 import os
 import pathlib
+import re
 import shutil
 
 MODEL_EXTS = (".stl", ".3mf", ".step", ".stp", ".obj")
 
+# Anything outside this set is replaced with "_". This strips not just path
+# separators but also quotes and control characters (CR/LF), so the stored
+# name is safe to interpolate into an HTTP Content-Disposition header on
+# download without header-splitting or a broken filename="..." quote.
+_UNSAFE_CHARS = re.compile(r"[^\w.\- ]")
+
 
 def _safe_name(filename: str) -> str:
-    """Strip any directory component, Windows- or POSIX-style, so a
-    client-supplied filename can never escape the part directory. ntpath
-    handles backslashes even on Linux; os.path.basename then catches the
-    forward-slash case on every OS."""
-    return os.path.basename(ntpath.basename(filename))
+    """A leaf filename safe on disk AND in an HTTP header. Strips any directory
+    component (Windows- or POSIX-style: ntpath handles backslashes even on
+    Linux, os.path.basename catches forward slashes on every OS), then replaces
+    every character outside [word, dot, dash, space] -- quotes, CR, LF -- so a
+    hostile filename can neither escape the part dir nor inject a header."""
+    leaf = os.path.basename(ntpath.basename(filename))
+    return _UNSAFE_CHARS.sub("_", leaf).strip()
 
 
 class PartStore:

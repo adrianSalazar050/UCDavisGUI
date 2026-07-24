@@ -915,8 +915,12 @@ def create_app(registry, runs_dir: pathlib.Path,
     @app.put("/api/parts/{part_id}/recipes/{recipe_id}")
     def edit_part_recipe(part_id: str, recipe_id: str, body: RecipeBody):
         _require_ledger()
-        if ledger.get_recipe(recipe_id) is None:
-            raise HTTPException(404, "unknown recipe")
+        recipe = ledger.get_recipe(recipe_id)
+        # The recipe must belong to the part named in the URL. Without this a
+        # PUT to /parts/A/recipes/B (B belonging to part B) would default A to
+        # a foreign recipe -- see set_default_recipe.
+        if recipe is None or recipe["part_id"] != part_id:
+            raise HTTPException(404, "unknown recipe for this part")
         make_default = body.is_default
         fields = {k: v for k, v in body.model_dump().items()
                   if v is not None and k not in ("is_default",)}
@@ -932,6 +936,11 @@ def create_app(registry, runs_dir: pathlib.Path,
     @app.delete("/api/parts/{part_id}/recipes/{recipe_id}", status_code=204)
     def archive_part_recipe(part_id: str, recipe_id: str):
         _require_ledger()
+        recipe = ledger.get_recipe(recipe_id)
+        # Same membership guard as edit: don't let a wrong-part URL archive
+        # someone else's recipe.
+        if recipe is None or recipe["part_id"] != part_id:
+            raise HTTPException(404, "unknown recipe for this part")
         ledger.archive_recipe(recipe_id)
         return Response(status_code=204)
 

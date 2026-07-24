@@ -467,3 +467,18 @@ def test_edit_and_archive_a_recipe(parts_client, led):
     assert led.get_recipe(rid)["name"] == "R1b"
     assert parts_client.delete(f"/api/parts/{pid}/recipes/{rid}").status_code == 204
     assert led.recipes_for(pid) == []
+
+
+def test_a_recipe_route_rejects_a_foreign_part_id(parts_client, led):
+    """PUT/DELETE /api/parts/{A}/recipes/{B} where B belongs to part B must
+    404, not corrupt A's default with B's recipe (review I2)."""
+    a = parts_client.post("/api/parts", json={"part_number": "A"}).json()["part"]["id"]
+    b = parts_client.post("/api/parts", json={"part_number": "B"}).json()["part"]["id"]
+    rb = led.add_recipe(b, name="B-recipe")
+    # try to make B's recipe part A's default via A's URL
+    res = parts_client.put(f"/api/parts/{a}/recipes/{rb}", json={"is_default": True})
+    assert res.status_code == 404
+    assert led.default_recipe(a) is None          # A was not corrupted
+    # and archiving through the wrong part is refused too
+    assert parts_client.delete(f"/api/parts/{a}/recipes/{rb}").status_code == 404
+    assert led.get_recipe(rb)["archived"] == 0

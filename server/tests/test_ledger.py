@@ -579,3 +579,25 @@ def test_archive_hides_a_recipe(led):
     # an archived default is not returned by default_recipe either
     led.set_default_recipe(pid, r)
     assert led.default_recipe(pid) is None
+
+
+def test_update_recipe_cannot_set_is_default(led):
+    """The single-default invariant is structural: is_default is not writable
+    via update_recipe -- the only path is set_default_recipe."""
+    pid = led.create_part(part_number="X", revision="A")
+    r = led.add_recipe(pid)
+    with pytest.raises(ValueError):
+        led.update_recipe(r, is_default=1)
+
+
+def test_set_default_recipe_refuses_a_foreign_recipe(led):
+    """A recipe from another part must never become this part's default."""
+    a = led.create_part(part_number="A", revision="A")
+    b = led.create_part(part_number="B", revision="A")
+    ra = led.add_recipe(a, name="A-recipe")
+    rb = led.add_recipe(b, name="B-recipe")
+    led.set_default_recipe(a, ra)
+    with pytest.raises(ValueError):
+        led.set_default_recipe(a, rb)          # rb belongs to part b
+    # part a's own default is untouched
+    assert led.default_recipe(a)["id"] == ra

@@ -227,10 +227,14 @@ PART_WRITABLE = frozenset({
     "part_number", "revision",
 })
 
+# `is_default` is DELIBERATELY absent: the single-default invariant is
+# structural, not incidental. The only path to that column is
+# set_default_recipe (clear-others-then-set, in one transaction). If
+# is_default were writable here, update_recipe(is_default=1) would set a
+# second default without clearing the first -- a silently-corrupt catalogue.
 RECIPE_WRITABLE = frozenset({
     "name", "preset_tier", "filament_material", "nozzle", "bed_type",
     "supports", "copies_per_plate", "expected_seconds", "expected_grams",
-    "is_default",
 })
 
 # Who applies a badge. DETECTOR is the automated system's identity (the
@@ -917,7 +921,16 @@ class Ledger:
     def set_default_recipe(self, part_id: str, recipe_id: str) -> None:
         """Make `recipe_id` the sole default for its part. The clear-then-set
         is ONE transaction so the part is never left with zero defaults or two
-        -- 'exactly one default' must hold at every observable moment."""
+        -- 'exactly one default' must hold at every observable moment.
+
+        Refuses a recipe that does not belong to `part_id`: otherwise a caller
+        passing a mismatched pair would clear THIS part's defaults while
+        stamping a FOREIGN part's recipe as this part's default -- corrupting
+        both. Enforced here, at the data layer, so no route can reach it."""
+        recipe = self.get_recipe(recipe_id)
+        if recipe is None or recipe["part_id"] != part_id:
+            raise ValueError(
+                f"recipe {recipe_id!r} does not belong to part {part_id!r}")
         ts = self._clock()
         with self.transaction() as conn:
             conn.execute(

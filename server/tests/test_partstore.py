@@ -54,3 +54,12 @@ def test_delete_removes_the_part_dir(store, tmp_path):
     assert not (tmp_path / "parts" / "pid1").exists()
     # delete of a nonexistent part is a no-op, not an error
     store.delete("pid-missing")
+
+
+def test_a_quote_or_crlf_filename_is_sanitized_for_headers(store, tmp_path):
+    # A hostile filename must not survive into the Content-Disposition header.
+    meta = store.save("pid1", 'ev"il\r\nX-Evil: 1.stl', b"data")
+    assert '"' not in meta["filename"]
+    assert "\r" not in meta["filename"] and "\n" not in meta["filename"]
+    assert meta["filename"].endswith(".stl")
+    assert (tmp_path / "parts" / "pid1" / meta["filename"]).exists()
