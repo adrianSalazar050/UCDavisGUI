@@ -28,6 +28,8 @@ Every file carries a status banner directly under its title.
 | ✅ shipped | `specs/2026-07-21-reconnect-roi-editor-model-check-design.md` | reconnect, ROI drag editor, printer-model check |
 | ✅ shipped | `specs/2026-07-22-auto-slicing-design.md` | automatic slicing: STL → sliced, uploaded, queued. The most current file here |
 | ✅ shipped | `plans/2026-07-22-auto-slicing.md` | Tasks 1–11 done; Task 12 (hardware gate) deliberately outstanding — see its own status line |
+| 📐 design only | `specs/2026-07-24-erp-traceability-design.md` | ERP traceability: local ledger, pieces, inventory, Supabase sync. Phases 2–5 are **not built** |
+| ✅ shipped | `plans/2026-07-24-erp-traceability-phase1-ledger.md` | Phase 1 only: the ledger + run recording. Verified on `--mock`, hardware gate (Task 18) outstanding |
 
 ## Things that are wrong in most of these files
 

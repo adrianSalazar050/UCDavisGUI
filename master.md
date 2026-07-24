@@ -2015,3 +2015,66 @@ A USB webcam at 30–70° puts the model back in its training domain for near-ze
 effort — `camera_source: webcam` is already built and tested, and the resolution
 study says a cheap sensor is fine. Synthetic data is the right answer only when
 the built-in camera is a hard constraint.
+
+---
+
+## 13. The traceability ledger
+
+`ledger.db` (SQLite, beside `printers.json`) is the durable record of every
+print this server has observed. Before it existed nothing recorded that a
+print had happened: the queue drops a job on confirmed start, slice jobs are
+never persisted (§6.5), and the start route stops watching once verified
+(§5.4).
+
+| Module | Owns |
+|---|---|
+| `server/ledger.py` | The database only — schema, forward-only migrations, row helpers. No network, no registry, the same purity `PrintQueue` has |
+| `server/runlog.py` | `RunRecorder`: a 1 s daemon thread that turns `registry.summaries()` diffs into run and event rows |
+
+**`ledger=None` means inert**, the same convention as `queue`/`detection`/
+`slicer`: every route 404s and no thread starts.
+
+**The start route opens the run row before publishing.** It is the only place
+that knows the queue job, so if `RunRecorder`'s tick got there first the
+attributed row and an unattributed one would both exist. That ordering also
+means a start the printer never confirms is recorded as
+`end_state = START_UNCONFIRMED` instead of being forgotten — §5.4 leaves the
+job queued but used to keep no record at all.
+
+**Layer progress updates a column; it does not append events.** A 1,200-layer
+print would otherwise write 1,200 event rows containing no information.
+
+**`actual_grams` is always an estimate and the row says which kind.** The
+printer does not report filament consumed, so `actual_grams_basis` is
+`planned` on FINISH, `proportional` (by layer fraction) on a failure, or
+`manual` when an operator overrides it. Layers are not equal mass, so the
+proportional figure is wrong in detail — recording the basis is what stops it
+being quoted later as a measurement.
+
+**Badges attach at two levels, and the levels are not interchangeable.**
+Automatic badges (`spaghetti`, `stringing`, `hms_error`, `autostop`) attach to
+the **run**, because a detection is `{cls, conf, box}` in frame pixels (§4.1)
+with no association to a model on the plate. Human verdicts attach to the
+**piece**. `badges.auto` enforces it: an automated applier (anything but an
+explicit human source) is refused any badge not marked auto.
+
+**A corrupt or half-migrated database is quarantined, not deleted and not
+fatal.** On open, `PRAGMA integrity_check` and the migration both run inside
+one guard; on failure the file is renamed `ledger.db.corrupt-<stamp>` and a
+fresh one is created — §11's boot invariant, plus the observation that the
+corrupt file is the only evidence of what went wrong.
+
+**Known gaps.** A print that runs while the server is down is unrecorded and
+unrecoverable — MQTT has no history to replay. And an operator stopping a
+print at the printer's own screen is indistinguishable from a genuine failure
+(§3.1), so `end_state` defaults to the honest `FAILED` and is correctable from
+the History page.
+
+Verified on the `--mock` server end to end (2026-07-24): a mock print was
+observed opening a run, tracking layer progress in place, closing `FINISH` on
+the terminal transition, and creating a piece — all served over `/api/runs`.
+**Not yet verified on real hardware**: no genuine print has been recorded.
+
+Design: `docs/superpowers/specs/2026-07-24-erp-traceability-design.md`. Phases
+2–5 (parts catalogue, filament spools, Supabase sync, arm ingest) are designed
+there and **not implemented**.

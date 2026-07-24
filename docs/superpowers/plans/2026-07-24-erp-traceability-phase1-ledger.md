@@ -1,8 +1,12 @@
 # ERP Traceability Phase 1 — Local Ledger + Run Recording Implementation Plan
 
-> **STATUS: NOT STARTED (written 2026-07-24).** No task below has been
-> executed. Implements **Phase 1 only** of
-> `docs/superpowers/specs/2026-07-24-erp-traceability-design.md`.
+> **STATUS: SHIPPED (2026-07-24), Tasks 1–17.** Phase 1 of
+> `docs/superpowers/specs/2026-07-24-erp-traceability-design.md` landed as
+> written below and was verified on the `--mock` server end to end (run
+> opened, layer progress tracked, closed FINISH, a piece created, served over
+> `/api/runs`). **Task 18, the real-hardware gate, is outstanding** — no
+> genuine print has been recorded yet, so per §1.1's discipline the feature
+> stays unverified on hardware until someone runs one.
 >
 > Historical record from the moment of writing, not maintained afterwards.
 > **`master.md` is authoritative wherever this file disagrees with it.**
