@@ -406,10 +406,19 @@ hardware that a stopped print reports `FAILED`, and there is no separate
 signal. So the recorder writes the honest `FAILED`, and `end_state` is
 operator-editable afterwards to `STOPPED_BY_OPERATOR`.
 
-**A server restart mid-print leaves an open row.** Startup reconciliation finds
-any non-terminal run, sees the printer idle, and closes it as `UNKNOWN` with a
-note — rather than leaving a run open forever and corrupting every "runs in
-progress" query from then on.
+**A server restart mid-print leaves an open row — and reconciliation must not
+be hasty about it.** The first, naive implementation closed every open run at
+`start()`; on real hardware that mislabeled a *running* print `UNKNOWN` and
+split it into a duplicate unattributed row, because at boot the MQTT links
+have not delivered a report yet, so the printer still looked idle. Corrected:
+reconciliation is **deferred and connection-aware**. `RunRecorder` snapshots
+the open runs and resolves each only once its printer reports
+`connection = "ok"` — a still-busy printer's run is left open so the adopt
+path re-attaches to it (attribution survives the restart), an idle printer's
+run is closed `UNKNOWN`, and a printer that never reports is closed `UNKNOWN`
+only after a deadline. Leaving a run open forever would corrupt every "runs in
+progress" query; closing a running one loses the record — the connection gate
+is what tells the two apart.
 
 ---
 

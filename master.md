@@ -2058,6 +2058,20 @@ with no association to a model on the plate. Human verdicts attach to the
 **piece**. `badges.auto` enforces it: an automated applier (anything but an
 explicit human source) is refused any badge not marked auto.
 
+**A restart mid-print survives, and keeps its attribution.** Reconciliation
+of runs left open by a restart is **deferred and connection-aware**, not done
+at the instant `start()` runs — because at that instant the MQTT links have
+not delivered a report yet, so a printer physically mid-print still looks
+idle. `RunRecorder` snapshots the open runs and resolves each only once its
+printer reports `connection = "ok"`: a still-**busy** printer's run is left
+open so the normal adopt path re-attaches to it (so `source = queue` survives
+the restart — one run, not a duplicate), an **idle** printer's run is closed
+`UNKNOWN` (the print ended while we were down), and a printer that never
+reports is closed `UNKNOWN` only after `RECONCILE_DEADLINE_S` (30 s). The
+naive version closed *every* open run at boot and split a running print into a
+mislabeled `UNKNOWN` row plus a duplicate unattributed one — confirmed on real
+hardware with a `cube` print, then fixed.
+
 **A corrupt or half-migrated database is quarantined, not deleted and not
 fatal.** On open, `PRAGMA integrity_check` and the migration both run inside
 one guard; on failure the file is renamed `ledger.db.corrupt-<stamp>` and a
