@@ -18,8 +18,10 @@ import uvicorn
 from .auth import Auth, is_loopback
 from .detection import (DEFAULT_INTERVAL_S, DetectionCoordinator,
                         DetectorSupervisor, MockDetectorRunner)
+from .ledger import Ledger
 from .main import create_app
 from .printer import MockPrinter, PrinterService
+from .runlog import RunRecorder
 from .queue import MemoryQueueStore, PrintQueue, QueueStore
 from .registry import PrinterRegistry
 from . import slicer as slicer_mod
@@ -162,6 +164,15 @@ def main() -> int:
         else QueueStore(runs_dir.parent / "queues.json")
     queue = PrintQueue(queue_store)
 
+    # The ledger lives beside printers.json/queues.json, so it follows
+    # BAMBU_DATA_DIR on the desktop build with no special handling. --mock
+    # gets its own file rather than an in-memory store: unlike the queue
+    # there is no MemoryLedger, and pointing it at runs-mock/ keeps mock runs
+    # out of the real history just as effectively.
+    ledger = Ledger((runs_dir / "ledger.db") if a.mock
+                    else (runs_dir.parent / "ledger.db"))
+    recorder = RunRecorder(registry, ledger, detection=coordinator)
+
     # Three distinct outcomes, each logged clearly: disabled by the flag,
     # nothing installed, or installed but with a profile tree that didn't
     # index (a corrupt or unexpected install). Only the last case actually
@@ -192,7 +203,8 @@ def main() -> int:
 
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
     app = create_app(registry, runs_dir, dist, detection=coordinator,
-                     queue=queue, slicer=slicer, auth=auth)
+                     queue=queue, slicer=slicer, auth=auth, ledger=ledger,
+                     recorder=recorder)
     # uvicorn re-raises the signal it caught using whatever handler was
     # installed beforehand. SIGBREAK's OS default kills the process outright
     # (skipping `finally`), so map it to KeyboardInterrupt like SIGINT gets.
@@ -202,6 +214,7 @@ def main() -> int:
         uvicorn.run(app, host=a.host, port=a.port)
     finally:
         registry.stop_all()
+        ledger.close()
     return 0
 
 

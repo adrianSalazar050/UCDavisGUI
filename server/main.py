@@ -269,7 +269,7 @@ class LoginBody(BaseModel):
 def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
                detection=None, queue=None, slicer=None, auth=None,
-               ledger=None) -> FastAPI:
+               ledger=None, recorder=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake). `queue` is
     anything with add(serial, job), remove(serial, id) -> bool,
@@ -299,6 +299,9 @@ def create_app(registry, runs_dir: pathlib.Path,
             if slicer is not None:
                 slicer.start()
                 started.append(slicer)
+            if recorder is not None:
+                recorder.start()
+                started.append(recorder)
             yield
         finally:
             for component in reversed(started):

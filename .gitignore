@@ -17,6 +17,9 @@ runs-mock/
 printers.json*
 # per-printer queue state: no secrets, but user data — don't commit
 queues.json*
+# the traceability ledger + SQLite's -wal/-shm sidecars + quarantined
+# ledger.db.corrupt-<stamp> files; user data, no secrets
+ledger.db*
 *.pt
 
 # Large dataset files
