@@ -426,27 +426,39 @@ In `server/ledger.py`, replace the two lines in `__init__` that read
         self._migrate()
 ```
 
-with:
+with a single call:
 
 ```python
         self._conn = self._open_or_quarantine()
-        self._migrate()
 ```
 
-and add these two methods immediately after `_connect`:
+Change `_migrate` to take the connection as a parameter — `def _migrate(self,
+conn: sqlite3.Connection) -> None:`, using `conn` throughout instead of
+`self._conn` — because it now runs *before* `self._conn` is assigned.
+
+Then add this method immediately after `_connect`:
 
 ```python
     def _open_or_quarantine(self) -> sqlite3.Connection:
-        """Open the database, or move a corrupt one aside and start fresh.
+        """Open, verify, and migrate the database -- or move an unusable one
+        aside and start fresh.
 
         Refusing to boot is not an option -- master.md section 11: a corrupt
         file must never stop the server, because then there is no UI left to
         fix it from. Deleting it is not an option either: it is the only
         evidence of what went wrong, so it is renamed, never removed.
+
+        MIGRATION RUNS INSIDE THIS GUARD, not after it. A database left
+        half-migrated by an older build -- tables created, version row never
+        stamped -- replays its migration on the next boot and raises
+        OperationalError, which is a DatabaseError subclass. Outside the
+        guard that is an unbootable server forever; inside it, the file is
+        quarantined and the user gets a working (if empty) ledger back.
         """
         try:
             conn = self._connect()
             conn.execute("PRAGMA integrity_check").fetchone()
+            self._migrate(conn)
             return conn
         except sqlite3.DatabaseError as e:
             log.error("ledger at %s is unusable (%s); quarantining it and "
@@ -454,18 +466,54 @@ and add these two methods immediately after `_connect`:
         stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S")
         self.path.replace(self.path.with_name(
             f"{self.path.name}.corrupt-{stamp}"))
-        return self._connect()
+        conn = self._connect()
+        self._migrate(conn)
+        return conn
 ```
+
+Add a second test alongside the one above, for the half-migrated case
+specifically — it is a *different* failure from corrupt bytes, and it is the
+one that would otherwise be unrecoverable:
+
+```python
+def test_a_half_migrated_database_is_quarantined_too(tmp_path):
+    """Tables present, version row never stamped -- what an interrupted
+    migration from an older build leaves behind. The replay raises
+    OperationalError, and that must quarantine rather than refuse to boot."""
+    path = tmp_path / "ledger.db"
+    scratch = sqlite3.connect(str(path))
+    scratch.execute(
+        "CREATE TABLE schema_version (id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "version INTEGER NOT NULL)")
+    scratch.commit()
+    scratch.close()
+
+    ledger = Ledger(path)
+    try:
+        assert ledger.query("SELECT version FROM schema_version")[0][
+            "version"] == SCHEMA_VERSION
+        assert ledger.query("SELECT * FROM print_runs") == []
+    finally:
+        ledger.close()
+    assert len(list(tmp_path.glob("ledger.db.corrupt-*"))) == 1
+```
+
+> This test needs `import sqlite3` in the test file. Task 1's cleanup removed
+> that import as unused — add it back here, where it is genuinely used.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest server/tests/test_ledger.py -q`
-Expected: PASS (5 passed)
+Expected: PASS — both new tests green, plus everything from Task 1.
 
 - [ ] **Step 5: Verify the guard actually guards**
 
-Temporarily change `_open_or_quarantine` to `return self._connect()` and rerun.
-Expected: the new test FAILS with `sqlite3.DatabaseError`. Restore the method.
+Temporarily make `_open_or_quarantine` do nothing but `conn =
+self._connect(); self._migrate(conn); return conn` — no `integrity_check`, no
+`except` — and rerun.
+Expected: **both** new tests FAIL, the first with `sqlite3.DatabaseError: file
+is not a database` and the second with `sqlite3.OperationalError: table
+schema_version already exists`. Restore the method.
 
 This step is not ceremony — `server/tests/test_docs.py`'s docstring records
 that a guard never seen to fail is decoration.
@@ -716,6 +764,21 @@ RUN_WRITABLE = frozenset({
 
 END_STATES = ("FINISH", "FAILED", "STOPPED_BY_MONITOR",
               "STOPPED_BY_OPERATOR", "START_UNCONFIRMED", "UNKNOWN")
+
+
+def _checked(fields: dict, allowed: frozenset) -> dict:
+    """Reject any key outside the allowlist, then hand back the fields.
+
+    ONE copy of this on purpose. These keys arrive from HTTP request bodies
+    and are interpolated into SQL by the callers below, so this check is the
+    whole thing standing between a request and `DROP TABLE`. Three
+    hand-written copies of a security check is three chances to write one of
+    them slightly differently.
+    """
+    bad = set(fields) - allowed
+    if bad:
+        raise ValueError(f"not writable columns: {sorted(bad)}")
+    return fields
 ```
 
 and these methods:
@@ -726,9 +789,7 @@ and these methods:
     def open_run(self, *, printer_serial: str, printer_name: str = "",
                  source: str = "unattributed", **fields) -> str:
         """Insert an open run (end_state NULL) and return its id."""
-        bad = set(fields) - RUN_WRITABLE
-        if bad:
-            raise ValueError(f"not writable run columns: {sorted(bad)}")
+        _checked(fields, RUN_WRITABLE)
         ts = self._clock()
         run_id = new_id()
         cols = ["id", "printer_serial", "printer_name", "source",
@@ -754,9 +815,7 @@ and these methods:
             "SELECT * FROM print_runs WHERE end_state IS NULL")
 
     def update_run(self, run_id: str, **fields) -> None:
-        bad = set(fields) - RUN_WRITABLE
-        if bad:
-            raise ValueError(f"not writable run columns: {sorted(bad)}")
+        _checked(fields, RUN_WRITABLE)
         if not fields:
             return
         sets = ", ".join(f"{k} = ?" for k in fields)
@@ -777,9 +836,7 @@ and these methods:
         """
         if end_state not in END_STATES:
             raise ValueError(f"unknown end_state {end_state!r}")
-        bad = set(fields) - RUN_WRITABLE
-        if bad:
-            raise ValueError(f"not writable run columns: {sorted(bad)}")
+        _checked(fields, RUN_WRITABLE)
         ts = self._clock()
         sets = ["end_state = ?", "ended_at = ?", "updated_at = ?"]
         params: list = [end_state, ended_at or ts, ts]
