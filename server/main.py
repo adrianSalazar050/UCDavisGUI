@@ -208,7 +208,8 @@ class LoginBody(BaseModel):
 
 def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
-               detection=None, queue=None, slicer=None, auth=None) -> FastAPI:
+               detection=None, queue=None, slicer=None, auth=None,
+               ledger=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake). `queue` is
     anything with add(serial, job), remove(serial, id) -> bool,
@@ -216,7 +217,12 @@ def create_app(registry, runs_dir: pathlib.Path,
     (PrintQueue, or a test fake); None disables the queue routes entirely,
     same "None means inert" convention as `detection`. `slicer` is a
     SliceCoordinator (or a test fake); None disables the slice routes
-    entirely, same "None means inert" convention."""
+    entirely, same "None means inert" convention.
+
+    `ledger` is a server.ledger.Ledger (or a test fake); None disables every
+    traceability route, the same "None means inert" convention as `queue`,
+    `detection`, and `slicer`.
+    """
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -414,6 +420,11 @@ def create_app(registry, runs_dir: pathlib.Path,
         if queue is None:
             raise HTTPException(404, "queue not enabled on this server")
 
+    def _require_ledger():
+        if ledger is None:
+            raise HTTPException(404, "traceability is not enabled on this "
+                                     "server")
+
     @app.get("/api/printers/{serial}/queue")
     def get_queue(serial: str):
         _require_queue()
@@ -529,6 +540,45 @@ def create_app(registry, runs_dir: pathlib.Path,
         queue.remove(serial, job_id)
         return {"started": True, "job": job,
                 "jobs": queue.get(serial), "totals": queue.totals(serial)}
+
+    # --- traceability: runs, pieces, badges -------------------------------
+
+    def _run_payload(run_id: str) -> dict:
+        run = ledger.get_run(run_id)
+        if run is None:
+            raise HTTPException(404, "unknown run")
+        pieces = []
+        for piece in ledger.pieces_for(run_id):
+            piece["badges"] = ledger.piece_badges(piece["id"])
+            pieces.append(piece)
+        return {"run": run, "events": ledger.events_for(run_id),
+                "pieces": pieces, "badges": ledger.run_badges(run_id)}
+
+    ZERO_COUNTS = {"total": 0, "good": 0, "scrap": 0, "rework": 0,
+                   "pending": 0}
+
+    @app.get("/api/runs")
+    def list_runs(serial: str | None = None, limit: int = 50,
+                  offset: int = 0):
+        _require_ledger()
+        limit = max(1, min(int(limit), 500))
+        runs = ledger.list_runs(serial=serial, limit=limit,
+                                offset=max(0, int(offset)))
+        # One grouped query for the whole page, not one per row.
+        counts = ledger.piece_counts([r["id"] for r in runs])
+        for run in runs:
+            run["piece_counts"] = counts.get(run["id"], dict(ZERO_COUNTS))
+        return {"runs": runs}
+
+    @app.get("/api/runs/{run_id}")
+    def get_run(run_id: str):
+        _require_ledger()
+        return _run_payload(run_id)
+
+    @app.get("/api/badges")
+    def list_badges():
+        _require_ledger()
+        return {"badges": ledger.badges()}
 
     def _require_slicer() -> None:
         if slicer is None:
