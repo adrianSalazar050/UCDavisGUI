@@ -1391,6 +1391,40 @@ in with the shared password. The default with no `--host` stays
 binding anywhere else **without** `BAMBU_PASSWORD` set refuses to start
 (§2.1's fail-closed rule).
 
+**Where the password lives on the lab machine.** By convention it is a single
+line in **`.bambu-password`** at the repo root, gitignored (`.gitignore`, same
+reasoning as `printers.json*` — that file holds the printer access code). The
+server reads it into the environment at launch rather than storing it itself:
+
+```bash
+BAMBU_PASSWORD="$(cat .bambu-password)" python -m server --host 0.0.0.0
+```
+
+Nothing in the code knows about that filename — it is purely an operational
+habit, so `cat .bambu-password` is the answer to "what is the password?" and
+rotating it is: write a new value, restart. Keeping it out of argv is
+deliberate for the same reason the printer access code is (§11): a command
+line is visible to any process listing.
+
+**Two things that break this setup in practice**, both DHCP:
+the serving machine's own LAN IP (the URL everyone bookmarked) and the
+printer's IP in `printers.json`. When "it stopped working", check those two
+first — the printer's address moved three times in a single afternoon during
+development. A DHCP reservation for both is the real fix.
+
+On Windows the inbound port also has to be opened once, from an **admin**
+shell, or nothing off this machine can connect:
+
+```powershell
+New-NetFirewallRule -DisplayName "Bambu Monitor" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
+```
+
+Note that a green result from *this* machine (firewall rule present, the LAN
+IP serving a page) does **not** prove another device can reach it: many
+campus/guest networks enable client isolation, which blocks device-to-device
+traffic entirely and is invisible from the server. Test with one phone before
+telling everyone the URL.
+
 `--mock` seeds three printers (running / stale / offline), uses `MemoryStore` +
 `MemoryQueueStore` so nothing touches your real `printers.json`/`queues.json`,
 writes to `runs-mock/`, and swaps `DetectorSupervisor` for `MockDetectorRunner`.
