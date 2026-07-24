@@ -886,7 +886,7 @@ and these methods:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest server/tests/test_ledger.py -q`
-Expected: PASS (16 passed)
+Expected: PASS (23 passed — 16 prior plus 7 new run tests)
 
 - [ ] **Step 5: Commit**
 
@@ -990,7 +990,7 @@ Add to `server/ledger.py`:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest server/tests/test_ledger.py -q`
-Expected: PASS (19 passed)
+Expected: PASS (26 passed — 23 prior plus 3 new event tests)
 
 - [ ] **Step 5: Commit**
 
