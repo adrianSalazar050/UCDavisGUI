@@ -419,6 +419,12 @@ Expected: FAIL — `sqlite3.DatabaseError: file is not a database`
 
 - [ ] **Step 3: Write minimal implementation**
 
+**Important — `_migrate()` now uses `self.transaction()`, which reads
+`self._conn`.** So `self._conn` must be assigned *before* `_migrate()` runs.
+Do NOT change `_migrate`'s signature; leave it reading `self._conn`. Instead
+have `_open_or_quarantine` assign `self._conn` itself, and have `__init__`
+just call it.
+
 In `server/ledger.py`, replace the two lines in `__init__` that read
 
 ```python
@@ -426,22 +432,18 @@ In `server/ledger.py`, replace the two lines in `__init__` that read
         self._migrate()
 ```
 
-with a single call:
+with a single call (it assigns `self._conn` as a side effect):
 
 ```python
-        self._conn = self._open_or_quarantine()
+        self._open_or_quarantine()
 ```
-
-Change `_migrate` to take the connection as a parameter — `def _migrate(self,
-conn: sqlite3.Connection) -> None:`, using `conn` throughout instead of
-`self._conn` — because it now runs *before* `self._conn` is assigned.
 
 Then add this method immediately after `_connect`:
 
 ```python
-    def _open_or_quarantine(self) -> sqlite3.Connection:
+    def _open_or_quarantine(self) -> None:
         """Open, verify, and migrate the database -- or move an unusable one
-        aside and start fresh.
+        aside and start fresh. Sets self._conn.
 
         Refusing to boot is not an option -- master.md section 11: a corrupt
         file must never stop the server, because then there is no UI left to
@@ -454,22 +456,31 @@ Then add this method immediately after `_connect`:
         OperationalError, which is a DatabaseError subclass. Outside the
         guard that is an unbootable server forever; inside it, the file is
         quarantined and the user gets a working (if empty) ledger back.
+
+        self._conn is assigned before _migrate() runs because _migrate() uses
+        self.transaction(), which reads self._conn.
         """
         try:
-            conn = self._connect()
-            conn.execute("PRAGMA integrity_check").fetchone()
-            self._migrate(conn)
-            return conn
+            self._conn = self._connect()
+            self._conn.execute("PRAGMA integrity_check").fetchone()
+            self._migrate()
+            return
         except sqlite3.DatabaseError as e:
             log.error("ledger at %s is unusable (%s); quarantining it and "
                       "starting a new one", self.path, e)
         stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S")
         self.path.replace(self.path.with_name(
             f"{self.path.name}.corrupt-{stamp}"))
-        conn = self._connect()
-        self._migrate(conn)
-        return conn
+        self._conn = self._connect()
+        self._migrate()
 ```
+
+> One subtlety the implementer must handle: a corrupt file can fail the
+> `integrity_check` *or* fail inside `_migrate()` (the half-migrated case),
+> and in the latter case `self._conn` is an open handle to the bad file. The
+> `self.path.replace(...)` on Windows will fail if that handle is still open,
+> so close `self._conn` before the rename. Add `self._conn.close()` right
+> after the `log.error(...)` line.
 
 Add a second test alongside the one above, for the half-migrated case
 specifically — it is a *different* failure from corrupt bytes, and it is the
@@ -508,9 +519,9 @@ Expected: PASS — both new tests green, plus everything from Task 1.
 
 - [ ] **Step 5: Verify the guard actually guards**
 
-Temporarily make `_open_or_quarantine` do nothing but `conn =
-self._connect(); self._migrate(conn); return conn` — no `integrity_check`, no
-`except` — and rerun.
+Temporarily make `_open_or_quarantine` do nothing but `self._conn =
+self._connect(); self._migrate()` — no `integrity_check`, no `except` — and
+rerun.
 Expected: **both** new tests FAIL, the first with `sqlite3.DatabaseError: file
 is not a database` and the second with `sqlite3.OperationalError: table
 schema_version already exists`. Restore the method.
