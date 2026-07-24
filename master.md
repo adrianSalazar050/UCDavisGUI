@@ -2089,6 +2089,47 @@ observed opening a run, tracking layer progress in place, closing `FINISH` on
 the terminal transition, and creating a piece — all served over `/api/runs`.
 **Not yet verified on real hardware**: no genuine print has been recorded.
 
-Design: `docs/superpowers/specs/2026-07-24-erp-traceability-design.md`. Phases
-2–5 (parts catalogue, filament spools, Supabase sync, arm ingest) are designed
-there and **not implemented**.
+Design: `docs/superpowers/specs/2026-07-24-erp-traceability-design.md`. The
+parts catalogue (Phase 2) is §14 below; filament spools (Phase 3), Supabase
+sync (Phase 4), and arm ingest (Phase 5) are designed there and **not
+implemented**.
+
+---
+
+## 14. The parts catalogue (Phase 2)
+
+The ledger gained two tables at **schema version 2** so an order or a run can
+point at a reproducible thing: a **part** is `part_number` + `revision`
+(unique together — a new revision is a new row, never an overwrite) with an
+optional stored model file; a **recipe** is a named slicing setup for that
+part (preset tier, filament, nozzle, bed type, supports, copies), with at most
+one marked default.
+
+**Model bytes live on disk, not in SQLite.** `server/partstore.py`
+(`PartStore`) writes them under `<ledger.db's dir>/parts/<part_id>/`, records
+only `{model_filename, model_sha256, model_bytes}` in the `parts` row, and is
+pure of the DB — the same responsibility split as `queue.py` vs the API layer.
+An STL is easily tens of MB; putting it in the file the recorder writes to
+every tick would bloat it. A client-supplied filename is basenamed through
+**both** `ntpath.basename` and `os.path.basename`, so a Windows- or
+POSIX-style path can never escape the part directory on any OS.
+
+**The migration is forward-only and atomic.** `MIGRATIONS[2]` is appended,
+never editing `MIGRATIONS[1]`; `_migrate` runs each version's statements plus
+the version stamp in one transaction, so a v1 `ledger.db` upgrades in place —
+adding the parts tables while keeping every recorded run — and a crash
+mid-upgrade leaves the file exactly as it was.
+
+**Routes** (`/api/parts`, all behind `_require_ledger`; model up/download are
+sync `def` and 404 without a `PartStore`): list/create/get/edit/archive parts,
+model upload + download, and recipe add/edit/archive. A duplicate
+(part_number, revision) is a **409**. Setting a recipe default always routes
+through `set_default_recipe`, whose clear-then-set runs in one transaction, so
+"exactly one default" holds at every observable moment.
+
+**Shipped so far:** the schema, `PartStore`, the helpers, the routes, and the
+frontend API wrappers — all tested (backend green). **Not yet built:** the
+Parts UI page and slicing a stored part from a stored recipe (the run row's
+`part_id`/`recipe_id` columns already exist, ready for that wiring). See
+`docs/superpowers/plans/2026-07-24-erp-traceability-phase2-parts.md`, whose
+Tasks 7–8 are a deliberate review checkpoint.

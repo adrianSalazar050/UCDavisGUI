@@ -333,3 +333,85 @@ export async function removePieceBadge(pieceId, code) {
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }
+
+// --- parts catalogue + recipes (Phase 2) --------------------------------
+// All 404 when the server has no ledger, same "None means inert" convention.
+
+export async function fetchParts() {
+  const res = await fetch("/api/parts");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// { part, recipes, default_recipe_id }
+export async function fetchPart(partId) {
+  const res = await fetch(`/api/parts/${encodeURIComponent(partId)}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function createPart(body) {
+  const res = await fetch("/api/parts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function updatePart(partId, body) {
+  const res = await fetch(`/api/parts/${encodeURIComponent(partId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function archivePart(partId) {
+  const res = await fetch(`/api/parts/${encodeURIComponent(partId)}`,
+                          { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+// Upload a model file (STL/3MF/STEP). Returns the refreshed part payload.
+export async function uploadPartModel(partId, file) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`/api/parts/${encodeURIComponent(partId)}/model`,
+                          { method: "POST", body: form });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function addRecipe(partId, body) {
+  const res = await fetch(
+    `/api/parts/${encodeURIComponent(partId)}/recipes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function updateRecipe(partId, recipeId, body) {
+  const res = await fetch(
+    `/api/parts/${encodeURIComponent(partId)}/recipes/${encodeURIComponent(recipeId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function archiveRecipe(partId, recipeId) {
+  const res = await fetch(
+    `/api/parts/${encodeURIComponent(partId)}/recipes/${encodeURIComponent(recipeId)}`,
+    { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
