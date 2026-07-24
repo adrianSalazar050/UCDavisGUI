@@ -48,6 +48,34 @@ def verify_start(svc, *, timeout: float = START_VERIFY_S,
         sleep(poll)
     return False
 
+
+def _maybe(registry, method: str, serial: str):
+    """Call an optional registry accessor, or None if this registry (or a
+    test fake) does not have it. printer_bed_type/printer_nozzle exist on
+    PrinterRegistry but not on every fake."""
+    fn = getattr(registry, method, None)
+    if fn is None:
+        return None
+    try:
+        return fn(serial)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _close_run_quietly(ledger, run_id, end_state: str, serial: str,
+                       detail: str) -> None:
+    """Close a ledger run without ever letting a ledger problem surface as a
+    print-path failure."""
+    if ledger is None or run_id is None:
+        return
+    try:
+        ledger.close_run(run_id, end_state=end_state)
+        ledger.add_event(printer_serial=serial, run_id=run_id,
+                         kind="start_unconfirmed", source="server",
+                         payload={"detail": detail})
+    except Exception as e:  # noqa: BLE001
+        log.error("could not close ledger run %s: %s", run_id, e)
+
 log = logging.getLogger("server.main")
 
 WS_POLL_S = 0.25      # summary sampled at 4 Hz -> at most ~4 pushes/s
@@ -552,11 +580,39 @@ def create_app(registry, runs_dir: pathlib.Path,
             raise HTTPException(
                 409, f"{job['name']} is {mismatch}. Re-slice it for this "
                      "printer, or remove it from the queue.")
+        # Open the ledger row BEFORE publishing. Two reasons, both load-bearing:
+        # RunRecorder adopts an already-open row instead of creating one, so
+        # this is what stops its 1 s tick racing us into a duplicate
+        # unattributed run; and a start the printer ignores still leaves a
+        # record, which nothing in this system used to keep.
+        run_id = None
+        if ledger is not None:
+            try:
+                run_id = ledger.open_run(
+                    printer_serial=serial,
+                    printer_name=(svc.summary().get("name") or ""),
+                    source="queue",
+                    queue_job_id=job.get("id"),
+                    sd_path=job.get("sd_path"),
+                    subtask_name=job.get("name"),
+                    planned_seconds=job.get("seconds"),
+                    planned_grams=job.get("grams"),
+                    bed_type=_maybe(registry, "printer_bed_type", serial),
+                    nozzle=_maybe(registry, "printer_nozzle", serial))
+            except Exception as e:  # noqa: BLE001
+                # A ledger problem must never cost a print -- master.md
+                # section 11's boot invariant, one layer up.
+                log.error("could not open a ledger run for %s: %s", serial, e)
+
         try:
             svc.start_print(job["sd_path"], plate=job.get("plate") or 1)
         except PrinterBusy as e:
+            _close_run_quietly(ledger, run_id, "START_UNCONFIRMED",
+                               serial, str(e))
             raise HTTPException(409, str(e))
         except SdError as e:
+            _close_run_quietly(ledger, run_id, "START_UNCONFIRMED",
+                               serial, str(e))
             raise HTTPException(502, str(e))
 
         # Read the module globals here, not as verify_start's defaults: a
@@ -564,6 +620,9 @@ def create_app(registry, runs_dir: pathlib.Path,
         # burn the full timeout, and it would be un-tunable at runtime).
         started = verify_start(svc, timeout=START_VERIFY_S, poll=START_POLL_S)
         if not started:
+            _close_run_quietly(
+                ledger, run_id, "START_UNCONFIRMED", serial,
+                "the printer never reported a print starting")
             return {"started": False, "job": job,
                     "detail": "the printer did not report a print starting; "
                               "the job is still queued",

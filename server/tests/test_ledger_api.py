@@ -170,3 +170,109 @@ def test_a_badge_route_rejects_an_unknown_code(client, led):
     run_id = led.open_run(printer_serial="S1", source="queue")
     res = client.post(f"/api/runs/{run_id}/badges", json={"code": "banana"})
     assert res.status_code == 400
+
+
+class StartableService:
+    def __init__(self, serial="S1", state="IDLE", starts=True):
+        self.serial = serial
+        self.name = "A1"
+        self._state = state
+        self._starts = starts
+        self.started = []
+
+    def summary(self):
+        return {"serial": self.serial, "name": self.name,
+                "gcode_state": self._state, "connection": "ok"}
+
+    def start_print(self, sd_path, plate=1):
+        self.started.append((sd_path, plate))
+        if self._starts:
+            self._state = "PREPARE"
+
+
+class StartRegistry:
+    def __init__(self, service):
+        self._svc = service
+
+    def summaries(self):
+        return [self._svc.summary()]
+
+    def get(self, serial):
+        return self._svc if serial == self._svc.serial else None
+
+    def printer_model(self, serial):
+        return ""
+
+
+class FakeQueue:
+    def __init__(self, jobs):
+        self._jobs = list(jobs)
+
+    def get(self, serial):
+        return list(self._jobs)
+
+    def remove(self, serial, job_id):
+        self._jobs = [j for j in self._jobs if j.get("id") != job_id]
+        return True
+
+    def totals(self, serial):
+        return {"seconds": 0, "grams": 0, "finish_epoch": None}
+
+
+JOB = {"id": "j1", "sd_path": "/Benchy.gcode.3mf", "name": "Benchy",
+       "seconds": 900, "grams": 12.5, "source": "3mf", "model_id": ""}
+
+
+def _start_client(tmp_path, led, starts=True):
+    svc = StartableService(starts=starts)
+    app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]),
+                     ledger=led)
+    return TestClient(app), svc
+
+
+def test_a_confirmed_start_records_an_attributed_run(tmp_path, led):
+    client, _ = _start_client(tmp_path, led)
+    res = client.post("/api/printers/S1/queue/j1/start")
+    assert res.json()["started"] is True
+    runs = led.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["source"] == "queue"
+    assert runs[0]["queue_job_id"] == "j1"
+    assert runs[0]["sd_path"] == "/Benchy.gcode.3mf"
+    assert runs[0]["planned_grams"] == pytest.approx(12.5)
+    assert runs[0]["planned_seconds"] == pytest.approx(900)
+    assert runs[0]["end_state"] is None
+
+
+def test_an_unconfirmed_start_is_recorded_not_forgotten(tmp_path, led):
+    client, _ = _start_client(tmp_path, led, starts=False)
+    res = client.post("/api/printers/S1/queue/j1/start")
+    assert res.json()["started"] is False
+    runs = led.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["end_state"] == "START_UNCONFIRMED"
+    kinds = [e["kind"] for e in led.events_for(runs[0]["id"])]
+    assert "start_unconfirmed" in kinds
+
+
+def test_the_run_row_exists_before_the_publish(tmp_path, led):
+    """The ordering the recorder's adoption depends on."""
+    seen = {}
+
+    class Watching(StartableService):
+        def start_print(self, sd_path, plate=1):
+            seen["open_run_existed"] = led.find_open_run("S1") is not None
+            super().start_print(sd_path, plate)
+
+    svc = Watching()
+    app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]),
+                     ledger=led)
+    TestClient(app).post("/api/printers/S1/queue/j1/start")
+    assert seen["open_run_existed"] is True
+
+
+def test_starting_without_a_ledger_still_works(tmp_path):
+    svc = StartableService()
+    app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]))
+    res = TestClient(app).post("/api/printers/S1/queue/j1/start")
+    assert res.json()["started"] is True
