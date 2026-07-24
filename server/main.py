@@ -22,6 +22,7 @@ from .detection import CLASSES  # the 6 valid armed classes
 from .printer import PrinterBusy
 from .registry import DuplicateSerial
 from .sdcard import SdError
+from .ledger import END_STATES, PIECE_STATUSES
 from .store import CAMERA_SOURCES, model_mismatch
 
 # How long to wait for a started print to show up in gcode_state before
@@ -117,6 +118,37 @@ class DetectionUpdate(BaseModel):
 
 class ArmBody(BaseModel):
     armed: bool
+
+
+class PatchRun(BaseModel):
+    """Operator corrections to a recorded run.
+
+    end_state is editable because an operator stopping a print at the
+    printer's own screen is indistinguishable from a genuine failure -- both
+    report FAILED (master.md section 3.1) -- so the recorder writes the honest
+    default and a human fixes it here.
+    """
+
+    end_state: str | None = None
+    actual_grams: float | None = None
+    notes: str | None = None
+
+
+class PatchPiece(BaseModel):
+    status: str | None = None
+    inspected_by: str | None = None
+    notes: str | None = None
+
+
+class BulkPieces(BaseModel):
+    status: str
+    inspected_by: str | None = None
+    overrides: list[dict] = []
+
+
+class BadgeRef(BaseModel):
+    code: str
+    note: str | None = None
 
 
 class AddQueueJob(BaseModel):
@@ -579,6 +611,96 @@ def create_app(registry, runs_dir: pathlib.Path,
     def list_badges():
         _require_ledger()
         return {"badges": ledger.badges()}
+
+    def _badge_id(code: str) -> str:
+        for badge in ledger.badges():
+            if badge["code"] == code:
+                return badge["id"]
+        raise HTTPException(400, f"unknown badge {code!r}")
+
+    @app.patch("/api/runs/{run_id}")
+    def patch_run(run_id: str, body: PatchRun):
+        """Operator corrections, including attributing a run recorded as
+        unattributed. Without this every screen-started print would be
+        permanent dead weight in the record."""
+        _require_ledger()
+        if ledger.get_run(run_id) is None:
+            raise HTTPException(404, "unknown run")
+        fields = {}
+        if body.end_state is not None:
+            if body.end_state not in END_STATES:
+                raise HTTPException(
+                    400, f"end_state must be one of {', '.join(END_STATES)}")
+            fields["end_state"] = body.end_state
+        if body.actual_grams is not None:
+            # An operator-entered figure is a measurement, not an estimate --
+            # the basis column has to say so, or it reads as our arithmetic.
+            fields["actual_grams"] = float(body.actual_grams)
+            fields["actual_grams_basis"] = "manual"
+        if fields:
+            ledger.update_run(run_id, **fields)
+        if body.notes:
+            ledger.add_event(printer_serial=ledger.get_run(
+                run_id)["printer_serial"], run_id=run_id,
+                kind="operator_note", source="operator",
+                payload={"note": body.notes})
+        return _run_payload(run_id)
+
+    @app.patch("/api/pieces/{piece_id}")
+    def patch_piece(piece_id: str, body: PatchPiece):
+        _require_ledger()
+        if body.status is not None and body.status not in PIECE_STATUSES:
+            raise HTTPException(
+                400, f"status must be one of {', '.join(PIECE_STATUSES)}")
+        ok = ledger.set_piece(piece_id, status=body.status,
+                              inspected_by=body.inspected_by,
+                              notes=body.notes)
+        if not ok:
+            raise HTTPException(404, "unknown piece")
+        return {"ok": True}
+
+    @app.post("/api/runs/{run_id}/pieces/bulk")
+    def bulk_pieces(run_id: str, body: BulkPieces):
+        """One action for a whole plate. See the ledger's set_pieces_bulk for
+        why this is not a convenience."""
+        _require_ledger()
+        if ledger.get_run(run_id) is None:
+            raise HTTPException(404, "unknown run")
+        try:
+            changed = ledger.set_pieces_bulk(
+                run_id, body.status, inspected_by=body.inspected_by,
+                overrides=body.overrides)
+        except (ValueError, KeyError, TypeError) as e:
+            raise HTTPException(400, str(e))
+        return {"changed": changed, **_run_payload(run_id)}
+
+    @app.post("/api/runs/{run_id}/badges")
+    def add_run_badge(run_id: str, body: BadgeRef):
+        _require_ledger()
+        if ledger.get_run(run_id) is None:
+            raise HTTPException(404, "unknown run")
+        ledger.add_run_badge(run_id, _badge_id(body.code),
+                             applied_by="operator", note=body.note)
+        return {"badges": ledger.run_badges(run_id)}
+
+    @app.delete("/api/runs/{run_id}/badges")
+    def remove_run_badge(run_id: str, body: BadgeRef):
+        _require_ledger()
+        ledger.remove_run_badge(run_id, _badge_id(body.code))
+        return {"badges": ledger.run_badges(run_id)}
+
+    @app.post("/api/pieces/{piece_id}/badges")
+    def add_piece_badge(piece_id: str, body: BadgeRef):
+        _require_ledger()
+        ledger.add_piece_badge(piece_id, _badge_id(body.code),
+                               applied_by="operator", note=body.note)
+        return {"badges": ledger.piece_badges(piece_id)}
+
+    @app.delete("/api/pieces/{piece_id}/badges")
+    def remove_piece_badge(piece_id: str, body: BadgeRef):
+        _require_ledger()
+        ledger.remove_piece_badge(piece_id, _badge_id(body.code))
+        return {"badges": ledger.piece_badges(piece_id)}
 
     def _require_slicer() -> None:
         if slicer is None:
