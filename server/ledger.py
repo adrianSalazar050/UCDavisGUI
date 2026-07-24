@@ -616,6 +616,10 @@ class Ledger:
             "SELECT * FROM pieces WHERE run_id = ? ORDER BY index_in_run",
             (run_id,))
 
+    def get_piece(self, piece_id: str) -> dict | None:
+        rows = self.query("SELECT * FROM pieces WHERE id = ?", (piece_id,))
+        return rows[0] if rows else None
+
     def piece_counts(self, run_ids) -> dict[str, dict]:
         """-> {run_id: {total, good, scrap, rework, pending}} for the given
         runs, in ONE grouped query rather than one query per run: the history

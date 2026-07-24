@@ -683,7 +683,8 @@ def create_app(registry, runs_dir: pathlib.Path,
         unattributed. Without this every screen-started print would be
         permanent dead weight in the record."""
         _require_ledger()
-        if ledger.get_run(run_id) is None:
+        run = ledger.get_run(run_id)
+        if run is None:
             raise HTTPException(404, "unknown run")
         fields = {}
         if body.end_state is not None:
@@ -699,10 +700,9 @@ def create_app(registry, runs_dir: pathlib.Path,
         if fields:
             ledger.update_run(run_id, **fields)
         if body.notes:
-            ledger.add_event(printer_serial=ledger.get_run(
-                run_id)["printer_serial"], run_id=run_id,
-                kind="operator_note", source="operator",
-                payload={"note": body.notes})
+            ledger.add_event(printer_serial=run["printer_serial"],
+                             run_id=run_id, kind="operator_note",
+                             source="operator", payload={"note": body.notes})
         return _run_payload(run_id)
 
     @app.patch("/api/pieces/{piece_id}")
@@ -726,10 +726,14 @@ def create_app(registry, runs_dir: pathlib.Path,
         if ledger.get_run(run_id) is None:
             raise HTTPException(404, "unknown run")
         try:
+            # set_pieces_bulk validates status AND every override index up
+            # front, raising ValueError -- so only ValueError is a client
+            # error here. A KeyError/TypeError would be a real internal bug and
+            # must NOT be masked as a 400.
             changed = ledger.set_pieces_bulk(
                 run_id, body.status, inspected_by=body.inspected_by,
                 overrides=body.overrides)
-        except (ValueError, KeyError, TypeError) as e:
+        except ValueError as e:
             raise HTTPException(400, str(e))
         return {"changed": changed, **_run_payload(run_id)}
 
@@ -751,6 +755,11 @@ def create_app(registry, runs_dir: pathlib.Path,
     @app.post("/api/pieces/{piece_id}/badges")
     def add_piece_badge(piece_id: str, body: BadgeRef):
         _require_ledger()
+        # Symmetric with add_run_badge's run check: without this a badge on a
+        # typo'd piece_id would INSERT against a ghost piece and return 200,
+        # masking the client bug instead of the clean 404 it gets elsewhere.
+        if ledger.get_piece(piece_id) is None:
+            raise HTTPException(404, "unknown piece")
         ledger.add_piece_badge(piece_id, _badge_id(body.code),
                                applied_by="operator", note=body.note)
         return {"badges": ledger.piece_badges(piece_id)}

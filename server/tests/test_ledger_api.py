@@ -276,3 +276,55 @@ def test_starting_without_a_ledger_still_works(tmp_path):
     app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]))
     res = TestClient(app).post("/api/printers/S1/queue/j1/start")
     assert res.json()["started"] is True
+
+
+# --- the safety invariant: a ledger problem must never cost a print ------
+# These exercise the two branches that exist ONLY to protect that invariant
+# (I1 from code review): they were previously asserted-by-design but untested.
+
+from server.printer import PrinterBusy
+
+
+def test_a_ledger_failure_never_blocks_the_print(tmp_path, led):
+    """open_run raising must be swallowed -- the print still starts."""
+    class BrokenLedger:
+        def __init__(self, real):
+            self._real = real
+
+        def open_run(self, **kwargs):
+            raise RuntimeError("ledger on fire")
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    svc = StartableService()
+    app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]),
+                     ledger=BrokenLedger(led))
+    res = TestClient(app).post("/api/printers/S1/queue/j1/start")
+    assert res.json()["started"] is True
+    assert svc.started, "start_print was never called -- the ledger blocked it"
+
+
+def test_a_printer_busy_start_records_unconfirmed(tmp_path, led):
+    """start_print raising PrinterBusy -> the run opened before it closes as
+    START_UNCONFIRMED, and the 409 still propagates."""
+    class BusyService(StartableService):
+        def start_print(self, sd_path, plate=1):
+            raise PrinterBusy("already printing")
+
+    svc = BusyService()
+    app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]),
+                     ledger=led)
+    res = TestClient(app).post("/api/printers/S1/queue/j1/start")
+    assert res.status_code == 409
+    runs = led.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["end_state"] == "START_UNCONFIRMED"
+
+
+def test_a_badge_on_an_unknown_piece_is_404(client):
+    """I2: a badge applied to a nonexistent piece is a clean 404, not a
+    silent 200 against a ghost piece."""
+    res = client.post("/api/pieces/does-not-exist/badges",
+                      json={"code": "warped"})
+    assert res.status_code == 404
