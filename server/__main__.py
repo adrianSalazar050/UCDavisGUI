@@ -20,6 +20,7 @@ from .detection import (DEFAULT_INTERVAL_S, DetectionCoordinator,
                         DetectorSupervisor, MockDetectorRunner)
 from .ledger import Ledger
 from .main import create_app
+from .partstore import PartStore
 from .printer import MockPrinter, PrinterService
 from .runlog import RunRecorder
 from .queue import MemoryQueueStore, PrintQueue, QueueStore
@@ -173,6 +174,12 @@ def main() -> int:
                     else (runs_dir.parent / "ledger.db"))
     recorder = RunRecorder(registry, ledger, detection=coordinator)
 
+    # Model files live beside ledger.db, in the same directory --mock keeps
+    # separate from the real one, so a mock part's uploaded STL never lands
+    # next to real parts on disk.
+    parts_dir = runs_dir if a.mock else runs_dir.parent
+    partstore = PartStore(parts_dir)
+
     # Three distinct outcomes, each logged clearly: disabled by the flag,
     # nothing installed, or installed but with a profile tree that didn't
     # index (a corrupt or unexpected install). Only the last case actually
@@ -204,7 +211,7 @@ def main() -> int:
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
     app = create_app(registry, runs_dir, dist, detection=coordinator,
                      queue=queue, slicer=slicer, auth=auth, ledger=ledger,
-                     recorder=recorder)
+                     recorder=recorder, partstore=partstore)
     # uvicorn re-raises the signal it caught using whatever handler was
     # installed beforehand. SIGBREAK's OS default kills the process outright
     # (skipping `finally`), so map it to KeyboardInterrupt like SIGINT gets.

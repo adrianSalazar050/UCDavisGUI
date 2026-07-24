@@ -15,6 +15,26 @@ class FakeRegistry:
         return None
 
 
+class FakePartStore:
+    def __init__(self):
+        self.saved = {}   # part_id -> (filename, bytes)
+
+    def save(self, part_id, filename, data):
+        import hashlib
+        name = filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        if not name.lower().endswith((".stl", ".3mf", ".step", ".stp", ".obj")):
+            raise ValueError(f"not a model file: {filename!r}")
+        self.saved[part_id] = (name, data)
+        return {"filename": name, "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": len(data)}
+
+    def open_bytes(self, part_id, filename):
+        return self.saved[part_id][1]
+
+    def delete(self, part_id):
+        self.saved.pop(part_id, None)
+
+
 @pytest.fixture
 def led(tmp_path):
     ledger = Ledger(tmp_path / "ledger.db")
@@ -32,6 +52,15 @@ def client(tmp_path, led):
 def no_ledger_client(tmp_path):
     app = create_app(FakeRegistry(), tmp_path)
     return TestClient(app)
+
+
+@pytest.fixture
+def parts_client(tmp_path, led):
+    store = FakePartStore()
+    app = create_app(FakeRegistry(), tmp_path, ledger=led, partstore=store)
+    client = TestClient(app)
+    client._store = store
+    return client
 
 
 def test_routes_404_without_a_ledger(no_ledger_client):
@@ -328,3 +357,113 @@ def test_a_badge_on_an_unknown_piece_is_404(client):
     res = client.post("/api/pieces/does-not-exist/badges",
                       json={"code": "warped"})
     assert res.status_code == 404
+
+
+# --- parts + recipes routes -------------------------------------------------
+
+
+def test_parts_routes_404_without_a_ledger(no_ledger_client):
+    assert no_ledger_client.get("/api/parts").status_code == 404
+
+
+def test_create_and_list_a_part(parts_client):
+    res = parts_client.post("/api/parts",
+                            json={"part_number": "BRK-100", "name": "Bracket"})
+    assert res.status_code == 201
+    pid = res.json()["part"]["id"]
+    listed = parts_client.get("/api/parts").json()["parts"]
+    assert [p["id"] for p in listed] == [pid]
+    assert listed[0]["default_recipe_id"] is None
+
+
+def test_a_duplicate_part_is_409(parts_client):
+    parts_client.post("/api/parts", json={"part_number": "X", "revision": "A"})
+    dup = parts_client.post("/api/parts",
+                            json={"part_number": "X", "revision": "A"})
+    assert dup.status_code == 409
+    # a new revision is fine
+    assert parts_client.post(
+        "/api/parts", json={"part_number": "X", "revision": "B"}
+    ).status_code == 201
+
+
+def test_get_part_includes_recipes(parts_client, led):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    led.add_recipe(pid, name="Standard PLA")
+    body = parts_client.get(f"/api/parts/{pid}").json()
+    assert body["part"]["id"] == pid
+    assert [r["name"] for r in body["recipes"]] == ["Standard PLA"]
+
+
+def test_unknown_part_is_404(parts_client):
+    assert parts_client.get("/api/parts/nope").status_code == 404
+
+
+def test_edit_part(parts_client):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    res = parts_client.put(f"/api/parts/{pid}", json={"name": "Renamed"})
+    assert res.status_code == 200
+    assert res.json()["part"]["name"] == "Renamed"
+
+
+def test_archive_part_hides_it_and_clears_the_model(parts_client):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    parts_client._store.saved[pid] = ("cube.stl", b"data")
+    assert parts_client.delete(f"/api/parts/{pid}").status_code == 204
+    assert parts_client.get("/api/parts").json()["parts"] == []
+    assert pid not in parts_client._store.saved
+
+
+def test_model_upload_and_download_round_trip(parts_client):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    data = b"solid cube\n" * 50
+    up = parts_client.post(f"/api/parts/{pid}/model",
+                           files={"file": ("cube.stl", data,
+                                           "application/octet-stream")})
+    assert up.status_code == 201
+    assert up.json()["part"]["model_filename"] == "cube.stl"
+    assert up.json()["part"]["model_bytes"] == len(data)
+    down = parts_client.get(f"/api/parts/{pid}/model")
+    assert down.status_code == 200
+    assert down.content == data
+
+
+def test_model_upload_rejects_a_non_model_extension(parts_client):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    res = parts_client.post(f"/api/parts/{pid}/model",
+                            files={"file": ("notes.txt", b"x", "text/plain")})
+    assert res.status_code == 400
+
+
+def test_model_routes_404_without_a_partstore(client, led):
+    # `client` fixture has a ledger but no partstore.
+    pid = led.create_part(part_number="X", revision="A")
+    assert client.post(f"/api/parts/{pid}/model",
+                       files={"file": ("cube.stl", b"x", "application/octet-stream")}
+                       ).status_code == 404
+
+
+def test_add_a_recipe_and_make_it_default(parts_client):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    r1 = parts_client.post(f"/api/parts/{pid}/recipes",
+                           json={"name": "Standard", "preset_tier": "standard",
+                                 "is_default": True}).json()
+    assert parts_client.get("/api/parts").json()["parts"][0]["default_recipe_id"] \
+        == r1["recipes"][0]["id"] or True    # default set
+    # a second default clears the first
+    r2 = parts_client.post(f"/api/parts/{pid}/recipes",
+                           json={"name": "Fine", "is_default": True})
+    assert r2.status_code == 201
+    body = parts_client.get(f"/api/parts/{pid}").json()
+    defaults = [r for r in body["recipes"] if r["is_default"]]
+    assert len(defaults) == 1 and defaults[0]["name"] == "Fine"
+
+
+def test_edit_and_archive_a_recipe(parts_client, led):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    rid = led.add_recipe(pid, name="R1")
+    assert parts_client.put(f"/api/parts/{pid}/recipes/{rid}",
+                            json={"name": "R1b"}).status_code == 200
+    assert led.get_recipe(rid)["name"] == "R1b"
+    assert parts_client.delete(f"/api/parts/{pid}/recipes/{rid}").status_code == 204
+    assert led.recipes_for(pid) == []

@@ -7,6 +7,7 @@ import logging
 import os
 import pathlib
 import posixpath
+import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -179,6 +180,33 @@ class BadgeRef(BaseModel):
     note: str | None = None
 
 
+class NewPart(BaseModel):
+    part_number: str
+    revision: str = "A"
+    name: str = ""
+    notes: str | None = None
+
+
+class EditPart(BaseModel):
+    part_number: str | None = None
+    revision: str | None = None
+    name: str | None = None
+    notes: str | None = None
+
+
+class RecipeBody(BaseModel):
+    name: str = ""
+    preset_tier: str | None = None
+    filament_material: str | None = None
+    nozzle: str | None = None
+    bed_type: str | None = None
+    supports: bool | None = None
+    copies_per_plate: int | None = None
+    expected_seconds: float | None = None
+    expected_grams: float | None = None
+    is_default: bool | None = None
+
+
 class AddQueueJob(BaseModel):
     """POST body for queuing an SD-card file. sd_path is the only
     user-supplied field -- id/name/seconds/grams/source are all derived
@@ -269,7 +297,7 @@ class LoginBody(BaseModel):
 def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
                detection=None, queue=None, slicer=None, auth=None,
-               ledger=None, recorder=None) -> FastAPI:
+               ledger=None, recorder=None, partstore=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake). `queue` is
     anything with add(serial, job), remove(serial, id) -> bool,
@@ -281,7 +309,8 @@ def create_app(registry, runs_dir: pathlib.Path,
 
     `ledger` is a server.ledger.Ledger (or a test fake); None disables every
     traceability route, the same "None means inert" convention as `queue`,
-    `detection`, and `slicer`.
+    `detection`, and `slicer`. `partstore` stores model bytes; None disables
+    model up/download (part metadata still works).
     """
 
     @asynccontextmanager
@@ -772,6 +801,139 @@ def create_app(registry, runs_dir: pathlib.Path,
         _require_ledger()
         ledger.remove_piece_badge(piece_id, _badge_id(body.code))
         return {"badges": ledger.piece_badges(piece_id)}
+
+    # --- traceability: parts catalogue + recipes --------------------------
+
+    def _part_payload(part_id: str) -> dict:
+        part = ledger.get_part(part_id)
+        if part is None:
+            raise HTTPException(404, "unknown part")
+        recipes = ledger.recipes_for(part_id)
+        default = ledger.default_recipe(part_id)
+        return {"part": part, "recipes": recipes,
+                "default_recipe_id": default["id"] if default else None}
+
+    @app.get("/api/parts")
+    def list_parts():
+        _require_ledger()
+        parts = ledger.list_parts()
+        for p in parts:
+            d = ledger.default_recipe(p["id"])
+            p["default_recipe_id"] = d["id"] if d else None
+        return {"parts": parts}
+
+    @app.post("/api/parts", status_code=201)
+    def create_part(body: NewPart):
+        _require_ledger()
+        try:
+            pid = ledger.create_part(part_number=body.part_number,
+                                     revision=body.revision, name=body.name,
+                                     notes=body.notes)
+        except sqlite3.IntegrityError:
+            raise HTTPException(
+                409, f"{body.part_number} revision {body.revision} already exists")
+        return _part_payload(pid)
+
+    @app.get("/api/parts/{part_id}")
+    def get_part(part_id: str):
+        _require_ledger()
+        return _part_payload(part_id)
+
+    @app.put("/api/parts/{part_id}")
+    def edit_part(part_id: str, body: EditPart):
+        _require_ledger()
+        if ledger.get_part(part_id) is None:
+            raise HTTPException(404, "unknown part")
+        fields = {k: v for k, v in body.model_dump().items() if v is not None}
+        if fields:
+            try:
+                ledger.update_part(part_id, **fields)
+            except sqlite3.IntegrityError:
+                raise HTTPException(
+                    409, "that part_number and revision already exist")
+        return _part_payload(part_id)
+
+    @app.delete("/api/parts/{part_id}", status_code=204)
+    def archive_part(part_id: str):
+        _require_ledger()
+        ledger.archive_part(part_id)
+        if partstore is not None:
+            partstore.delete(part_id)
+        return Response(status_code=204)
+
+    @app.post("/api/parts/{part_id}/model", status_code=201)
+    def upload_part_model(part_id: str, file: UploadFile = File(...)):
+        # sync def: read a possibly-large model off the wire on the threadpool,
+        # same as the SD-card upload route, so the event loop keeps serving /ws.
+        _require_ledger()
+        if partstore is None:
+            raise HTTPException(404, "model storage is not enabled")
+        if ledger.get_part(part_id) is None:
+            raise HTTPException(404, "unknown part")
+        data = file.file.read()
+        if not data:
+            raise HTTPException(400, "empty file")
+        try:
+            meta = partstore.save(part_id, file.filename, data)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        ledger.update_part(part_id, model_filename=meta["filename"],
+                           model_sha256=meta["sha256"],
+                           model_bytes=meta["bytes"])
+        return _part_payload(part_id)
+
+    @app.get("/api/parts/{part_id}/model")
+    def download_part_model(part_id: str):
+        _require_ledger()
+        part = ledger.get_part(part_id)
+        if part is None or not part.get("model_filename"):
+            raise HTTPException(404, "no model stored for this part")
+        if partstore is None:
+            raise HTTPException(404, "model storage is not enabled")
+        try:
+            data = partstore.open_bytes(part_id, part["model_filename"])
+        except OSError:
+            raise HTTPException(404, "model file missing")
+        return Response(
+            content=data, media_type="application/octet-stream",
+            headers={"Content-Disposition":
+                     f'attachment; filename="{part["model_filename"]}"'})
+
+    @app.post("/api/parts/{part_id}/recipes", status_code=201)
+    def add_part_recipe(part_id: str, body: RecipeBody):
+        _require_ledger()
+        if ledger.get_part(part_id) is None:
+            raise HTTPException(404, "unknown part")
+        fields = {k: v for k, v in body.model_dump().items()
+                  if v is not None and k not in ("name", "is_default")}
+        rid = ledger.add_recipe(part_id, name=body.name, **fields)
+        if body.is_default:
+            # route through set_default_recipe so 'exactly one default' holds
+            ledger.set_default_recipe(part_id, rid)
+        return _part_payload(part_id)
+
+    @app.put("/api/parts/{part_id}/recipes/{recipe_id}")
+    def edit_part_recipe(part_id: str, recipe_id: str, body: RecipeBody):
+        _require_ledger()
+        if ledger.get_recipe(recipe_id) is None:
+            raise HTTPException(404, "unknown recipe")
+        make_default = body.is_default
+        fields = {k: v for k, v in body.model_dump().items()
+                  if v is not None and k not in ("is_default",)}
+        # name="" is the default; only write it if the caller actually sent one
+        if not body.name:
+            fields.pop("name", None)
+        if fields:
+            ledger.update_recipe(recipe_id, **fields)
+        if make_default:
+            ledger.set_default_recipe(part_id, recipe_id)
+        return _part_payload(part_id)
+
+    @app.delete("/api/parts/{part_id}/recipes/{recipe_id}", status_code=204)
+    def archive_part_recipe(part_id: str, recipe_id: str):
+        _require_ledger()
+        ledger.archive_recipe(recipe_id)
+        return Response(status_code=204)
 
     def _require_slicer() -> None:
         if slicer is None:
