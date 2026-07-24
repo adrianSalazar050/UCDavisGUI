@@ -87,3 +87,60 @@ def test_writes_a_state_change_event_on_open(led):
     run_id = led.list_runs()[0]["id"]
     kinds = [e["kind"] for e in led.events_for(run_id)]
     assert "state_change" in kinds
+
+
+def test_layer_progress_updates_the_run_and_writes_no_events(led):
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING", layer=1, total=100)],
+                    [summary(state="RUNNING", layer=2, total=100)],
+                    [summary(state="RUNNING", layer=3, total=100)]])
+    run = led.list_runs()[0]
+    assert run["last_layer"] == 3
+    assert run["total_layers"] == 100
+    kinds = [e["kind"] for e in led.events_for(run["id"])]
+    assert kinds.count("state_change") == 1
+    assert not [k for k in kinds if k.startswith("layer")], \
+        "layer progress must not append events -- a 1200-layer print would " \
+        "write 1200 rows of nothing"
+
+
+def test_a_new_hms_code_raises_an_event(led):
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING")],
+                    [summary(state="RUNNING", hms=["0300_1100_0002_0001"])]])
+    run_id = led.list_runs()[0]["id"]
+    raised = [e for e in led.events_for(run_id) if e["kind"] == "hms_raised"]
+    assert len(raised) == 1
+    assert raised[0]["payload"]["code"] == "0300_1100_0002_0001"
+
+
+def test_an_hms_code_that_persists_does_not_re_raise(led):
+    code = "0300_1100_0002_0001"
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING")],
+                    [summary(state="RUNNING", hms=[code])],
+                    [summary(state="RUNNING", hms=[code])],
+                    [summary(state="RUNNING", hms=[code])]])
+    run_id = led.list_runs()[0]["id"]
+    raised = [e for e in led.events_for(run_id) if e["kind"] == "hms_raised"]
+    assert len(raised) == 1
+
+
+def test_a_cleared_hms_code_writes_a_cleared_event(led):
+    code = "0300_1100_0002_0001"
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING")],
+                    [summary(state="RUNNING", hms=[code])],
+                    [summary(state="RUNNING", hms=[])]])
+    run_id = led.list_runs()[0]["id"]
+    kinds = [e["kind"] for e in led.events_for(run_id)]
+    assert kinds.count("hms_raised") == 1
+    assert kinds.count("hms_cleared") == 1
+
+
+def test_an_hms_badge_is_applied_to_the_run(led):
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING")],
+                    [summary(state="RUNNING", hms=["0300_1100_0002_0001"])]])
+    run_id = led.list_runs()[0]["id"]
+    assert [b["code"] for b in led.run_badges(run_id)] == ["hms_error"]

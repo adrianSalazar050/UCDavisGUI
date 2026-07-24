@@ -65,6 +65,13 @@ class RunRecorder:
         if busy and not was_busy:
             self._begin(serial, summary, state)
 
+        run = self.ledger.find_open_run(serial)
+        if run is None:
+            return
+        if busy:
+            self._progress(run, summary)
+        self._hms(serial, run["id"], prev, summary)
+
     def _begin(self, serial: str, summary: dict, state: str) -> None:
         """Open a run, or adopt the one the start route already opened.
 
@@ -98,6 +105,39 @@ class RunRecorder:
         self.ledger.add_event(printer_serial=serial, run_id=run_id,
                               kind="state_change", source="server",
                               payload={"to": state})
+
+    def _progress(self, run: dict, summary: dict) -> None:
+        """Update the run's layer counters IN PLACE. Deliberately not events:
+        a 100-layer print would otherwise write 100 rows containing no
+        information, and a 1200-layer print 1200."""
+        fields = {}
+        layer = summary.get("layer_num")
+        total = summary.get("total_layer_num")
+        if layer is not None and layer != run.get("last_layer"):
+            fields["last_layer"] = layer
+        if total and total != run.get("total_layers"):
+            fields["total_layers"] = total
+        if fields:
+            self.ledger.update_run(run["id"], **fields)
+
+    def _hms(self, serial: str, run_id: str, prev: dict | None,
+             summary: dict) -> None:
+        """Diff the ALREADY-DECODED code strings build_summary() produced."""
+        now = {c for c in (summary.get("hms") or []) if isinstance(c, str)}
+        before = set()
+        if prev:
+            before = {c for c in (prev.get("hms") or []) if isinstance(c, str)}
+        for code in sorted(now - before):
+            self.ledger.add_event(printer_serial=serial, run_id=run_id,
+                                  kind="hms_raised", source="server",
+                                  payload={"code": code})
+            self.ledger.add_run_badge(run_id, badge_id_for("hms_error"),
+                                      applied_by="detector",
+                                      note=f"HMS {code}")
+        for code in sorted(before - now):
+            self.ledger.add_event(printer_serial=serial, run_id=run_id,
+                                  kind="hms_cleared", source="server",
+                                  payload={"code": code})
 
     # ---------------- thread ----------------
 
