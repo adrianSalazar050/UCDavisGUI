@@ -36,3 +36,6 @@ datasets/
 frontend/dist/
 desktop/node_modules/
 desktop/release/
+
+# Local shared password for LAN serving (BAMBU_PASSWORD). Never commit.
+.bambu-password
