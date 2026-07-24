@@ -176,3 +176,43 @@ def test_schema_version_rejects_a_second_row(led):
     with pytest.raises(sqlite3.IntegrityError):
         led.execute(
             "INSERT INTO schema_version (id, version) VALUES (2, 99)")
+
+
+def test_corrupt_database_is_quarantined_not_deleted(tmp_path, caplog):
+    path = tmp_path / "ledger.db"
+    path.write_bytes(b"this is not a database, not even slightly")
+
+    ledger = Ledger(path)
+    try:
+        # It booted, and it works.
+        assert ledger.query("SELECT version FROM schema_version")[0][
+            "version"] == SCHEMA_VERSION
+    finally:
+        ledger.close()
+
+    # The bad bytes are still on disk under a new name.
+    quarantined = list(tmp_path.glob("ledger.db.corrupt-*"))
+    assert len(quarantined) == 1, "the corrupt file was not preserved"
+    assert quarantined[0].read_bytes().startswith(b"this is not a database")
+
+
+def test_a_half_migrated_database_is_quarantined_too(tmp_path):
+    """Tables present, version row never stamped -- what an interrupted
+    migration from an older build leaves behind. The replay raises
+    OperationalError, and that must quarantine rather than refuse to boot."""
+    path = tmp_path / "ledger.db"
+    scratch = sqlite3.connect(str(path))
+    scratch.execute(
+        "CREATE TABLE schema_version (id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "version INTEGER NOT NULL)")
+    scratch.commit()
+    scratch.close()
+
+    ledger = Ledger(path)
+    try:
+        assert ledger.query("SELECT version FROM schema_version")[0][
+            "version"] == SCHEMA_VERSION
+        assert ledger.query("SELECT * FROM print_runs") == []
+    finally:
+        ledger.close()
+    assert len(list(tmp_path.glob("ledger.db.corrupt-*"))) == 1

@@ -164,41 +164,93 @@ class Ledger:
         # second BEGIN, which SQLite rejects. See transaction().
         self._tx_depth = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = self._connect()
-        self._migrate()
+        self._open_or_quarantine()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), check_same_thread=False,
                                timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        # Full manual transaction control. sqlite3's default (legacy)
-        # isolation_level implicitly opens a transaction before a DML
-        # statement but NOT before DDL -- a bare CREATE TABLE commits on its
-        # own the instant it runs, no matter how you wrap it, which is
-        # exactly what made the old _migrate non-atomic (tables could commit
-        # before the schema_version stamp that was meant to travel with
-        # them). isolation_level = None turns that implicit behaviour off
-        # entirely, so transaction() (and _migrate, which uses it) can group
-        # CREATE TABLE statements and the version stamp into one real
-        # BEGIN/COMMIT unit -- SQLite's DDL genuinely is transactional once
-        # you ask for the transaction yourself.
-        conn.isolation_level = None
-        # WAL and busy_timeout matter for OTHER connections on this same
-        # file (a second process, a future admin CLI) so a writer never
-        # blocks a reader at the SQLite level. Read the pragma's own answer
-        # back and warn rather than assume it stuck: some filesystems
-        # (network shares, and some cloud-synced folders -- this repo lives
-        # inside OneDrive) silently refuse WAL, and PRAGMA journal_mode
-        # reports whatever mode it actually landed in instead of raising.
-        mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-        if mode.lower() != "wal":
-            log.warning(
-                "requested journal_mode=WAL but sqlite reports %r for %s -- "
-                "the filesystem may not support WAL; continuing in %s mode",
-                mode, self.path, mode)
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            # Full manual transaction control. sqlite3's default (legacy)
+            # isolation_level implicitly opens a transaction before a DML
+            # statement but NOT before DDL -- a bare CREATE TABLE commits on
+            # its own the instant it runs, no matter how you wrap it, which
+            # is exactly what made the old _migrate non-atomic (tables could
+            # commit before the schema_version stamp that was meant to
+            # travel with them). isolation_level = None turns that implicit
+            # behaviour off entirely, so transaction() (and _migrate, which
+            # uses it) can group CREATE TABLE statements and the version
+            # stamp into one real BEGIN/COMMIT unit -- SQLite's DDL genuinely
+            # is transactional once you ask for the transaction yourself.
+            conn.isolation_level = None
+            # WAL and busy_timeout matter for OTHER connections on this same
+            # file (a second process, a future admin CLI) so a writer never
+            # blocks a reader at the SQLite level. Read the pragma's own
+            # answer back and warn rather than assume it stuck: some
+            # filesystems (network shares, and some cloud-synced folders --
+            # this repo lives inside OneDrive) silently refuse WAL, and
+            # PRAGMA journal_mode reports whatever mode it actually landed
+            # in instead of raising.
+            mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if mode.lower() != "wal":
+                log.warning(
+                    "requested journal_mode=WAL but sqlite reports %r for "
+                    "%s -- the filesystem may not support WAL; continuing "
+                    "in %s mode", mode, self.path, mode)
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA foreign_keys=ON")
+            return conn
+        except BaseException:
+            # A corrupt file can fail as early as the WAL pragma above,
+            # before _open_or_quarantine's own integrity_check ever runs.
+            # Close here so the failed connection doesn't keep an OS file
+            # handle open on the exception's traceback -- on Windows, that
+            # leftover handle is exactly what makes the later
+            # self.path.replace(...) rename fail with
+            # "used by another process", even though this local `conn` is
+            # never returned to the caller.
+            conn.close()
+            raise
+
+    def _open_or_quarantine(self) -> None:
+        """Open, verify, and migrate the database -- or move an unusable one
+        aside and start fresh. Sets self._conn.
+
+        Refusing to boot is not an option -- master.md section 11: a corrupt
+        file must never stop the server, because then there is no UI left to
+        fix it from. Deleting it is not an option either: it is the only
+        evidence of what went wrong, so it is renamed, never removed.
+
+        MIGRATION RUNS INSIDE THIS GUARD, not after it. A database left
+        half-migrated by an older build -- tables created, version row never
+        stamped -- replays its migration on the next boot and raises
+        OperationalError, which is a DatabaseError subclass. Outside the
+        guard that is an unbootable server forever; inside it, the file is
+        quarantined and the user gets a working (if empty) ledger back.
+
+        self._conn is assigned before _migrate() runs because _migrate() uses
+        self.transaction(), which reads self._conn.
+        """
+        try:
+            self._conn = self._connect()
+            self._conn.execute("PRAGMA integrity_check").fetchone()
+            self._migrate()
+            return
+        except sqlite3.DatabaseError as e:
+            log.error("ledger at %s is unusable (%s); quarantining it and "
+                      "starting a new one", self.path, e)
+            # _connect() itself can be where this raises -- truly-corrupt
+            # bytes fail the PRAGMA journal_mode=WAL line inside _connect(),
+            # before self._conn is ever assigned on this attempt. Guard the
+            # close so that case doesn't crash with AttributeError instead
+            # of quarantining.
+            if getattr(self, "_conn", None) is not None:
+                self._conn.close()
+        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S")
+        self.path.replace(self.path.with_name(
+            f"{self.path.name}.corrupt-{stamp}"))
+        self._conn = self._connect()
+        self._migrate()
 
     def _migrate(self) -> None:
         # Deliberately NOT one `with self._lock:` wrapping the whole method:
