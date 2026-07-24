@@ -72,15 +72,23 @@ def test_interrupted_migration_does_not_brick_the_database(tmp_path,
 
 
 def test_failed_execute_leaves_no_open_transaction(led):
-    """A prepare-time error (bad SQL, missing table) never opens a
-    transaction in the first place, so it can't reproduce this bug. A
-    runtime constraint violation is the real scenario the reviewer measured
-    -- a later task turns a duplicate client_uuid's IntegrityError into a
-    None return, so this needs to actually happen and be recovered from."""
-    led.execute("INSERT INTO ledger_meta (key, value) VALUES ('dup', '1')")
+    """in_transaction alone doesn't prove a rollback happened -- COMMIT
+    clears that flag exactly the same as ROLLBACK does, and a single
+    failing statement never leaves anything of its OWN half-written (SQLite
+    backs out a failed statement's own effect regardless of what the
+    wrapping transaction later does). The only way to observe a real
+    difference is to give the failure a PRIOR sibling write, still pending
+    in the same transaction, that only a genuine ROLLBACK discards: nest
+    two execute() calls -- the first succeeds, the second collides -- and
+    let the IntegrityError unwind the whole enclosing transaction()."""
     with pytest.raises(sqlite3.IntegrityError):
-        led.execute("INSERT INTO ledger_meta (key, value) VALUES ('dup', '2')")
+        with led.transaction():
+            led.execute(
+                "INSERT INTO ledger_meta (key, value) VALUES ('dup', '1')")
+            led.execute(
+                "INSERT INTO ledger_meta (key, value) VALUES ('dup', '2')")
     assert led._conn.in_transaction is False
+    assert led.query("SELECT * FROM ledger_meta WHERE key = 'dup'") == []
 
 
 def test_transaction_rolls_back_on_exception(led):
@@ -96,23 +104,75 @@ def test_transaction_rolls_back_on_exception(led):
     assert led.query("SELECT * FROM ledger_meta WHERE key = 'k'") == []
 
 
-def test_nested_calls_inside_transaction_do_not_deadlock(led):
-    """self._lock must be re-entrant: later tasks call self.execute()/
-    self.query() from inside a transaction() block (writing N piece rows,
-    then closing a run). A plain threading.Lock here would deadlock the
-    moment that happens -- run it on a background thread with a bounded
-    join so a regression fails the test instead of hanging the suite."""
+def test_nested_transaction_rolls_back_independently(led):
+    """A raising inner transaction() block, swallowed by the outer block
+    (the outer never sees the exception), must still discard only the
+    inner's own writes -- the outer's writes must survive. Proves the
+    SAVEPOINT-based nesting: the old BEGIN/COMMIT-only design rolled back
+    (or committed) the WHOLE connection-level transaction regardless of
+    depth, so the inner's write would incorrectly survive alongside the
+    outer's."""
+    with led.transaction() as outer:
+        outer.execute(
+            "INSERT INTO ledger_meta (key, value) VALUES ('outer', 'ok')")
+        try:
+            with led.transaction() as inner:
+                inner.execute(
+                    "INSERT INTO ledger_meta (key, value) "
+                    "VALUES ('inner', 'SHOULD_ROLL_BACK')")
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass  # outer swallows it and keeps going
+
+    rows = {r["key"]: r["value"] for r in
+            led.query("SELECT key, value FROM ledger_meta")}
+    assert rows.get("outer") == "ok"
+    assert "inner" not in rows
+
+
+def test_nested_calls_inside_transaction_do_not_deadlock(tmp_path):
+    """self._lock must be re-entrant. Two separate places rely on it:
+    _migrate() itself nests a transaction() call inside its own outer
+    `with self._lock:`, so a plain Lock deadlocks the SECOND that
+    constructor runs -- Ledger(path) would never even return. And later
+    tasks call execute()/query() from inside a transaction() block
+    (writing N piece rows, then closing a run), which nests the same way
+    from application code.
+
+    Measured directly: with self._lock downgraded to a plain
+    threading.Lock, `Ledger(tmp_path / "ledger.db")` alone hangs forever
+    inside __init__ -- there is no point after which a bounded join() on
+    a not-yet-created thread could save it. So construction AND use both
+    happen on a background daemon thread; the main thread never touches
+    the (possibly permanently locked) Ledger object at all, only a plain
+    dict the worker writes into. A bounded join() is therefore enough to
+    contain the hang to this one test instead of wedging the whole suite
+    (which is what happened for real the first time a reviewer mutated
+    RLock back to Lock and pytest had to be killed after 300 seconds)."""
     result = {}
 
     def work():
-        with led.transaction():
-            led.execute(
+        ledger = Ledger(tmp_path / "ledger.db")
+        with ledger.transaction():
+            ledger.execute(
                 "INSERT INTO ledger_meta (key, value) VALUES ('a', '1')")
-            result["rows"] = led.query(
+            result["rows"] = ledger.query(
                 "SELECT * FROM ledger_meta WHERE key = 'a'")
+        ledger.close()
+        result["done"] = True
 
-    t = threading.Thread(target=work)
+    t = threading.Thread(target=work, daemon=True)
     t.start()
     t.join(timeout=5)
-    assert not t.is_alive(), "deadlocked: nested call inside transaction()"
-    assert result.get("rows") and result["rows"][0]["value"] == "1"
+    assert result.get("done"), "deadlocked: nested call inside transaction()"
+    assert result["rows"][0]["value"] == "1"
+
+
+def test_schema_version_rejects_a_second_row(led):
+    """A guard never seen to fail is decoration (server/tests/test_docs.py's
+    own standard). INSERT OR REPLACE keeping len(rows) == 1 is true whether
+    or not the CHECK(id = 1) constraint exists -- this asserts the
+    constraint itself, directly, by trying to violate it."""
+    with pytest.raises(sqlite3.IntegrityError):
+        led.execute(
+            "INSERT INTO schema_version (id, version) VALUES (2, 99)")

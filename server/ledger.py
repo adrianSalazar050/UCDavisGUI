@@ -201,6 +201,20 @@ class Ledger:
         return conn
 
     def _migrate(self) -> None:
+        # Deliberately NOT one `with self._lock:` wrapping the whole method:
+        # that would nest around self.transaction()'s own lock acquisition
+        # below for no real benefit -- __init__ runs this once, synchronously,
+        # before `self` is visible to any other thread, so there is nothing
+        # concurrent here to guard against. Reading current version first,
+        # fully releasing the lock, THEN looping over transaction() calls
+        # means Ledger() construction itself never depends on self._lock
+        # being reentrant -- only genuinely nested application code (a
+        # future execute()/query() called from inside an open transaction())
+        # does. Measured: with the old shape (one lock around the whole
+        # method), downgrading self._lock to a plain Lock hung every single
+        # test in this file at fixture setup, since each one constructs a
+        # Ledger; with this shape, only a test that itself nests calls
+        # inside transaction() is affected.
         with self._lock:
             cur = self._conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
@@ -212,29 +226,29 @@ class Ledger:
                     "SELECT version FROM schema_version WHERE id = 1"
                 ).fetchone()
                 current = row["version"] if row else 0
-            creating = current == 0
-            for version in sorted(MIGRATIONS):
-                if version <= current:
-                    continue
-                # One transaction per version: every CREATE TABLE/INDEX for
-                # this version and the version stamp that records it landed
-                # either all commit together or none do. Without this, a
-                # crash between the last CREATE TABLE and the stamp leaves
-                # tables-with-no-version-row -- the next boot sees
-                # current = 0, replays this same version, and dies on
-                # "table already exists", permanently. transaction() makes
-                # that window disappear.
-                with self.transaction():
-                    for statement in MIGRATIONS[version]:
-                        self._conn.execute(statement)
-                    self._conn.execute(
-                        "INSERT OR REPLACE INTO schema_version (id, version) "
-                        "VALUES (1, ?)", (version,))
-                if creating:
-                    log.info("ledger database created at schema version %d",
-                             version)
-                else:
-                    log.info("ledger migrated to schema version %d", version)
+        creating = current == 0
+        for version in sorted(MIGRATIONS):
+            if version <= current:
+                continue
+            # One transaction per version: every CREATE TABLE/INDEX for
+            # this version and the version stamp that records it landed
+            # either all commit together or none do. Without this, a
+            # crash between the last CREATE TABLE and the stamp leaves
+            # tables-with-no-version-row -- the next boot sees
+            # current = 0, replays this same version, and dies on
+            # "table already exists", permanently. transaction() makes
+            # that window disappear.
+            with self.transaction():
+                for statement in MIGRATIONS[version]:
+                    self._conn.execute(statement)
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO schema_version (id, version) "
+                    "VALUES (1, ?)", (version,))
+            if creating:
+                log.info("ledger database created at schema version %d",
+                         version)
+            else:
+                log.info("ledger migrated to schema version %d", version)
 
     # ---------------- low-level ----------------
 
@@ -247,28 +261,41 @@ class Ledger:
         it the same way -- writing N piece rows for a run, or closing a run
         alongside its final event, as one unit.
 
-        Re-entrant: calling transaction() again, or calling execute()/
-        query(), from inside an already-open transaction() block joins that
-        same transaction rather than issuing a second BEGIN (SQLite rejects
-        a nested BEGIN outright). That is why self._lock is a
-        threading.RLock and not a plain Lock -- a plain Lock would deadlock
-        the instant code inside this `with` block called self.execute() or
-        self.query(), both of which also take the lock.
+        Re-entrant via SAVEPOINT, not a second BEGIN: calling transaction()
+        again, or calling execute()/query(), from inside an already-open
+        transaction() block opens a SAVEPOINT scoped to that nested block
+        instead of joining the outer transaction outright. That is the
+        difference between "the inner block's own writes roll back if it
+        raises, even when an enclosing block catches the exception and
+        keeps going" (correct -- SAVEPOINT) and "only the outermost level
+        ever rolls back anything" (the bug an earlier version of this
+        method had: an inner raise with an outer that swallowed it still
+        committed the inner's writes, because depth>0 skipped both ROLLBACK
+        and COMMIT and just deferred to whatever the outermost level did).
+
+        self._lock is a threading.RLock, not a plain Lock, so this nesting
+        doesn't deadlock: a plain Lock would block forever the instant code
+        inside this `with` block called self.execute() or self.query(),
+        both of which also take the lock.
         """
         with self._lock:
-            outermost = self._tx_depth == 0
-            if outermost:
-                self._conn.execute("BEGIN")
+            depth = self._tx_depth
+            savepoint = f"sp_{depth}"
+            self._conn.execute("BEGIN" if depth == 0 else
+                               f"SAVEPOINT {savepoint}")
             self._tx_depth += 1
             try:
                 yield self._conn
             except BaseException:
-                if outermost:
+                if depth == 0:
                     self._conn.execute("ROLLBACK")
+                else:
+                    self._conn.execute(f"ROLLBACK TO {savepoint}")
+                    self._conn.execute(f"RELEASE {savepoint}")
                 raise
             else:
-                if outermost:
-                    self._conn.execute("COMMIT")
+                self._conn.execute("COMMIT" if depth == 0 else
+                                   f"RELEASE {savepoint}")
             finally:
                 self._tx_depth -= 1
 
