@@ -227,6 +227,12 @@ PART_WRITABLE = frozenset({
     "part_number", "revision",
 })
 
+RECIPE_WRITABLE = frozenset({
+    "name", "preset_tier", "filament_material", "nozzle", "bed_type",
+    "supports", "copies_per_plate", "expected_seconds", "expected_grams",
+    "is_default",
+})
+
 # Who applies a badge. DETECTOR is the automated system's identity (the
 # recorder writes machine-observed badges under it); OPERATOR is a human.
 DETECTOR = "detector"
@@ -867,6 +873,71 @@ class Ledger:
         self.execute(
             "UPDATE parts SET archived = 1, updated_at = ? WHERE id = ?",
             (ts, part_id))
+
+    # ---------------- recipes ----------------
+
+    def add_recipe(self, part_id: str, *, name: str = "", **fields) -> str:
+        """Insert a slicing recipe for a part and return its id."""
+        _checked(fields, RECIPE_WRITABLE)
+        ts = self._clock()
+        recipe_id = new_id()
+        cols = ["id", "part_id", "name", "created_at", "updated_at"]
+        vals = [recipe_id, part_id, name, ts, ts]
+        for key, value in fields.items():
+            cols.append(key)
+            vals.append(value)
+        placeholders = ", ".join("?" for _ in cols)
+        self.execute(f"INSERT INTO part_recipes ({', '.join(cols)}) "
+                     f"VALUES ({placeholders})", vals)
+        return recipe_id
+
+    def recipes_for(self, part_id: str, *,
+                    include_archived: bool = False) -> list[dict]:
+        sql = "SELECT * FROM part_recipes WHERE part_id = ?"
+        if not include_archived:
+            sql += " AND archived = 0"
+        sql += " ORDER BY is_default DESC, name, rowid"
+        return self.query(sql, (part_id,))
+
+    def get_recipe(self, recipe_id: str) -> dict | None:
+        rows = self.query(
+            "SELECT * FROM part_recipes WHERE id = ?", (recipe_id,))
+        return rows[0] if rows else None
+
+    def update_recipe(self, recipe_id: str, **fields) -> None:
+        _checked(fields, RECIPE_WRITABLE)
+        if not fields:
+            return
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        params = list(fields.values()) + [self._clock(), recipe_id]
+        self.execute(
+            f"UPDATE part_recipes SET {sets}, updated_at = ? WHERE id = ?",
+            params)
+
+    def set_default_recipe(self, part_id: str, recipe_id: str) -> None:
+        """Make `recipe_id` the sole default for its part. The clear-then-set
+        is ONE transaction so the part is never left with zero defaults or two
+        -- 'exactly one default' must hold at every observable moment."""
+        ts = self._clock()
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE part_recipes SET is_default = 0, updated_at = ? "
+                "WHERE part_id = ?", (ts, part_id))
+            conn.execute(
+                "UPDATE part_recipes SET is_default = 1, updated_at = ? "
+                "WHERE id = ?", (ts, recipe_id))
+
+    def default_recipe(self, part_id: str) -> dict | None:
+        rows = self.query(
+            "SELECT * FROM part_recipes WHERE part_id = ? AND is_default = 1 "
+            "AND archived = 0 LIMIT 1", (part_id,))
+        return rows[0] if rows else None
+
+    def archive_recipe(self, recipe_id: str) -> None:
+        ts = self._clock()
+        self.execute(
+            "UPDATE part_recipes SET archived = 1, updated_at = ? "
+            "WHERE id = ?", (ts, recipe_id))
 
     def close(self) -> None:
         """Closing twice is safe -- sqlite3.Connection.close() is a no-op on

@@ -542,3 +542,40 @@ def test_archive_hides_a_part(led):
     led.archive_part(pid)
     assert led.list_parts() == []
     assert len(led.list_parts(include_archived=True)) == 1
+
+
+def test_recipes_belong_to_a_part(led):
+    pid = led.create_part(part_number="X", revision="A")
+    r = led.add_recipe(pid, name="Standard PLA", preset_tier="standard")
+    assert [x["id"] for x in led.recipes_for(pid)] == [r]
+    assert led.get_recipe(r)["name"] == "Standard PLA"
+    assert led.get_recipe(r)["preset_tier"] == "standard"
+
+
+def test_exactly_one_default_recipe_per_part(led):
+    pid = led.create_part(part_number="X", revision="A")
+    r1 = led.add_recipe(pid, name="Standard PLA")
+    r2 = led.add_recipe(pid, name="Fine PLA")
+    led.set_default_recipe(pid, r1)
+    led.set_default_recipe(pid, r2)   # must clear r1
+    defaults = [x for x in led.recipes_for(pid) if x["is_default"]]
+    assert [d["id"] for d in defaults] == [r2]
+    assert led.default_recipe(pid)["id"] == r2
+
+
+def test_update_recipe_rejects_unknown_column(led):
+    pid = led.create_part(part_number="X", revision="A")
+    r = led.add_recipe(pid)
+    with pytest.raises(ValueError):
+        led.update_recipe(r, bogus=1)
+
+
+def test_archive_hides_a_recipe(led):
+    pid = led.create_part(part_number="X", revision="A")
+    r = led.add_recipe(pid)
+    led.archive_recipe(r)
+    assert led.recipes_for(pid) == []
+    assert len(led.recipes_for(pid, include_archived=True)) == 1
+    # an archived default is not returned by default_recipe either
+    led.set_default_recipe(pid, r)
+    assert led.default_recipe(pid) is None
