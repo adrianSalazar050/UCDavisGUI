@@ -144,3 +144,74 @@ def test_an_hms_badge_is_applied_to_the_run(led):
                     [summary(state="RUNNING", hms=["0300_1100_0002_0001"])]])
     run_id = led.list_runs()[0]["id"]
     assert [b["code"] for b in led.run_badges(run_id)] == ["hms_error"]
+
+
+class FakeDetection:
+    def __init__(self, stopped_by_monitor=False):
+        self._snap = {"stopped_by_monitor": stopped_by_monitor}
+
+    def snapshot(self, serial):
+        return dict(self._snap)
+
+
+def test_finish_closes_the_run_and_creates_pieces(led):
+    existing = led.open_run(printer_serial="S1", printer_name="A1",
+                            source="queue", copies_planned=4,
+                            planned_grams=20.0)
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING", layer=100, total=100)],
+                    [summary(state="FINISH", layer=100, total=100)]])
+    run = led.get_run(existing)
+    assert run["end_state"] == "FINISH"
+    assert run["ended_at"] is not None
+    assert len(led.pieces_for(existing)) == 4
+
+
+def test_finish_records_planned_grams_as_the_actual(led):
+    existing = led.open_run(printer_serial="S1", source="queue",
+                            planned_grams=20.0)
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING", layer=100, total=100)],
+                    [summary(state="FINISH")]])
+    run = led.get_run(existing)
+    assert run["actual_grams"] == pytest.approx(20.0)
+    assert run["actual_grams_basis"] == "planned"
+
+
+def test_a_failure_prorates_grams_by_layer_and_says_so(led):
+    existing = led.open_run(printer_serial="S1", source="queue",
+                            planned_grams=20.0)
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING", layer=25, total=100)],
+                    [summary(state="FAILED", layer=25, total=100)]])
+    run = led.get_run(existing)
+    assert run["end_state"] == "FAILED"
+    assert run["actual_grams"] == pytest.approx(5.0)
+    assert run["actual_grams_basis"] == "proportional"
+
+
+def test_a_monitor_stop_is_distinguished_from_a_plain_failure(led):
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING")],
+                    [summary(state="FAILED")]],
+              detection=FakeDetection(stopped_by_monitor=True))
+    run = led.list_runs()[0]
+    assert run["end_state"] == "STOPPED_BY_MONITOR"
+    assert run["stopped_by_monitor"] == 1
+    assert "autostop" in {b["code"] for b in led.run_badges(run["id"])}
+
+
+def test_going_idle_without_finishing_closes_as_unknown(led):
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING")],
+                    [summary(state="IDLE")]])
+    assert led.list_runs()[0]["end_state"] == "UNKNOWN"
+
+
+def test_grams_stay_null_when_nothing_was_planned(led):
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING", layer=5, total=100)],
+                    [summary(state="FAILED")]])
+    run = led.list_runs()[0]
+    assert run["actual_grams"] is None
+    assert run["actual_grams_basis"] is None

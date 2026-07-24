@@ -24,6 +24,11 @@ log = logging.getLogger("server.runlog")
 
 TICK_S = 1.0
 
+# gcode_state values that mean the print is over. FAILED is included because
+# master.md section 3.1 verified on hardware that a STOPPED print reports
+# FAILED -- there is no separate "stopped" state to look for.
+TERMINAL_STATES = ("FINISH", "FAILED", "IDLE")
+
 
 class RunRecorder:
     """Poll summaries, write runs and events. `detection` is optional and is
@@ -71,6 +76,8 @@ class RunRecorder:
         if busy:
             self._progress(run, summary)
         self._hms(serial, run["id"], prev, summary)
+        if was_busy and not busy and state in TERMINAL_STATES:
+            self._end(serial, run, summary, state)
 
     def _begin(self, serial: str, summary: dict, state: str) -> None:
         """Open a run, or adopt the one the start route already opened.
@@ -138,6 +145,63 @@ class RunRecorder:
             self.ledger.add_event(printer_serial=serial, run_id=run_id,
                                   kind="hms_cleared", source="server",
                                   payload={"code": code})
+
+    def _end(self, serial: str, run: dict, summary: dict,
+             state: str) -> None:
+        run = self.ledger.get_run(run["id"]) or run
+        end_state = state if state in ("FINISH", "FAILED") else "UNKNOWN"
+        stopped = self._stopped_by_monitor(serial)
+        if end_state == "FAILED" and stopped:
+            end_state = "STOPPED_BY_MONITOR"
+
+        grams, basis = self._grams(run, end_state)
+        self.ledger.close_run(
+            run["id"], end_state=end_state,
+            stopped_by_monitor=int(bool(stopped)),
+            **({"actual_grams": grams, "actual_grams_basis": basis}
+               if basis else {}))
+        self.ledger.add_event(printer_serial=serial, run_id=run["id"],
+                              kind="state_change", source="server",
+                              payload={"to": state,
+                                       "end_state": end_state})
+        if end_state == "STOPPED_BY_MONITOR":
+            self.ledger.add_run_badge(run["id"], badge_id_for("autostop"),
+                                      applied_by="detector")
+        copies = run.get("copies_planned") or 1
+        self.ledger.create_pieces(run["id"], int(copies),
+                                  part_id=run.get("part_id"),
+                                  order_line_id=run.get("order_line_id"))
+
+    def _stopped_by_monitor(self, serial: str) -> bool:
+        if self.detection is None:
+            return False
+        try:
+            snap = self.detection.snapshot(serial) or {}
+        except Exception as e:  # noqa: BLE001
+            log.warning("detection snapshot failed for %s: %s", serial, e)
+            return False
+        return bool(snap.get("stopped_by_monitor"))
+
+    @staticmethod
+    def _grams(run: dict, end_state: str):
+        """-> (grams, basis). The printer does NOT report filament consumed,
+        so this is always an estimate and the basis column says which kind.
+
+        The proportional estimate is wrong in detail -- layers are not equal
+        mass -- which is exactly why the basis is recorded rather than the
+        number being presented bare.
+        """
+        planned = run.get("planned_grams")
+        if not planned:
+            return None, None
+        if end_state == "FINISH":
+            return float(planned), "planned"
+        layer = run.get("last_layer") or 0
+        total = run.get("total_layers") or 0
+        if not total:
+            return None, None
+        fraction = max(0.0, min(1.0, float(layer) / float(total)))
+        return round(float(planned) * fraction, 3), "proportional"
 
     # ---------------- thread ----------------
 
