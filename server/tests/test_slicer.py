@@ -486,3 +486,23 @@ def test_run_slice_leaves_a_corexy_machine_end_gcode_alone(tmp_path):
               tmp_path, runner=_fake_runner(tmp_path, "sliced.gcode.3mf"))
     written = json.loads((tmp_path / "machine.json").read_text(encoding="utf-8"))
     assert written["machine_end_gcode"] == "M400\nM18 X Y Z"
+
+
+# --- bed_dimensions (Feature B: viewer needs the plate size) -------------
+from server.slicer import bed_dimensions
+
+
+def test_bed_dimensions_parses_a_square_bed():
+    m = {"printable_area": ["0x0", "256x0", "256x256", "0x256"]}
+    assert bed_dimensions(m) == {"x": 256.0, "y": 256.0}
+
+
+def test_bed_dimensions_parses_a_rectangular_bed():
+    m = {"printable_area": ["0x0", "180x0", "180x180", "0x180"]}
+    assert bed_dimensions(m) == {"x": 180.0, "y": 180.0}
+
+
+def test_bed_dimensions_is_none_when_missing_or_unparseable():
+    assert bed_dimensions({}) is None
+    assert bed_dimensions({"printable_area": "nope"}) is None
+    assert bed_dimensions({"printable_area": ["0x0", "bad"]}) is None

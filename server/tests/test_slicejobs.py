@@ -362,3 +362,26 @@ def test_an_active_job_is_never_evicted_by_the_cap(tmp_path):
     assert c.get(a) is None
     assert c.get(b) is not None
     assert c.get(active)["state"] == "queued"
+
+
+def test_options_bed_is_none_when_the_profile_has_no_printable_area(tmp_path):
+    # The default INDEX machine profile carries no printable_area, so the
+    # viewer's bed size is unknown -- options must still carry the key.
+    opts = make(tmp_path).options("AAA")
+    assert "bed" in opts
+    assert opts["bed"] is None
+
+
+def test_options_bed_comes_from_the_machine_printable_area(tmp_path):
+    idx = {
+        "Bambu Lab A1 0.4 nozzle": {
+            "name": "Bambu Lab A1 0.4 nozzle",
+            "printable_area": ["0x0", "256x0", "256x256", "0x256"]},
+        "0.20mm Standard @BBL A1": {"name": "0.20mm Standard @BBL A1"},
+        "Generic PLA @BBL A1": {"name": "Generic PLA @BBL A1"},
+    }
+    from server.slicejobs import SliceCoordinator
+    c = SliceCoordinator(FakeRegistry(), FakeQueue(), "bs.exe", idx,
+                         work_dir=tmp_path, run=lambda *a, **k: None,
+                         parse=lambda data: dict(FAKE_META))
+    assert c.options("AAA")["bed"] == {"x": 256.0, "y": 256.0}

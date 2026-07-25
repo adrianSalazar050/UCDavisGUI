@@ -277,6 +277,30 @@ def _max_printable_y(machine: dict):
     return top if top > 0 else None
 
 
+def bed_dimensions(machine: dict):
+    """Bed size {"x", "y"} in mm from the machine profile's printable_area, or
+    None if missing/unparseable. Same tolerant corner-list parse as
+    _max_printable_y (['0x0','256x0','256x256','0x256'] -> {"x":256,"y":256}).
+    None means 'unknown' -- the STL viewer falls back to a default plate rather
+    than inventing a size (see the 2026-07-25 slicing design)."""
+    area = machine.get("printable_area")
+    if not isinstance(area, (list, tuple)) or not area:
+        return None
+    xs, ys = [], []
+    for point in area:
+        if not isinstance(point, str) or "x" not in point:
+            return None
+        a, b = point.split("x", 1)
+        try:
+            xs.append(float(a))
+            ys.append(float(b))
+        except ValueError:
+            return None
+    if not xs or not ys:
+        return None
+    return {"x": max(xs), "y": max(ys)}
+
+
 def bed_forward_gcode(machine: dict) -> str | None:
     """G-code appended to a bed-slinger's end gcode to park the plate FULLY
     forward, so an automated lifter (or a hand) can reach it. None when the

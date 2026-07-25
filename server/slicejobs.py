@@ -21,7 +21,7 @@ import time
 import uuid
 
 from . import slicepresets, threemf
-from .slicer import SliceError, flatten_profile, run_slice
+from .slicer import SliceError, bed_dimensions, flatten_profile, run_slice
 
 log = logging.getLogger("server.slicejobs")
 
@@ -155,6 +155,17 @@ class SliceCoordinator:
         svc = self._registry.get(serial)
         detected = slicepresets.detect_loaded_filament(
             getattr(svc, "state", None))
+        # Bed size for the STL viewer's plate. Resolved from the machine
+        # profile's printable_area; None (unknown) when the model/nozzle
+        # doesn't resolve a machine profile -- the viewer then draws a default
+        # plate rather than blocking.
+        machine_name = slicepresets.machine_profile_name(model_id, nozzle)
+        bed = None
+        if machine_name and machine_name in self._index:
+            try:
+                bed = bed_dimensions(flatten_profile(machine_name, self._index))
+            except SliceError:
+                bed = None
         return {
             "model_id": model_id,
             "nozzle": nozzle,
@@ -163,6 +174,7 @@ class SliceCoordinator:
             "filaments": slicepresets.available_filaments(model_id,
                                                           self._index),
             "detected_filament": detected,
+            "bed": bed,
         }
 
     def submit(self, serial, filename, data, tier_id, material,
