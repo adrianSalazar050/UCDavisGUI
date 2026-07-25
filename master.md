@@ -1266,6 +1266,33 @@ the mechanical outcome needs an actual print, and per §1.1's discipline it
 stays in that state until someone runs one. Design record:
 `docs/superpowers/specs/2026-07-23-bed-forward-eject-design.md`.
 
+### 6.9 STL preview and reorient (Slice page)
+
+The Slice page previews an uploaded **STL** in-browser and lets the operator
+reorient it before slicing. Built on **three.js** (`frontend/src/components/
+slice/StlViewer.jsx`) — the first heavyweight frontend dependency, a conscious
+trade recorded in the 2026-07-25 design because there is no lightweight way to
+render and rotate a 3D mesh. The model sits on a build-plate grid sized to the
+printer's real bed (a new `bed:{x,y}` field on the slice-options response,
+parsed from the machine profile's `printable_area` by `slicer.bed_dimensions`;
+`null` → a default 256×256 plate).
+
+**Reorientation is baked in client-side, and the backend never changes.**
+X/Y/Z 90° buttons and fine sliders drive a rotation; after each the model
+auto-drops to rest on the plate (`stlGeometry.dropTranslation`, pure and
+vitest-tested alongside the rotation and plate-fit math). On **Slice**, the
+rotation is applied to the mesh vertices and a binary STL exported
+(`stlBake.js`, three.js `STLExporter`) and uploaded to the *unchanged*
+`POST /api/printers/{serial}/slice`. The **same `rotationMatrix` drives the
+preview and the bake**, so what you see is what gets sliced. An **unrotated**
+STL uploads its original bytes untouched, so the no-rotation path is
+byte-identical to before. STL only — `.3mf`/`.step` fall back to the plain
+no-preview upload (STEP needs a CAD kernel; three.js parses STL). Verified in a
+headless browser (2026-07-25): the cube renders on the plate, rotation updates
+it live and keeps it grounded. Design/plan:
+`docs/superpowers/specs/2026-07-25-slicing-preview-and-all-models-design.md`,
+`docs/superpowers/plans/2026-07-25-stl-preview-reorient.md`.
+
 ---
 
 ## 7. Frontend

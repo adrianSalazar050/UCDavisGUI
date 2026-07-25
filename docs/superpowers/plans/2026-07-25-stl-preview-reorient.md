@@ -1,9 +1,11 @@
 # STL Preview + Reorient Implementation Plan (Feature B)
 
-> **STATUS: NOT STARTED (2026-07-25).** Implements **Feature B** of
+> **STATUS: SHIPPED (2026-07-25), Tasks 1–6.** Implements **Feature B** of
 > `docs/superpowers/specs/2026-07-25-slicing-preview-and-all-models-design.md`
-> (Feature A — P1P/P1S presets — already shipped). **`master.md` is
-> authoritative wherever this file disagrees.**
+> (Feature A — P1P/P1S presets — shipped earlier). Verified in a headless
+> browser: the STL renders on a bed-sized plate, the X/Y/Z controls rotate it
+> live and auto-drop keeps it grounded; 691 backend + 33 frontend tests green,
+> build clean. **`master.md` is authoritative wherever this file disagrees.**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development or superpowers:executing-plans.
