@@ -35,12 +35,13 @@ import uuid
 
 log = logging.getLogger("server.ledger")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 TABLES = (
     "schema_version", "ledger_meta", "badges", "print_runs",
     "run_events", "pieces", "run_badges", "piece_badges",
     "parts", "part_recipes",
+    "filament_spools", "filament_consumption",
 )
 
 # Applied in order; each entry is the list of statements for that version.
@@ -149,6 +150,32 @@ MIGRATIONS = {
              created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
              synced_at TEXT)""",
         "CREATE INDEX ix_recipes_part ON part_recipes(part_id)",
+    ],
+    3: [
+        """CREATE TABLE filament_spools (
+             id TEXT PRIMARY KEY,
+             spool_code TEXT NOT NULL UNIQUE,
+             material TEXT NOT NULL DEFAULT '',
+             colour TEXT, brand TEXT,
+             filament_profile TEXT,
+             initial_grams REAL,
+             purchase_cost REAL, currency TEXT, supplier TEXT,
+             purchased_at TEXT,
+             status TEXT NOT NULL DEFAULT 'sealed',
+             printer_serial TEXT, ams_slot INTEGER,
+             archived INTEGER NOT NULL DEFAULT 0,
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+             synced_at TEXT)""",
+        """CREATE TABLE filament_consumption (
+             id TEXT PRIMARY KEY,
+             spool_id TEXT NOT NULL,
+             run_id TEXT,
+             grams REAL NOT NULL,
+             basis TEXT,
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+             synced_at TEXT)""",
+        "CREATE INDEX ix_consumption_spool ON filament_consumption(spool_id)",
+        "CREATE INDEX ix_consumption_run ON filament_consumption(run_id)",
     ],
 }
 

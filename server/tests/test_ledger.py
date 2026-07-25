@@ -510,10 +510,6 @@ def test_schema_upgrades_v1_to_v2_without_data_loss(tmp_path):
         led.close()
 
 
-def test_fresh_database_is_at_v2(led):
-    assert led.query("SELECT version FROM schema_version")[0]["version"] == 2
-
-
 # ---------------- parts ----------------
 
 def test_create_and_find_part(led):
@@ -601,3 +597,43 @@ def test_set_default_recipe_refuses_a_foreign_recipe(led):
         led.set_default_recipe(a, rb)          # rb belongs to part b
     # part a's own default is untouched
     assert led.default_recipe(a)["id"] == ra
+
+
+# ---------------- schema v3: filament spools ----------------
+
+def test_schema_upgrades_v2_to_v3(tmp_path):
+    import sqlite3 as _sq
+    path = tmp_path / "ledger.db"
+    con = _sq.connect(str(path)); con.execute("PRAGMA journal_mode=WAL")
+    con.execute("CREATE TABLE schema_version (id INTEGER PRIMARY KEY "
+                "CHECK (id = 1), version INTEGER NOT NULL)")
+    con.execute("INSERT INTO schema_version (id, version) VALUES (1, 2)")
+    con.execute("CREATE TABLE parts (id TEXT PRIMARY KEY, part_number TEXT)")
+    con.execute("INSERT INTO parts (id, part_number) VALUES ('p1','BRK')")
+    # A real v2 ledger also has `badges` (Ledger.__init__ seeds it on every
+    # open) -- included here so this synthetic v2 file matches what a
+    # genuine v2 database looks like, instead of crashing _seed_badges().
+    con.execute("""CREATE TABLE badges (
+             id TEXT PRIMARY KEY,
+             code TEXT NOT NULL UNIQUE,
+             label TEXT NOT NULL,
+             severity TEXT NOT NULL,
+             auto INTEGER NOT NULL DEFAULT 0,
+             archived INTEGER NOT NULL DEFAULT 0,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL)""")
+    con.commit(); con.close()
+
+    led = Ledger(path)
+    try:
+        assert led.query("SELECT version FROM schema_version")[0]["version"] == SCHEMA_VERSION
+        names = {r["name"] for r in led.query(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"filament_spools", "filament_consumption"} <= names
+        assert led.query("SELECT id FROM parts")[0]["id"] == "p1"
+    finally:
+        led.close()
+
+
+def test_fresh_database_is_at_v3(led):
+    assert led.query("SELECT version FROM schema_version")[0]["version"] == 3
