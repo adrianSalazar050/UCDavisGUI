@@ -775,3 +775,21 @@ a { color: var(--primary); }
   color: var(--text-muted);
   font-size: 0.9rem;
 }
+
+/* Slice page: two-column STL preview + form (2026-07-25) */
+.slice-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: var(--sp-5);
+  align-items: start;
+}
+.slice-layout__viewer { min-width: 0; }
+.stl-viewer { border-radius: 8px; overflow: hidden; background: #0e1116; }
+.orient-controls {
+  display: flex; flex-wrap: wrap; gap: var(--sp-2);
+  align-items: center; margin-top: var(--sp-3);
+}
+.orient-controls__axis { display: flex; gap: var(--sp-1); align-items: center; }
+.orient-controls__label { width: 1.4em; font-weight: 600; }
+.orient-controls__deg { width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 800px) { .slice-layout { grid-template-columns: 1fr; } }

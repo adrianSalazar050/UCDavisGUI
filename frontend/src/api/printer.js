@@ -201,6 +201,21 @@ export async function fetchSliceOptions(serial) {
 // Uploads a model file to be sliced for `serial` and queued once it's done.
 // -> { job_id }. 400 on a non-model extension or an empty file, 404 for an
 // unknown printer or when the server has no slicer.
+// Like startSlice, but for an in-memory Blob (a client-baked, reoriented STL)
+// with an explicit filename. Same multipart endpoint and field names.
+export async function startSliceBlob(serial, blob, filename, { preset, material, supports }) {
+  const body = new FormData();
+  body.append("file", blob, filename);
+  body.append("preset", preset);
+  body.append("material", material);
+  body.append("supports", supports ? "true" : "false");
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/slice`,
+    { method: "POST", body });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 export async function startSlice(serial, file, { preset, material, supports }) {
   const body = new FormData();
   body.append("file", file);
