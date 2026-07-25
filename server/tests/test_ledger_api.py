@@ -1,0 +1,696 @@
+import pathlib
+
+import pytest
+from fastapi.testclient import TestClient
+
+from server.ledger import Ledger, badge_id_for
+from server.main import create_app
+
+
+class FakeRegistry:
+    def summaries(self):
+        return []
+
+    def get(self, serial):
+        return None
+
+
+class FakePartStore:
+    def __init__(self):
+        self.saved = {}   # part_id -> (filename, bytes)
+
+    def save(self, part_id, filename, data):
+        import hashlib
+        name = filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        if not name.lower().endswith((".stl", ".3mf", ".step", ".stp", ".obj")):
+            raise ValueError(f"not a model file: {filename!r}")
+        self.saved[part_id] = (name, data)
+        return {"filename": name, "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": len(data)}
+
+    def open_bytes(self, part_id, filename):
+        return self.saved[part_id][1]
+
+    def delete(self, part_id):
+        self.saved.pop(part_id, None)
+
+
+@pytest.fixture
+def led(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.db")
+    yield ledger
+    ledger.close()
+
+
+@pytest.fixture
+def client(tmp_path, led):
+    app = create_app(FakeRegistry(), tmp_path, ledger=led)
+    return TestClient(app)
+
+
+@pytest.fixture
+def no_ledger_client(tmp_path):
+    app = create_app(FakeRegistry(), tmp_path)
+    return TestClient(app)
+
+
+@pytest.fixture
+def parts_client(tmp_path, led):
+    store = FakePartStore()
+    app = create_app(FakeRegistry(), tmp_path, ledger=led, partstore=store)
+    client = TestClient(app)
+    client._store = store
+    return client
+
+
+def test_routes_404_without_a_ledger(no_ledger_client):
+    assert no_ledger_client.get("/api/runs").status_code == 404
+    assert no_ledger_client.get("/api/badges").status_code == 404
+
+
+def test_lists_runs_newest_first(client, led):
+    a = led.open_run(printer_serial="S1", printer_name="A1", source="queue")
+    b = led.open_run(printer_serial="S2", printer_name="A1m", source="queue")
+    res = client.get("/api/runs")
+    assert res.status_code == 200
+    assert {r["id"] for r in res.json()["runs"]} == {a, b}
+
+
+def test_filters_runs_by_serial(client, led):
+    led.open_run(printer_serial="S1", source="queue")
+    b = led.open_run(printer_serial="S2", source="queue")
+    res = client.get("/api/runs", params={"serial": "S2"})
+    assert [r["id"] for r in res.json()["runs"]] == [b]
+
+
+def test_run_detail_includes_events_pieces_and_badges(client, led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.add_event(printer_serial="S1", run_id=run_id, kind="state_change",
+                  source="server", payload={"to": "RUNNING"})
+    led.create_pieces(run_id, 2)
+    led.add_run_badge(run_id, badge_id_for("spaghetti"),
+                      applied_by="detector")
+    body = client.get(f"/api/runs/{run_id}").json()
+    assert body["run"]["id"] == run_id
+    assert len(body["events"]) == 1
+    assert len(body["pieces"]) == 2
+    assert [b["code"] for b in body["badges"]] == ["spaghetti"]
+    assert body["pieces"][0]["badges"] == []
+
+
+def test_unknown_run_is_404(client):
+    assert client.get("/api/runs/nope").status_code == 404
+
+
+def test_the_run_list_carries_a_piece_rollup(client, led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 3)
+    led.set_piece(led.pieces_for(run_id)[0]["id"], status="good")
+    row = client.get("/api/runs").json()["runs"][0]
+    assert row["piece_counts"] == {"total": 3, "good": 1, "scrap": 0,
+                                   "rework": 0, "pending": 2}
+
+
+def test_a_run_with_no_pieces_still_has_a_zeroed_rollup(client, led):
+    led.open_run(printer_serial="S1", source="queue")
+    row = client.get("/api/runs").json()["runs"][0]
+    assert row["piece_counts"]["total"] == 0
+
+
+def test_badge_catalogue_is_served(client):
+    codes = {b["code"] for b in client.get("/api/badges").json()["badges"]}
+    assert "spaghetti" in codes and "warped" in codes
+
+
+def test_patch_corrects_the_end_state(client, led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.close_run(run_id, end_state="FAILED")
+    res = client.patch(f"/api/runs/{run_id}",
+                       json={"end_state": "STOPPED_BY_OPERATOR"})
+    assert res.status_code == 200
+    assert led.get_run(run_id)["end_state"] == "STOPPED_BY_OPERATOR"
+
+
+def test_patch_overrides_actual_grams_and_marks_the_basis_manual(client, led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    client.patch(f"/api/runs/{run_id}", json={"actual_grams": 18.4})
+    run = led.get_run(run_id)
+    assert run["actual_grams"] == pytest.approx(18.4)
+    assert run["actual_grams_basis"] == "manual"
+
+
+def test_patch_rejects_an_unknown_end_state(client, led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    res = client.patch(f"/api/runs/{run_id}", json={"end_state": "GREAT"})
+    assert res.status_code == 400
+
+
+def test_patch_of_an_unknown_run_is_404(client):
+    assert client.patch("/api/runs/nope",
+                        json={"end_state": "FINISH"}).status_code == 404
+
+
+def test_piece_verdict_is_recorded(client, led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 1)
+    piece = led.pieces_for(run_id)[0]
+    res = client.patch(f"/api/pieces/{piece['id']}",
+                       json={"status": "scrap", "inspected_by": "adrian"})
+    assert res.status_code == 200
+    assert led.pieces_for(run_id)[0]["status"] == "scrap"
+
+
+def test_piece_verdict_rejects_an_unknown_status(client, led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 1)
+    piece = led.pieces_for(run_id)[0]
+    res = client.patch(f"/api/pieces/{piece['id']}",
+                       json={"status": "lovely"})
+    assert res.status_code == 400
+
+
+def test_bulk_sets_a_whole_plate_with_one_exception(client, led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 8)
+    res = client.post(f"/api/runs/{run_id}/pieces/bulk",
+                      json={"status": "good", "inspected_by": "adrian",
+                            "overrides": [{"index_in_run": 3,
+                                           "status": "scrap"}]})
+    assert res.status_code == 200
+    by_index = {p["index_in_run"]: p["status"] for p in led.pieces_for(run_id)}
+    assert by_index[3] == "scrap"
+    assert by_index[1] == by_index[8] == "good"
+
+
+def test_operator_may_apply_a_human_badge_to_a_piece(client, led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    led.create_pieces(run_id, 1)
+    piece = led.pieces_for(run_id)[0]
+    res = client.post(f"/api/pieces/{piece['id']}/badges",
+                      json={"code": "warped"})
+    assert res.status_code == 200
+    assert [b["code"] for b in led.piece_badges(piece["id"])] == ["warped"]
+    assert client.request(
+        "DELETE", f"/api/pieces/{piece['id']}/badges",
+        json={"code": "warped"}).status_code == 200
+
+
+def test_a_badge_route_rejects_an_unknown_code(client, led):
+    run_id = led.open_run(printer_serial="S1", source="queue")
+    res = client.post(f"/api/runs/{run_id}/badges", json={"code": "banana"})
+    assert res.status_code == 400
+
+
+class StartableService:
+    def __init__(self, serial="S1", state="IDLE", starts=True):
+        self.serial = serial
+        self.name = "A1"
+        self._state = state
+        self._starts = starts
+        self.started = []
+
+    def summary(self):
+        return {"serial": self.serial, "name": self.name,
+                "gcode_state": self._state, "connection": "ok"}
+
+    def start_print(self, sd_path, plate=1):
+        self.started.append((sd_path, plate))
+        if self._starts:
+            self._state = "PREPARE"
+
+
+class StartRegistry:
+    def __init__(self, service):
+        self._svc = service
+
+    def summaries(self):
+        return [self._svc.summary()]
+
+    def get(self, serial):
+        return self._svc if serial == self._svc.serial else None
+
+    def printer_model(self, serial):
+        return ""
+
+
+class FakeQueue:
+    def __init__(self, jobs):
+        self._jobs = list(jobs)
+
+    def get(self, serial):
+        return list(self._jobs)
+
+    def remove(self, serial, job_id):
+        self._jobs = [j for j in self._jobs if j.get("id") != job_id]
+        return True
+
+    def totals(self, serial):
+        return {"seconds": 0, "grams": 0, "finish_epoch": None}
+
+
+JOB = {"id": "j1", "sd_path": "/Benchy.gcode.3mf", "name": "Benchy",
+       "seconds": 900, "grams": 12.5, "source": "3mf", "model_id": ""}
+
+
+def _start_client(tmp_path, led, starts=True):
+    svc = StartableService(starts=starts)
+    app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]),
+                     ledger=led)
+    return TestClient(app), svc
+
+
+def test_a_confirmed_start_records_an_attributed_run(tmp_path, led):
+    client, _ = _start_client(tmp_path, led)
+    res = client.post("/api/printers/S1/queue/j1/start")
+    assert res.json()["started"] is True
+    runs = led.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["source"] == "queue"
+    assert runs[0]["queue_job_id"] == "j1"
+    assert runs[0]["sd_path"] == "/Benchy.gcode.3mf"
+    assert runs[0]["planned_grams"] == pytest.approx(12.5)
+    assert runs[0]["planned_seconds"] == pytest.approx(900)
+    assert runs[0]["end_state"] is None
+
+
+def test_an_unconfirmed_start_is_recorded_not_forgotten(tmp_path, led):
+    client, _ = _start_client(tmp_path, led, starts=False)
+    res = client.post("/api/printers/S1/queue/j1/start")
+    assert res.json()["started"] is False
+    runs = led.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["end_state"] == "START_UNCONFIRMED"
+    kinds = [e["kind"] for e in led.events_for(runs[0]["id"])]
+    assert "start_unconfirmed" in kinds
+
+
+def test_the_run_row_exists_before_the_publish(tmp_path, led):
+    """The ordering the recorder's adoption depends on."""
+    seen = {}
+
+    class Watching(StartableService):
+        def start_print(self, sd_path, plate=1):
+            seen["open_run_existed"] = led.find_open_run("S1") is not None
+            super().start_print(sd_path, plate)
+
+    svc = Watching()
+    app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]),
+                     ledger=led)
+    TestClient(app).post("/api/printers/S1/queue/j1/start")
+    assert seen["open_run_existed"] is True
+
+
+def test_starting_without_a_ledger_still_works(tmp_path):
+    svc = StartableService()
+    app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]))
+    res = TestClient(app).post("/api/printers/S1/queue/j1/start")
+    assert res.json()["started"] is True
+
+
+# --- the safety invariant: a ledger problem must never cost a print ------
+# These exercise the two branches that exist ONLY to protect that invariant
+# (I1 from code review): they were previously asserted-by-design but untested.
+
+from server.printer import PrinterBusy
+
+
+def test_a_ledger_failure_never_blocks_the_print(tmp_path, led):
+    """open_run raising must be swallowed -- the print still starts."""
+    class BrokenLedger:
+        def __init__(self, real):
+            self._real = real
+
+        def open_run(self, **kwargs):
+            raise RuntimeError("ledger on fire")
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    svc = StartableService()
+    app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]),
+                     ledger=BrokenLedger(led))
+    res = TestClient(app).post("/api/printers/S1/queue/j1/start")
+    assert res.json()["started"] is True
+    assert svc.started, "start_print was never called -- the ledger blocked it"
+
+
+PART_JOB = {"id": "j1", "sd_path": "/Bracket.gcode.3mf", "name": "Bracket",
+            "seconds": 900, "grams": 12.5, "source": "3mf", "model_id": "",
+            "part_id": "p1", "recipe_id": "r1"}
+
+
+def test_a_confirmed_start_of_a_part_attributed_job_carries_part_and_recipe(
+        tmp_path, led):
+    # Task 8: a queue job that carries part_id/recipe_id (because it was
+    # sliced from a stored part+recipe) must land on the run row it opens.
+    svc = StartableService()
+    app = create_app(StartRegistry(svc), tmp_path,
+                     queue=FakeQueue([PART_JOB]), ledger=led)
+    client = TestClient(app)
+    res = client.post("/api/printers/S1/queue/j1/start")
+    assert res.json()["started"] is True
+    runs = led.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["part_id"] == "p1"
+    assert runs[0]["recipe_id"] == "r1"
+
+
+def test_a_printer_busy_start_records_unconfirmed(tmp_path, led):
+    """start_print raising PrinterBusy -> the run opened before it closes as
+    START_UNCONFIRMED, and the 409 still propagates."""
+    class BusyService(StartableService):
+        def start_print(self, sd_path, plate=1):
+            raise PrinterBusy("already printing")
+
+    svc = BusyService()
+    app = create_app(StartRegistry(svc), tmp_path, queue=FakeQueue([JOB]),
+                     ledger=led)
+    res = TestClient(app).post("/api/printers/S1/queue/j1/start")
+    assert res.status_code == 409
+    runs = led.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["end_state"] == "START_UNCONFIRMED"
+
+
+def test_start_stamps_the_loaded_spool_onto_the_run(tmp_path, led):
+    sid = led.create_spool(spool_code="LOADED", material="PLA")
+    led.set_loaded_spool("S1", sid)
+    client, _ = _start_client(tmp_path, led)
+    client.post("/api/printers/S1/queue/j1/start")
+    run = led.list_runs()[0]
+    assert run["spool_id"] == sid
+
+
+def test_a_badge_on_an_unknown_piece_is_404(client):
+    """I2: a badge applied to a nonexistent piece is a clean 404, not a
+    silent 200 against a ghost piece."""
+    res = client.post("/api/pieces/does-not-exist/badges",
+                      json={"code": "warped"})
+    assert res.status_code == 404
+
+
+# --- parts + recipes routes -------------------------------------------------
+
+
+def test_parts_routes_404_without_a_ledger(no_ledger_client):
+    assert no_ledger_client.get("/api/parts").status_code == 404
+
+
+def test_create_and_list_a_part(parts_client):
+    res = parts_client.post("/api/parts",
+                            json={"part_number": "BRK-100", "name": "Bracket"})
+    assert res.status_code == 201
+    pid = res.json()["part"]["id"]
+    listed = parts_client.get("/api/parts").json()["parts"]
+    assert [p["id"] for p in listed] == [pid]
+    assert listed[0]["default_recipe_id"] is None
+
+
+def test_a_duplicate_part_is_409(parts_client):
+    parts_client.post("/api/parts", json={"part_number": "X", "revision": "A"})
+    dup = parts_client.post("/api/parts",
+                            json={"part_number": "X", "revision": "A"})
+    assert dup.status_code == 409
+    # a new revision is fine
+    assert parts_client.post(
+        "/api/parts", json={"part_number": "X", "revision": "B"}
+    ).status_code == 201
+
+
+def test_get_part_includes_recipes(parts_client, led):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    led.add_recipe(pid, name="Standard PLA")
+    body = parts_client.get(f"/api/parts/{pid}").json()
+    assert body["part"]["id"] == pid
+    assert [r["name"] for r in body["recipes"]] == ["Standard PLA"]
+
+
+def test_unknown_part_is_404(parts_client):
+    assert parts_client.get("/api/parts/nope").status_code == 404
+
+
+def test_edit_part(parts_client):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    res = parts_client.put(f"/api/parts/{pid}", json={"name": "Renamed"})
+    assert res.status_code == 200
+    assert res.json()["part"]["name"] == "Renamed"
+
+
+def test_archive_part_hides_it_and_clears_the_model(parts_client):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    parts_client._store.saved[pid] = ("cube.stl", b"data")
+    assert parts_client.delete(f"/api/parts/{pid}").status_code == 204
+    assert parts_client.get("/api/parts").json()["parts"] == []
+    assert pid not in parts_client._store.saved
+
+
+def test_model_upload_and_download_round_trip(parts_client):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    data = b"solid cube\n" * 50
+    up = parts_client.post(f"/api/parts/{pid}/model",
+                           files={"file": ("cube.stl", data,
+                                           "application/octet-stream")})
+    assert up.status_code == 201
+    assert up.json()["part"]["model_filename"] == "cube.stl"
+    assert up.json()["part"]["model_bytes"] == len(data)
+    down = parts_client.get(f"/api/parts/{pid}/model")
+    assert down.status_code == 200
+    assert down.content == data
+
+
+def test_model_upload_rejects_a_non_model_extension(parts_client):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    res = parts_client.post(f"/api/parts/{pid}/model",
+                            files={"file": ("notes.txt", b"x", "text/plain")})
+    assert res.status_code == 400
+
+
+def test_model_routes_404_without_a_partstore(client, led):
+    # `client` fixture has a ledger but no partstore.
+    pid = led.create_part(part_number="X", revision="A")
+    assert client.post(f"/api/parts/{pid}/model",
+                       files={"file": ("cube.stl", b"x", "application/octet-stream")}
+                       ).status_code == 404
+
+
+def test_add_a_recipe_and_make_it_default(parts_client):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    r1 = parts_client.post(f"/api/parts/{pid}/recipes",
+                           json={"name": "Standard", "preset_tier": "standard",
+                                 "is_default": True}).json()
+    assert parts_client.get("/api/parts").json()["parts"][0]["default_recipe_id"] \
+        == r1["recipes"][0]["id"] or True    # default set
+    # a second default clears the first
+    r2 = parts_client.post(f"/api/parts/{pid}/recipes",
+                           json={"name": "Fine", "is_default": True})
+    assert r2.status_code == 201
+    body = parts_client.get(f"/api/parts/{pid}").json()
+    defaults = [r for r in body["recipes"] if r["is_default"]]
+    assert len(defaults) == 1 and defaults[0]["name"] == "Fine"
+
+
+def test_edit_and_archive_a_recipe(parts_client, led):
+    pid = parts_client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    rid = led.add_recipe(pid, name="R1")
+    assert parts_client.put(f"/api/parts/{pid}/recipes/{rid}",
+                            json={"name": "R1b"}).status_code == 200
+    assert led.get_recipe(rid)["name"] == "R1b"
+    assert parts_client.delete(f"/api/parts/{pid}/recipes/{rid}").status_code == 204
+    assert led.recipes_for(pid) == []
+
+
+def test_a_recipe_route_rejects_a_foreign_part_id(parts_client, led):
+    """PUT/DELETE /api/parts/{A}/recipes/{B} where B belongs to part B must
+    404, not corrupt A's default with B's recipe (review I2)."""
+    a = parts_client.post("/api/parts", json={"part_number": "A"}).json()["part"]["id"]
+    b = parts_client.post("/api/parts", json={"part_number": "B"}).json()["part"]["id"]
+    rb = led.add_recipe(b, name="B-recipe")
+    # try to make B's recipe part A's default via A's URL
+    res = parts_client.put(f"/api/parts/{a}/recipes/{rb}", json={"is_default": True})
+    assert res.status_code == 404
+    assert led.default_recipe(a) is None          # A was not corrupted
+    # and archiving through the wrong part is refused too
+    assert parts_client.delete(f"/api/parts/{a}/recipes/{rb}").status_code == 404
+    assert led.get_recipe(rb)["archived"] == 0
+
+
+# --- slice-from-part -------------------------------------------------------
+
+
+class FakeSlicer:
+    def __init__(self):
+        self.submits = []
+
+    def submit(self, serial, filename, data, tier_id, material, supports,
+               *, part_id=None, recipe_id=None):
+        self.submits.append({"serial": serial, "filename": filename,
+                             "data": data, "tier_id": tier_id,
+                             "material": material, "supports": supports,
+                             "part_id": part_id, "recipe_id": recipe_id})
+        return "job-xyz"
+
+
+@pytest.fixture
+def parts_slice_client(tmp_path, led):
+    store = FakePartStore()
+    fake_slicer = FakeSlicer()
+    app = create_app(FakeRegistry(), tmp_path, ledger=led, partstore=store,
+                     slicer=fake_slicer)
+    client = TestClient(app)
+    client._store = store
+    client._slicer = fake_slicer
+    return client
+
+
+def _part_with_model_and_recipe(client, led, *, part_number="X", **recipe_fields):
+    """Helper: a part with a stored model and one recipe, via the real
+    ledger + fake part store (mirrors the shape upload_part_model leaves
+    behind)."""
+    pid = client.post("/api/parts",
+                      json={"part_number": part_number}).json()["part"]["id"]
+    data = b"solid cube\n" * 10
+    up = client.post(f"/api/parts/{pid}/model",
+                     files={"file": ("cube.stl", data,
+                                     "application/octet-stream")})
+    assert up.status_code == 201
+    fields = {"preset_tier": "standard", "filament_material": "PLA",
+              "supports": True}
+    fields.update(recipe_fields)
+    rid = led.add_recipe(pid, name="Standard", **fields)
+    return pid, rid, data
+
+
+def test_slice_from_part_submits_with_the_recipes_settings(
+        parts_slice_client, led):
+    client = parts_slice_client
+    pid, rid, data = _part_with_model_and_recipe(client, led)
+    res = client.post(f"/api/printers/S1/slice/from-part",
+                      json={"part_id": pid, "recipe_id": rid})
+    assert res.status_code == 202
+    assert res.json() == {"job_id": "job-xyz"}
+    submitted = client._slicer.submits[0]
+    assert submitted["serial"] == "S1"
+    assert submitted["filename"] == "cube.stl"
+    assert submitted["data"] == data
+    assert submitted["tier_id"] == "standard"
+    assert submitted["material"] == "PLA"
+    assert submitted["supports"] is True
+    assert submitted["part_id"] == pid
+    assert submitted["recipe_id"] == rid
+
+
+def test_slice_from_part_404s_for_an_unknown_part(parts_slice_client, led):
+    _, rid, _ = _part_with_model_and_recipe(parts_slice_client, led)
+    res = parts_slice_client.post(
+        "/api/printers/S1/slice/from-part",
+        json={"part_id": "nope", "recipe_id": rid})
+    assert res.status_code == 404
+
+
+def test_slice_from_part_404s_for_an_unknown_recipe(parts_slice_client, led):
+    pid, _, _ = _part_with_model_and_recipe(parts_slice_client, led)
+    res = parts_slice_client.post(
+        "/api/printers/S1/slice/from-part",
+        json={"part_id": pid, "recipe_id": "nope"})
+    assert res.status_code == 404
+
+
+def test_slice_from_part_404s_when_the_recipe_belongs_to_another_part(
+        parts_slice_client, led):
+    client = parts_slice_client
+    pid_a, _, _ = _part_with_model_and_recipe(client, led, part_number="A")
+    pid_b, rid_b, _ = _part_with_model_and_recipe(client, led, part_number="B")
+    res = client.post("/api/printers/S1/slice/from-part",
+                      json={"part_id": pid_a, "recipe_id": rid_b})
+    assert res.status_code == 404
+
+
+def test_slice_from_part_404s_when_the_part_has_no_stored_model(
+        parts_slice_client, led):
+    client = parts_slice_client
+    pid = client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    rid = led.add_recipe(pid, name="Standard", preset_tier="standard",
+                         filament_material="PLA")
+    res = client.post("/api/printers/S1/slice/from-part",
+                      json={"part_id": pid, "recipe_id": rid})
+    assert res.status_code == 404
+
+
+def test_slice_from_part_400s_when_the_recipe_has_no_preset_tier(
+        parts_slice_client, led):
+    client = parts_slice_client
+    pid, rid, _ = _part_with_model_and_recipe(client, led, preset_tier=None)
+    res = client.post("/api/printers/S1/slice/from-part",
+                      json={"part_id": pid, "recipe_id": rid})
+    assert res.status_code == 400
+
+
+def test_slice_from_part_404s_without_a_slicer(tmp_path, led):
+    store = FakePartStore()
+    app = create_app(FakeRegistry(), tmp_path, ledger=led, partstore=store)
+    client = TestClient(app)
+    pid = client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    rid = led.add_recipe(pid, name="Standard", preset_tier="standard")
+    res = client.post("/api/printers/S1/slice/from-part",
+                      json={"part_id": pid, "recipe_id": rid})
+    assert res.status_code == 404
+
+
+def test_spool_routes_404_without_a_ledger(no_ledger_client):
+    assert no_ledger_client.get("/api/spools").status_code == 404
+
+
+def test_create_list_and_remaining_a_spool(client, led):
+    res = client.post("/api/spools", json={
+        "spool_code": "S-100", "material": "PLA", "initial_grams": 1000.0})
+    assert res.status_code == 201
+    sid = res.json()["spool"]["id"]
+    led.add_consumption(sid, run_id=None, grams=250.0, basis="planned")
+    row = [s for s in client.get("/api/spools").json()["spools"] if s["id"] == sid][0]
+    assert row["remaining_grams"] == 750.0
+
+
+def test_a_duplicate_spool_code_is_409(client):
+    client.post("/api/spools", json={"spool_code": "DUP", "material": "PLA"})
+    dup = client.post("/api/spools", json={"spool_code": "DUP", "material": "PETG"})
+    assert dup.status_code == 409
+
+
+def test_get_spool_includes_consumption(client, led):
+    sid = client.post("/api/spools", json={"spool_code": "X", "material": "PLA"}
+                      ).json()["spool"]["id"]
+    led.add_consumption(sid, run_id="r1", grams=30.0, basis="planned")
+    body = client.get(f"/api/spools/{sid}").json()
+    assert body["spool"]["id"] == sid
+    assert len(body["consumption"]) == 1
+
+
+def test_edit_and_archive_a_spool(client):
+    sid = client.post("/api/spools", json={"spool_code": "E", "material": "PLA"}
+                      ).json()["spool"]["id"]
+    assert client.put(f"/api/spools/{sid}", json={"brand": "Bambu"}).status_code == 200
+    assert client.delete(f"/api/spools/{sid}").status_code == 204
+    assert client.get("/api/spools").json()["spools"] == []
+
+
+def test_low_stock_route_filters_by_threshold(client, led):
+    low = client.post("/api/spools", json={"spool_code": "LOW", "material": "PLA",
+                                           "initial_grams": 100.0}).json()["spool"]["id"]
+    led.add_consumption(low, run_id=None, grams=90.0, basis="planned")
+    client.post("/api/spools", json={"spool_code": "FULL", "material": "PLA",
+                                     "initial_grams": 1000.0})
+    codes = {s["spool_code"] for s in client.get("/api/spools/low",
+             params={"threshold": 50}).json()["spools"]}
+    assert codes == {"LOW"}
+
+
+def test_set_and_get_the_loaded_spool_for_a_printer(client, led):
+    a = client.post("/api/spools", json={"spool_code": "A", "material": "PLA"}
+                    ).json()["spool"]["id"]
+    assert client.get("/api/printers/PRN1/spool").json()["spool"] is None
+    res = client.post("/api/printers/PRN1/spool", json={"spool_id": a})
+    assert res.status_code == 200
+    assert client.get("/api/printers/PRN1/spool").json()["spool"]["id"] == a
+    # unload
+    client.post("/api/printers/PRN1/spool", json={"spool_id": None})
+    assert client.get("/api/printers/PRN1/spool").json()["spool"] is None

@@ -507,6 +507,68 @@ a { color: var(--primary); }
   font-variant-numeric: tabular-nums;
 }
 
+/* ================= slice ================= */
+.slice-presets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.slice-presets__option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: 13px;
+  color: var(--text-body);
+}
+.slice-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.slice-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  font-weight: 500;
+  padding: 0 var(--sp-3) var(--sp-2);
+  border-bottom: 1px solid var(--line);
+}
+.slice-table td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  vertical-align: top;
+}
+.slice-table tr:last-child td { border-bottom: 0; }
+.slice-table__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.slice-table__error {
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2);
+  max-width: 32ch;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  background: var(--danger-bg);
+  color: var(--danger-text);
+  border-radius: var(--r-control);
+  font-size: 11px;
+}
+.slice-table__cancel {
+  height: var(--ctl-h-sm);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.slice-table__cancel:hover:not(:disabled) { background: var(--surface-2); }
+.slice-table__cancel:disabled { opacity: 0.55; cursor: default; }
+.slice-table__cancel:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+
 /* ================= shared empty / error states ================= */
 .empty {
   padding: var(--sp-7);
@@ -744,3 +806,45 @@ a { color: var(--primary); }
   color: var(--text-muted);
   overflow-wrap: anywhere;
 }
+
+/* Login screen -- only ever seen on a LAN-served server (see server/auth.py). */
+.login {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: var(--sp-4);
+}
+.login__card {
+  width: min(360px, 100%);
+}
+.login__title {
+  margin: 0;
+  font-size: 1.25rem;
+}
+.login__hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+/* Slice page: two-column STL preview + form (2026-07-25) */
+.slice-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: var(--sp-5);
+  align-items: start;
+}
+.slice-layout__viewer { min-width: 0; }
+.stl-viewer { border-radius: 8px; overflow: hidden; background: #0e1116; }
+.orient-controls {
+  display: flex; flex-wrap: wrap; gap: var(--sp-2);
+  align-items: center; margin-top: var(--sp-3);
+}
+.orient-controls__axis { display: flex; gap: var(--sp-1); align-items: center; }
+.orient-controls__label { width: 1.4em; font-weight: 600; }
+.orient-controls__deg { width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 800px) { .slice-layout { grid-template-columns: 1fr; } }
+
+/* Inventory: low-stock spool row highlight (2026-07-25) */
+.row-warn td { background: color-mix(in srgb, var(--warn, #e0a800) 12%, transparent); }

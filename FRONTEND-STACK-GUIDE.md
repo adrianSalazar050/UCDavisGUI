@@ -15,12 +15,14 @@
 > | It mentions | This project actually has |
 > |---|---|
 > | `AuthContext`, `CellContext`, `PreferencesContext`, `useCells` | no contexts at all; one `usePrinters` hook over a WebSocket |
-> | Supabase JS for auth | no auth, no Supabase — the server is LAN-only |
+> | Supabase JS for auth | no Supabase. There **is** auth — one shared password over a cookie (a cookie, not a bearer token, because the dashboard's live updates run over a WebSocket). See `master.md` §2.1 |
 > | `LoDISA-GUI/vera-web/frontend/src/...` | `frontend/src/...` |
-> | no test setup | `vitest`, over `roiGeometry.js` (see `master.md` §9) |
+> | no test setup | `vitest`, over three pure modules — `roiGeometry.js`, `runFormat.js`, `stlGeometry.js` (see `master.md` §10) |
+> | "no three.js, no chart library" | true of VERA, **not** of this project: `frontend/` uses three.js for the Slice page's STL preview, and it is deliberately the one heavyweight frontend dependency here (`master.md` §6.9) |
+> | pages keyed with a `permission` field | this project's `pageRegistry.jsx` has `{title, group, component}` and no per-page permission — auth is all-or-nothing |
 >
 > Read it for **conventions**, not for facts about this codebase. For what
-> `frontend/` really contains, see [`master.md` §6](master.md).
+> `frontend/` really contains, see [`master.md` §7](master.md).
 
 How the VERA / HORUS GUI (`LoDISA-GUI/vera-web/frontend`) is built, and which tools to
 use if you want a new GUI with the same look, feel, and structure.

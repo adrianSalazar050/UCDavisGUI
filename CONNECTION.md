@@ -49,8 +49,8 @@ Everything below the "Historical" heading is background. The live path is:
 | Channel | Port | Module | Notes |
 |---|---|---|---|
 | Telemetry + control | 8883 | `bambu_link.py` | MQTT over TLS, self-signed cert accepted |
-| microSD listing/transfer | 990 | `server/sdcard.py` | FTPS, implicit TLS, read-only in the UI |
-| Built-in camera | 6000 | `detect.py` (`BambuCameraSource`) | TLS, 80-byte `bblp` auth packet, then length-prefixed JPEGs |
+| microSD listing/transfer | 990 | `server/sdcard.py` | FTPS, implicit TLS. **Read *and* write** — `upload_file` (STOR) shipped 2026-07-21 and was verified on hardware 2026-07-23 |
+| Built-in camera | 6000 | `detect.py` (`BambuCameraSource`) | TLS, 80-byte `bblp` auth packet (16-byte header + two 32-byte null-padded fields), then length-prefixed JPEGs |
 
 All three authenticate with the same `bblp` + LAN-access-code pair. See
 [`master.md`](master.md) §2 for how they fit together.
@@ -143,22 +143,47 @@ Developer Mode is off. That maps to the troubleshooting list below.
 
 **microSD files** are read over FTPS (port 990), not MQTT — MQTT exposes no
 file listing at all. Same `bblp` + access-code credentials. The SD Files page
-is read-only.
+**can also upload** (`.gcode.3mf` or `.gcode`, always to the card root); only a
+`.gcode.3mf` can then be started over MQTT, because the start command points at
+`Metadata/plate_N.gcode` *inside* the zip. See `master.md` §3.2 and §5.4.
 
-Add `--port 8000` to change the port, `--runs-dir runs/` to change where
-capture frames are read from, `--printers-file` to move the printer list.
-Without hardware, `python -m server --mock` seeds three fake printers
+Flags: `--port 8000` changes the port, `--runs-dir runs/` changes where capture
+frames are read from, `--printers-file` moves the printer list,
+`--detect-interval` sets the detector's frame cadence (and, derived from it, the
+staleness window), and `--no-slicer` disables the slicing routes. Without
+hardware, `python -m server --mock` seeds three fake printers
 (running / stale / offline) so the whole UI can be exercised.
 
-Then, for frontend dev, run `npm run dev` inside `GUI_UCDavis/frontend`
+**Serving this to the rest of the lab** is one flag:
+
+```bash
+python -m server --lan
+```
+
+It binds `0.0.0.0`, reads the shared password from `.bambu-password`, and
+prints the candidate URLs — marking any address that shares a subnet with a
+registered printer, which is usually the one to hand out. The long form
+(`BAMBU_PASSWORD=... python -m server --host 0.0.0.0`) still works and is
+exactly what the flag expands to.
+
+Binding anywhere other than loopback with **no password resolved** makes the
+server refuse to start rather than boot unprotected — putting "stop a print /
+upload a file / start a job" on a shared network must not be possible by
+forgetting a flag, and `--lan` does not weaken that. On Windows you also have
+to open the inbound port once from an admin shell. Details and the reasoning:
+`master.md` §2.1 and §8.
+
+Then, for frontend dev, run `npm run dev` inside [`frontend/`](frontend)
 (port 5173, proxies `/api` and `/ws` to the backend on port 8000). For a
 normal/prod run, `npm run build` once and the single `python -m server`
 process serves everything on `http://localhost:8000`.
 
-See `GUI_UCDavis/docs/superpowers/specs/2026-07-16-bambu-dashboard-design.md`
-for the v1 dashboard design, and
-`docs/superpowers/specs/2026-07-16-multi-printer-sd-browser-design.md` for the
-multi-printer + SD browser design this connection feeds into.
+For what sits on top of this connection, read [`master.md`](master.md) — it is
+the maintained reference. The original design specs are historical records
+kept in [`docs/superpowers/`](docs/superpowers/README.md); the two that this
+connection feeds into are the v1 dashboard design and the multi-printer + SD
+browser design, both listed in that index with what has since gone stale in
+them.
 
 ## Troubleshooting
 

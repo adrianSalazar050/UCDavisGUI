@@ -33,11 +33,12 @@ export async function removePrinter(serial) {
 }
 
 // Edit a registered printer. Blank access_code keeps the current one.
-export async function updatePrinter(serial, { host, access_code, name, capture }) {
+export async function updatePrinter(serial,
+    { host, access_code, name, capture, model_id, bed_type, nozzle }) {
   const res = await fetch(`/api/printers/${encodeURIComponent(serial)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ host, access_code, name, capture }),
+    body: JSON.stringify({ host, access_code, name, capture, model_id, bed_type, nozzle }),
   });
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
@@ -184,4 +185,328 @@ export async function fetchDetectionFrame(serial) {
   } catch {
     return null;
   }
+}
+
+// Presets/filaments valid for this printer's configured model+nozzle, plus
+// the filament detected from live MQTT state. -> { model_id, nozzle,
+// presets: [{id, label, process, machine}], filaments: [{material, profile}],
+// detected_filament }. 404s (via detail()) when the server has no slicer.
+export async function fetchSliceOptions(serial) {
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/slice/options`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// Uploads a model file to be sliced for `serial` and queued once it's done.
+// -> { job_id }. 400 on a non-model extension or an empty file, 404 for an
+// unknown printer or when the server has no slicer.
+// Like startSlice, but for an in-memory Blob (a client-baked, reoriented STL)
+// with an explicit filename. Same multipart endpoint and field names.
+export async function startSliceBlob(serial, blob, filename, { preset, material, supports }) {
+  const body = new FormData();
+  body.append("file", blob, filename);
+  body.append("preset", preset);
+  body.append("material", material);
+  body.append("supports", supports ? "true" : "false");
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/slice`,
+    { method: "POST", body });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function startSlice(serial, file, { preset, material, supports }) {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("preset", preset);
+  body.append("material", material);
+  body.append("supports", supports ? "true" : "false");
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/slice`,
+    { method: "POST", body });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// -> [{id, serial, state, name, source_name, preset, preset_label, material,
+//      supports, created, error, seconds, grams, sd_path}], newest first.
+export async function fetchSliceJobs(serial) {
+  const res = await fetch(
+    `/api/slice/jobs?serial=${encodeURIComponent(serial)}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return (await res.json()).jobs;
+}
+
+// Cancels a queued slice job, or clears a finished/failed/cancelled one.
+export async function cancelSliceJob(id) {
+  const res = await fetch(
+    `/api/slice/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+// --- authentication ---------------------------------------------------------
+// Only engaged when the server is bound beyond loopback (it sets a session
+// cookie; see server/auth.py). On a localhost/desktop server these are inert:
+// checkAuth() reports authed and login() is never reached.
+
+// Is a session needed right now? Probes a protected route rather than adding a
+// dedicated endpoint, so it stays true whatever the server's auth config is.
+export async function checkAuth() {
+  const res = await fetch("/api/printers");
+  return res.status !== 401;
+}
+
+export async function login(password) {
+  const res = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+export async function logout() {
+  await fetch("/api/logout", { method: "POST" });
+}
+
+// --- traceability -------------------------------------------------------
+// All of these 404 when the server was built without a ledger, the same
+// "None means inert" convention the slice routes use.
+
+export async function fetchRuns(serial, { limit = 50 } = {}) {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (serial) query.set("serial", serial);
+  const res = await fetch(`/api/runs?${query}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// { run, events, pieces (each with .badges), badges }
+export async function fetchRun(runId) {
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function patchRun(runId, body) {
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function patchPiece(pieceId, body) {
+  const res = await fetch(`/api/pieces/${encodeURIComponent(pieceId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// One action for a whole plate. overrides: [{ index_in_run, status }]
+export async function bulkPieces(runId, { status, inspected_by, overrides }) {
+  const res = await fetch(
+    `/api/runs/${encodeURIComponent(runId)}/pieces/bulk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, inspected_by, overrides: overrides ?? [] }),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function fetchBadges() {
+  const res = await fetch("/api/badges");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function addPieceBadge(pieceId, code) {
+  const res = await fetch(
+    `/api/pieces/${encodeURIComponent(pieceId)}/badges`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function removePieceBadge(pieceId, code) {
+  const res = await fetch(
+    `/api/pieces/${encodeURIComponent(pieceId)}/badges`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// --- parts catalogue + recipes (Phase 2) --------------------------------
+// All 404 when the server has no ledger, same "None means inert" convention.
+
+export async function fetchParts() {
+  const res = await fetch("/api/parts");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// { part, recipes, default_recipe_id }
+export async function fetchPart(partId) {
+  const res = await fetch(`/api/parts/${encodeURIComponent(partId)}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function createPart(body) {
+  const res = await fetch("/api/parts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function updatePart(partId, body) {
+  const res = await fetch(`/api/parts/${encodeURIComponent(partId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function archivePart(partId) {
+  const res = await fetch(`/api/parts/${encodeURIComponent(partId)}`,
+                          { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+// Upload a model file (STL/3MF/STEP). Returns the refreshed part payload.
+export async function uploadPartModel(partId, file) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`/api/parts/${encodeURIComponent(partId)}/model`,
+                          { method: "POST", body: form });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function addRecipe(partId, body) {
+  const res = await fetch(
+    `/api/parts/${encodeURIComponent(partId)}/recipes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function updateRecipe(partId, recipeId, body) {
+  const res = await fetch(
+    `/api/parts/${encodeURIComponent(partId)}/recipes/${encodeURIComponent(recipeId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function archiveRecipe(partId, recipeId) {
+  const res = await fetch(
+    `/api/parts/${encodeURIComponent(partId)}/recipes/${encodeURIComponent(recipeId)}`,
+    { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+// Slice a stored part with a stored recipe for a printer -> { job_id }.
+// The resulting queue job carries part_id/recipe_id, so the eventual run is
+// attributed to the part (Phase 2 Task 8).
+export async function sliceFromPart(serial, part_id, recipe_id) {
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/slice/from-part`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ part_id, recipe_id }),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// --- filament inventory / spools (Phase 3) ------------------------------
+// All 404 when the server has no ledger, same "None means inert" convention.
+
+export async function fetchSpools() {
+  const res = await fetch("/api/spools");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// { spool (with remaining_grams), consumption }
+export async function fetchSpool(spoolId) {
+  const res = await fetch(`/api/spools/${encodeURIComponent(spoolId)}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function createSpool(body) {
+  const res = await fetch("/api/spools", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function updateSpool(spoolId, body) {
+  const res = await fetch(`/api/spools/${encodeURIComponent(spoolId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function archiveSpool(spoolId) {
+  const res = await fetch(`/api/spools/${encodeURIComponent(spoolId)}`,
+                          { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+export async function fetchLowStock(threshold = 100) {
+  const res = await fetch(`/api/spools/low?threshold=${encodeURIComponent(threshold)}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// The spool loaded on a printer (or { spool: null }).
+export async function fetchLoadedSpool(serial) {
+  const res = await fetch(`/api/printers/${encodeURIComponent(serial)}/spool`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// spoolId=null unloads. Returns { spool }.
+export async function setLoadedSpool(serial, spoolId) {
+  const res = await fetch(`/api/printers/${encodeURIComponent(serial)}/spool`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spool_id: spoolId }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
 }

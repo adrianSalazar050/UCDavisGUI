@@ -7,8 +7,9 @@ import tempfile
 
 import pytest
 
-from server.store import (MemoryStore, PrinterConfig, PrinterStore,
-                          guess_model_id, model_mismatch)
+from server.store import (BED_TYPES, DEFAULT_BED_TYPE, MemoryStore,
+                          PrinterConfig, PrinterStore, guess_model_id,
+                          model_mismatch)
 
 
 def cfg(serial="0300CA633005010", host="192.168.137.2", code="test-access-code",
@@ -371,3 +372,91 @@ def test_camera_source_invalid_defaults_to_a1(tmp_path):
         {"serial": "S", "host": "h", "access_code": "c", "camera_source": "usb"},
     ]), encoding="utf-8")
     assert PrinterStore(p).load()[0].camera_source == "a1"
+
+
+def test_nozzle_defaults_to_04():
+    c = PrinterConfig(serial="s", host="h", access_code="a")
+    assert c.nozzle == "0.4"
+
+
+def test_nozzle_accepts_the_four_known_sizes():
+    for n in ("0.2", "0.4", "0.6", "0.8"):
+        c = PrinterConfig.from_dict(
+            {"serial": "s", "host": "h", "access_code": "a", "nozzle": n})
+        assert c.nozzle == n
+
+
+def test_nozzle_degrades_to_04_on_junk():
+    # Same rule as normalize_roi: a bad value degrades to the safe default
+    # rather than raising. A wrong nozzle slices for the wrong hardware, so
+    # the default has to be the common case, not the last thing typed.
+    for bad in ("0.5", "", None, 0.4, ["0.4"], "abc"):
+        c = PrinterConfig.from_dict(
+            {"serial": "s", "host": "h", "access_code": "a", "nozzle": bad})
+        assert c.nozzle == "0.4"
+
+
+def test_nozzle_survives_a_save_load_round_trip(tmp_path):
+    store = PrinterStore(tmp_path / "printers.json")
+    store.save([PrinterConfig(serial="s", host="h", access_code="a",
+                              nozzle="0.6")])
+    assert store.load()[0].nozzle == "0.6"
+
+
+# ---------------- bed type ----------------
+# MEASURED 2026-07-22: with curr_bed_type never set, Bambu Studio defaults to
+# Cool Plate, whose PLA temp is 35 C -- the gcode we produced carried
+# `M190 S35`. This lab's A1 has a Textured PEI Plate, which needs 65 C for
+# PLA. On real hardware: nozzle heated correctly to 205 C, the print reached
+# layer 2/100, then stalled at 5% with an HMS warning active -- consistent
+# with a failed first layer from a cold bed. Slicing the same cube twice
+# confirmed the fix with no hardware involved: curr_bed_type='Cool Plate' ->
+# M190 S35, curr_bed_type='Textured PEI Plate' -> M190 S65.
+
+def test_bed_type_defaults_to_textured_pei_plate():
+    # The A1 ships with a Textured PEI Plate, and that's what this lab's
+    # printer actually has (confirmed 2026-07-22) -- so an unconfigured
+    # printer must default to the plate that's really installed, not to
+    # Bambu Studio's own Cool Plate default that caused today's failure.
+    c = PrinterConfig(serial="s", host="h", access_code="a")
+    assert c.bed_type == "Textured PEI Plate"
+
+
+def test_bed_type_accepts_the_five_known_plates():
+    for b in ("Cool Plate", "Textured PEI Plate", "High Temp Plate",
+             "Engineering Plate", "Supertack Plate"):
+        c = PrinterConfig.from_dict(
+            {"serial": "s", "host": "h", "access_code": "a", "bed_type": b})
+        assert c.bed_type == b
+
+
+def test_bed_type_uses_the_slicers_supertack_name_not_the_marketing_one():
+    # MEASURED 2026-07-23, and the reason this test exists: an unrecognised
+    # curr_bed_type does not error, it silently becomes Cool Plate (35 C).
+    # "Cool Plate (SuperTack)" is the name on the box and was what this list
+    # shipped with -- it sliced at 35 C while the UI said SuperTack. The
+    # slicer's own name is "Supertack Plate" and it gives the correct 45 C.
+    # Every value in BED_TYPES must be a name the SLICER knows.
+    assert "Supertack Plate" in BED_TYPES
+    assert "Cool Plate (SuperTack)" not in BED_TYPES
+    assert PrinterConfig.from_dict(
+        {"serial": "s", "host": "h", "access_code": "a",
+         "bed_type": "Cool Plate (SuperTack)"}).bed_type == DEFAULT_BED_TYPE
+
+
+def test_bed_type_degrades_to_textured_pei_plate_on_junk():
+    # Same rule as nozzle: a bad value degrades to the safe default rather
+    # than raising. A wrong plate slices for the wrong temperature (this is
+    # the exact defect being fixed here), so the default has to be the plate
+    # actually installed, not the last thing typed.
+    for bad in ("cool plate", "", None, 35, ["Cool Plate"], "Cool Plate!"):
+        c = PrinterConfig.from_dict(
+            {"serial": "s", "host": "h", "access_code": "a", "bed_type": bad})
+        assert c.bed_type == "Textured PEI Plate"
+
+
+def test_bed_type_survives_a_save_load_round_trip(tmp_path):
+    store = PrinterStore(tmp_path / "printers.json")
+    store.save([PrinterConfig(serial="s", host="h", access_code="a",
+                              bed_type="Cool Plate")])
+    assert store.load()[0].bed_type == "Cool Plate"

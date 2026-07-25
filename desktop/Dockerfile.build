@@ -1,0 +1,27 @@
+# Toolchain image for building the Linux AppImage of Bambu Monitor.
+#
+# Based on Ubuntu 22.04 (glibc 2.35) ON PURPOSE: a PyInstaller/Electron binary
+# built against an OLDER glibc runs on newer systems, but not vice-versa. 22.04
+# covers Linux Mint 21.x and still runs on Mint 22 (24.04). Do not "upgrade"
+# this base to a newer Ubuntu unless you have dropped support for older Mint.
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Python 3.11 (via deadsnakes to match the dev interpreter), Node 20, and the
+# handful of libs electron-builder / AppImage tooling expect at build time.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common ca-certificates curl gnupg git \
+        libarchive-tools fakeroot \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-venv python3.11-dev \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# electron-builder refuses to download its tools as root unless told it's fine.
+ENV ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES=true
+
+WORKDIR /src
+CMD ["bash", "desktop/build-linux-inside.sh"]

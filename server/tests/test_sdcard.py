@@ -1,4 +1,5 @@
 import ftplib
+import io
 
 import pytest
 
@@ -354,6 +355,132 @@ def test_upload_file_failure_does_not_leak_access_code_and_closes(monkeypatch):
         sd.upload_file("h", secret, "/a.3mf", b"x")
     assert secret not in str(ei.value)
     assert state["closed"]
+
+
+# ---------- ImplicitFTP_TLS.storbinary (the FTPS-unwrap-hang regression) ----
+#
+# Bug found on real hardware 2026-07-22: the A1 never sends a TLS
+# close_notify on the data channel, so stdlib FTP_TLS.storbinary's bare
+# conn.unwrap() blocks for the full socket timeout and then raises, turning
+# a byte-perfect upload into a reported failure. These tests drive the real
+# ImplicitFTP_TLS.storbinary (not a full-class fake) with the control-channel
+# calls (voidcmd/transfercmd/voidresp) stubbed out, so the fix is exercised
+# for real with no socket involved.
+
+class _FakeDataConn:
+    """Stand-in for the data-connection socket storbinary writes to and then
+    unwraps. Monkeypatched in as ftplib._SSLSocket so the isinstance check
+    inside storbinary treats it as a TLS socket, same as the real one.
+    Supports the context-manager protocol because ftplib's storbinary uses
+    `with self.transfercmd(...) as conn:`.
+    """
+
+    def __init__(self, unwrap_effect=None):
+        self.sent = bytearray()
+        self.unwrap_effect = unwrap_effect
+        self.calls: list[str] = []  # order matters for the timeout check
+        self.closed = False
+
+    def sendall(self, buf):
+        self.sent.extend(buf)
+
+    def settimeout(self, value):
+        self.calls.append(("settimeout", value))
+
+    def unwrap(self):
+        self.calls.append(("unwrap", None))
+        if self.unwrap_effect is not None:
+            raise self.unwrap_effect
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
+
+
+def _make_storbinary_ftp(monkeypatch, conn, *, voidresp="226 Transfer complete."):
+    """Real ImplicitFTP_TLS instance with only the control-channel calls
+    storbinary makes (voidcmd/transfercmd/voidresp) stubbed out. No socket,
+    no connect() -- storbinary itself is the thing under test."""
+    monkeypatch.setattr(ftplib, "_SSLSocket", _FakeDataConn)
+    ftp = sdcard.ImplicitFTP_TLS()
+    monkeypatch.setattr(ftp, "voidcmd", lambda cmd: None)
+    monkeypatch.setattr(ftp, "transfercmd", lambda cmd, rest=None: conn)
+    monkeypatch.setattr(ftp, "voidresp", lambda: voidresp)
+    return ftp
+
+
+def test_storbinary_sends_all_data_and_returns_server_response(monkeypatch):
+    conn = _FakeDataConn()
+    ftp = _make_storbinary_ftp(monkeypatch, conn)
+    resp = ftp.storbinary("STOR /a.gcode.3mf", io.BytesIO(b"payload-bytes"))
+    assert conn.sent == b"payload-bytes"
+    assert resp == "226 Transfer complete."
+
+
+def test_storbinary_tolerates_unwrap_timeout(monkeypatch):
+    # The actual bug: unwrap() raising must not fail an otherwise-successful
+    # upload. TimeoutError is a subclass of OSError, matching what was
+    # observed on hardware (raised after the socket timeout expired).
+    conn = _FakeDataConn(unwrap_effect=TimeoutError("the read operation timed out"))
+    ftp = _make_storbinary_ftp(monkeypatch, conn)
+    resp = ftp.storbinary("STOR /a.gcode.3mf", io.BytesIO(b"payload-bytes"))
+    assert conn.sent == b"payload-bytes"  # data still arrived
+    assert resp == "226 Transfer complete."  # server's verdict still wins
+
+
+def test_storbinary_sets_bounded_timeout_before_unwrap(monkeypatch):
+    # Regression guard: the bounded window must not silently regress back to
+    # relying on the full (10s / whatever TIMEOUT_S is) socket timeout.
+    conn = _FakeDataConn()
+    ftp = _make_storbinary_ftp(monkeypatch, conn)
+    ftp.storbinary("STOR /a.gcode.3mf", io.BytesIO(b"x"))
+    assert ("settimeout", sdcard.UNWRAP_TIMEOUT_S) in conn.calls
+    assert conn.calls.index(("settimeout", sdcard.UNWRAP_TIMEOUT_S)) < \
+        conn.calls.index(("unwrap", None))
+
+
+def test_storbinary_voidresp_failure_still_propagates(monkeypatch):
+    # The fix must not become a blanket try/except around the whole method:
+    # a genuine STOR failure (reported via voidresp, e.g. a full card) must
+    # still raise, unaffected by the unwrap tolerance.
+    conn = _FakeDataConn()
+
+    def _voidresp():
+        raise ftplib.error_perm("552 Disk full.")
+
+    ftp = _make_storbinary_ftp(monkeypatch, conn)
+    monkeypatch.setattr(ftp, "voidresp", _voidresp)
+    with pytest.raises(ftplib.error_perm):
+        ftp.storbinary("STOR /a.gcode.3mf", io.BytesIO(b"x"))
+
+
+def test_upload_file_survives_unwrap_hang_end_to_end(monkeypatch):
+    # Same bug, exercised through the public upload_file() entry point with
+    # the real ImplicitFTP_TLS class (only connect/login/etc. stubbed), to
+    # confirm the whole call chain -- not just storbinary in isolation --
+    # completes without raising and the payload still arrived intact.
+    conn = _FakeDataConn(unwrap_effect=TimeoutError("the read operation timed out"))
+    monkeypatch.setattr(ftplib, "_SSLSocket", _FakeDataConn)
+
+    monkeypatch.setattr(sdcard.ImplicitFTP_TLS, "connect", lambda self, host, port: None)
+    monkeypatch.setattr(sdcard.ImplicitFTP_TLS, "login", lambda self, user, passwd: None)
+    monkeypatch.setattr(sdcard.ImplicitFTP_TLS, "prot_p", lambda self: None)
+    monkeypatch.setattr(sdcard.ImplicitFTP_TLS, "set_pasv", lambda self, v: None)
+    monkeypatch.setattr(sdcard.ImplicitFTP_TLS, "close", lambda self: None)
+    monkeypatch.setattr(sdcard.ImplicitFTP_TLS, "voidcmd", lambda self, cmd: None)
+    monkeypatch.setattr(sdcard.ImplicitFTP_TLS, "transfercmd",
+                        lambda self, cmd, rest=None: conn)
+    monkeypatch.setattr(sdcard.ImplicitFTP_TLS, "voidresp",
+                        lambda self: "226 Transfer complete.")
+
+    sdcard.upload_file("10.0.0.5", "code", "/Benchy.gcode.3mf", b"gcode-bytes")
+    assert conn.sent == b"gcode-bytes"
 
 
 def test_upload_file_disk_full_becomes_sderror(monkeypatch):

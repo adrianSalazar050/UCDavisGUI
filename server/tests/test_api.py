@@ -1,6 +1,8 @@
 import io
+import pathlib
 import zipfile
 
+import pytest
 from fastapi.testclient import TestClient
 
 from server.main import create_app
@@ -60,7 +62,8 @@ class FakeService:
 
 class FakeRegistry:
     def __init__(self, services=None, duplicate=False, sd_file=None,
-                 sd_file_error=None, sd_upload_error=None, model_id=""):
+                 sd_file_error=None, sd_upload_error=None, model_id="",
+                 bed_type="Textured PEI Plate", nozzle="0.4"):
         self._services = {s.serial: s for s in (services or [])}
         self.duplicate = duplicate
         self.added = []
@@ -73,6 +76,8 @@ class FakeRegistry:
         self.upload_sd_file_calls = []
         self.reconnect_calls = []
         self._model_id = model_id
+        self._bed_type = bed_type
+        self._nozzle = nozzle
 
     def printer_model(self, serial):
         # Mirrors PrinterRegistry.printer_model: "" for unknown printer or
@@ -80,6 +85,20 @@ class FakeRegistry:
         if serial not in self._services:
             return ""
         return self._model_id
+
+    def printer_bed_type(self, serial):
+        # Mirrors PrinterRegistry.printer_bed_type: the configured default
+        # even for an unknown printer -- never "" (see store.DEFAULT_BED_TYPE).
+        if serial not in self._services:
+            return "Textured PEI Plate"
+        return self._bed_type
+
+    def printer_nozzle(self, serial):
+        # Mirrors PrinterRegistry.printer_nozzle: the configured default even
+        # for an unknown printer -- never "" (see store.DEFAULT_NOZZLE).
+        if serial not in self._services:
+            return "0.4"
+        return self._nozzle
 
     def summaries(self):
         return [s.summary() for s in self._services.values()]
@@ -106,7 +125,7 @@ class FakeRegistry:
         return True
 
     def update(self, serial, host=None, access_code=None, name="",
-               capture=False, model_id=None):
+               capture=False, model_id=None, bed_type=None, nozzle=None):
         if serial not in self._services:
             return None
         if not (host and host.strip()):
@@ -114,6 +133,10 @@ class FakeRegistry:
         svc = self._services[serial]
         if model_id is not None:
             self._model_id = model_id
+        if bed_type is not None:
+            self._bed_type = bed_type
+        if nozzle is not None:
+            self._nozzle = nozzle
         self.updated.append((serial, host, access_code, name, capture))
         return svc.summary()
 
@@ -200,9 +223,15 @@ def make_frame(runs_dir, run="20260716T000000_x", layer=7):
 def test_list_printers_envelope(tmp_path):
     r = client(tmp_path).get("/api/printers")
     assert r.status_code == 200
+    # detection_available rides on every summary so the client can tell
+    # "no capture printer yet" from "this build has no detector" (see
+    # _with_detection); this client is built with detection=None.
     assert r.json() == {"printers": [{"serial": "S1", "gcode_state": "IDLE",
                                       "connection": "ok",
-                                      "report_age_s": 1.0}]}
+                                      "report_age_s": 1.0,
+                                      "bed_type": "Textured PEI Plate",
+                                      "nozzle": "0.4",
+                                      "detection_available": False}]}
 
 
 def test_list_printers_empty(tmp_path):
@@ -310,6 +339,54 @@ def test_edit_printer_missing_host_422(tmp_path):
     r = client(tmp_path, FakeRegistry([FakeService("S1")])).put(
         "/api/printers/S1", json={})
     assert r.status_code == 422  # pydantic rejects it before the route runs
+
+
+def test_edit_printer_accepts_and_persists_bed_type(tmp_path):
+    # This is the whole point of the route change: the field that fixes the
+    # measured 35 C-vs-65 C defect must actually be savable from the Edit
+    # form, not just from a hand-edited printers.json.
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).put("/api/printers/S1", json={
+        "host": "1.2.3.4", "bed_type": "Cool Plate"})
+    assert r.status_code == 200
+    assert r.json()["bed_type"] == "Cool Plate"
+    # Persists, not just echoed back: a fresh list reflects it too, which is
+    # what lets EditPrinterForm show the ACTUAL current plate on reopen
+    # instead of always showing the default and silently overwriting a
+    # deliberately-chosen plate on the next unrelated save.
+    r2 = client(tmp_path, reg).get("/api/printers")
+    assert r2.json()["printers"][0]["bed_type"] == "Cool Plate"
+
+
+def test_edit_printer_omitted_bed_type_keeps_the_current_one(tmp_path):
+    reg = FakeRegistry([FakeService("S1")], bed_type="High Temp Plate")
+    r = client(tmp_path, reg).put("/api/printers/S1", json={"host": "1.2.3.4"})
+    assert r.status_code == 200
+    assert r.json()["bed_type"] == "High Temp Plate"
+
+
+def test_edit_printer_accepts_and_persists_nozzle(tmp_path):
+    # Mirrors test_edit_printer_accepts_and_persists_bed_type: nozzle must
+    # be savable from the Edit form, not just from a hand-edited
+    # printers.json.
+    reg = FakeRegistry([FakeService("S1")])
+    r = client(tmp_path, reg).put("/api/printers/S1", json={
+        "host": "1.2.3.4", "nozzle": "0.6"})
+    assert r.status_code == 200
+    assert r.json()["nozzle"] == "0.6"
+    # Persists, not just echoed back: a fresh list reflects it too, which is
+    # what lets EditPrinterForm show the ACTUAL current nozzle on reopen
+    # instead of always showing the default and silently overwriting a
+    # deliberately-chosen diameter on the next unrelated save.
+    r2 = client(tmp_path, reg).get("/api/printers")
+    assert r2.json()["printers"][0]["nozzle"] == "0.6"
+
+
+def test_edit_printer_omitted_nozzle_keeps_the_current_one(tmp_path):
+    reg = FakeRegistry([FakeService("S1")], nozzle="0.8")
+    r = client(tmp_path, reg).put("/api/printers/S1", json={"host": "1.2.3.4"})
+    assert r.status_code == 200
+    assert r.json()["nozzle"] == "0.8"
 
 
 def test_edit_printer_blank_access_code_defaults_to_keep(tmp_path):
@@ -1077,3 +1154,240 @@ def test_start_404s_on_unknown_printer_and_empty_queue(tmp_path, monkeypatch):
     c, _ = queue_client(tmp_path, q, registry=FakeRegistry([StartableService()]))
     assert c.post("/api/printers/NOPE/queue/J1/start").status_code == 404
     assert c.post("/api/printers/S1/queue/J1/start").status_code == 404
+
+
+# ---------- slice routes ----------
+
+class FakeSlicer:
+    """Stands in for SliceCoordinator at the route boundary."""
+
+    def __init__(self):
+        self.submitted = []
+        self.jobs = []
+        self.raise_on_submit = None
+
+    def options(self, serial):
+        return {"model_id": "N2S", "nozzle": "0.4",
+                "presets": [{"id": "standard", "label": "Standard 0.20 mm"}],
+                "filaments": [{"material": "PLA",
+                               "profile": "Generic PLA @BBL A1"}],
+                "detected_filament": "PLA"}
+
+    def submit(self, serial, filename, data, tier, material, supports):
+        if self.raise_on_submit:
+            raise self.raise_on_submit
+        self.submitted.append((serial, filename, data, tier, material,
+                               supports))
+        return "job-1"
+
+    def list(self, serial=None):
+        return self.jobs
+
+    def cancel(self, job_id):
+        return job_id == "job-1"
+
+
+def test_slice_routes_404_when_no_slicer_is_installed():
+    # "None means inert", same as queue=None / detection=None. The server must
+    # still boot and monitor on a machine with no slicer. All FOUR routes,
+    # not just the two GETs -- a regression that inerts only half the
+    # surface would otherwise go unnoticed.
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=None))
+    assert client.get("/api/printers/AAA/slice/options").status_code == 404
+    assert client.get("/api/slice/jobs").status_code == 404
+    res = client.post(
+        "/api/printers/AAA/slice",
+        files={"file": ("part.stl", b"solid", "application/octet-stream")},
+        data={"preset": "standard", "material": "PLA", "supports": "false"})
+    assert res.status_code == 404
+    assert client.delete("/api/slice/jobs/anything").status_code == 404
+
+
+def test_slice_options_returns_presets_and_the_detected_filament():
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=FakeSlicer()))
+    body = client.get("/api/printers/AAA/slice/options").json()
+    assert body["detected_filament"] == "PLA"
+    assert body["presets"][0]["id"] == "standard"
+
+
+def test_posting_a_model_starts_a_job():
+    slicer = FakeSlicer()
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=slicer))
+    res = client.post(
+        "/api/printers/AAA/slice",
+        files={"file": ("part.stl", b"solid", "application/octet-stream")},
+        data={"preset": "standard", "material": "PLA", "supports": "true"})
+    assert res.status_code == 202
+    assert res.json()["job_id"] == "job-1"
+    serial, filename, data, tier, material, supports = slicer.submitted[0]
+    assert (serial, filename, data) == ("AAA", "part.stl", b"solid")
+    assert (tier, material, supports) == ("standard", "PLA", True)
+
+
+def test_posting_an_unsupported_extension_is_a_400():
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=FakeSlicer()))
+    res = client.post(
+        "/api/printers/AAA/slice",
+        files={"file": ("notes.txt", b"hello", "text/plain")},
+        data={"preset": "standard", "material": "PLA", "supports": "false"})
+    assert res.status_code == 400
+
+
+def test_posting_an_empty_file_is_a_400():
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=FakeSlicer()))
+    res = client.post(
+        "/api/printers/AAA/slice",
+        files={"file": ("part.stl", b"", "application/octet-stream")},
+        data={"preset": "standard", "material": "PLA", "supports": "false"})
+    assert res.status_code == 400
+
+
+def test_an_unresolvable_preset_is_a_400_not_a_500():
+    slicer = FakeSlicer()
+    slicer.raise_on_submit = ValueError("no 'standard' preset")
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=slicer))
+    res = client.post(
+        "/api/printers/AAA/slice",
+        files={"file": ("part.stl", b"solid", "application/octet-stream")},
+        data={"preset": "standard", "material": "PLA", "supports": "false"})
+    assert res.status_code == 400
+    assert "preset" in res.json()["detail"]
+
+
+def test_an_unknown_printer_is_a_404():
+    slicer = FakeSlicer()
+    slicer.raise_on_submit = KeyError("ZZZ")
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=slicer))
+    res = client.post(
+        "/api/printers/ZZZ/slice",
+        files={"file": ("part.stl", b"solid", "application/octet-stream")},
+        data={"preset": "standard", "material": "PLA", "supports": "false"})
+    assert res.status_code == 404
+
+
+def test_cancelling_an_unknown_job_is_a_404():
+    client = TestClient(create_app(FakeRegistry(), pathlib.Path("."),
+                                   slicer=FakeSlicer()))
+    assert client.delete("/api/slice/jobs/nope").status_code == 404
+    assert client.delete("/api/slice/jobs/job-1").status_code == 204
+
+
+def test_lifespan_does_not_leak_a_component_if_a_later_start_raises():
+    # Two lifecycle components now share one lifespan. If the SECOND start()
+    # raises, the app fails to boot -- but the FIRST component (detection)
+    # must still be stopped. Before the fix, both starts sat outside the
+    # try/finally, so a raise here skipped the finally entirely and left
+    # detection running forever.
+    events = []
+
+    class LifecycleDetection(FakeDetection):
+        def start(self): events.append("detection-start")
+        def stop(self): events.append("detection-stop")
+
+    class BoomSlicer(FakeSlicer):
+        def start(self): raise RuntimeError("boom")
+
+    det = LifecycleDetection()
+    app = create_app(FakeRegistry(), pathlib.Path("."), detection=det,
+                     slicer=BoomSlicer())
+    with pytest.raises(RuntimeError, match="boom"):
+        with TestClient(app):
+            pass
+    assert events == ["detection-start", "detection-stop"]
+
+
+# --- detection availability ------------------------------------------------
+# BUG reported 2026-07-23 from the packaged desktop app: the Detection page said
+# "Mark <printer> as the capture printer on the Overview page", but doing so
+# changed nothing. The desktop launcher passes detection=None (torch is
+# deliberately out of the bundle), and _with_detection then attached NO
+# detection key at all -- so the client could not tell "no capture printer yet"
+# from "this build has no detector", and sent the user on an impossible errand.
+
+def test_summaries_flag_detection_as_unavailable_when_it_is_disabled(tmp_path):
+    c, _ = det_client(tmp_path, None)
+    p = c.get("/api/printers").json()["printers"][0]
+    assert p["detection_available"] is False
+    # and no detection object is invented for a server that has no detector
+    assert p.get("detection") is None
+
+
+def test_summaries_flag_detection_as_available_when_it_is_wired(tmp_path):
+    c, _ = det_client(tmp_path, FakeDetection())
+    p = c.get("/api/printers").json()["printers"][0]
+    assert p["detection_available"] is True
+
+
+# --- shared-password auth --------------------------------------------------
+# Only engaged when the server is bound beyond loopback (see __main__'s
+# fail-closed rule). auth=None -- the desktop app and dev path -- must leave
+# every route open exactly as before.
+
+from server.auth import Auth
+
+
+def auth_client(tmp_path, password="hunter2"):
+    from server.main import create_app
+    a = Auth(password)
+    return TestClient(create_app(DetRegistry([FakeService("S1")]), tmp_path,
+                                 auth=a)), a
+
+
+def test_auth_none_leaves_every_route_open(tmp_path):
+    c, _ = det_client(tmp_path, None)
+    assert c.get("/api/printers").status_code == 200
+
+
+def test_api_requires_a_session_when_auth_is_on(tmp_path):
+    c, _ = auth_client(tmp_path)
+    assert c.get("/api/printers").status_code == 401
+
+
+def test_login_with_the_right_password_opens_the_api(tmp_path):
+    c, _ = auth_client(tmp_path)
+    assert c.post("/api/login", json={"password": "hunter2"}).status_code == 200
+    # TestClient keeps the cookie, so the next call rides the session
+    assert c.get("/api/printers").status_code == 200
+
+
+def test_login_with_a_wrong_password_is_401_and_opens_nothing(tmp_path):
+    c, _ = auth_client(tmp_path)
+    assert c.post("/api/login", json={"password": "nope"}).status_code == 401
+    assert c.get("/api/printers").status_code == 401
+
+
+def test_the_login_route_itself_is_reachable_without_a_session(tmp_path):
+    c, _ = auth_client(tmp_path)
+    # 401 for a bad password, NOT 401 for "no session" -- otherwise nobody
+    # could ever log in.
+    assert c.post("/api/login", json={"password": "nope"}).status_code == 401
+
+
+def test_logout_ends_the_session(tmp_path):
+    c, _ = auth_client(tmp_path)
+    c.post("/api/login", json={"password": "hunter2"})
+    assert c.post("/api/logout").status_code == 200
+    assert c.get("/api/printers").status_code == 401
+
+
+def test_the_websocket_is_protected_too(tmp_path):
+    # The whole reason auth is a cookie and not a bearer token: /ws must be
+    # covered by the same mechanism.
+    c, _ = auth_client(tmp_path)
+    with pytest.raises(Exception):
+        with c.websocket_connect("/ws"):
+            pass
+
+
+def test_the_websocket_opens_once_logged_in(tmp_path):
+    c, _ = auth_client(tmp_path)
+    c.post("/api/login", json={"password": "hunter2"})
+    with c.websocket_connect("/ws") as ws:
+        assert "printers" in ws.receive_json()

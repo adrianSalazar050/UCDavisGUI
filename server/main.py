@@ -7,23 +7,25 @@ import logging
 import os
 import pathlib
 import posixpath
+import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import (FastAPI, File, HTTPException, UploadFile, WebSocket,
-                     WebSocketDisconnect)
+from fastapi import (FastAPI, File, Form, HTTPException, Request, UploadFile,
+                     WebSocket, WebSocketDisconnect)
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import robot_link          # shared with the robot computer; see its header
 
-from . import runs, sdcard, threemf
+from . import runs, sdcard, slicejobs, threemf
 from .detection import CLASSES  # the 6 valid armed classes
 from .printer import PrinterBusy
 from .registry import DuplicateSerial
 from .sdcard import SdError
+from .ledger import END_STATES, PIECE_STATUSES
 from .store import CAMERA_SOURCES, model_mismatch
 
 # How long to wait for a started print to show up in gcode_state before
@@ -48,6 +50,46 @@ def verify_start(svc, *, timeout: float = START_VERIFY_S,
             return True
         sleep(poll)
     return False
+
+
+def _maybe(registry, method: str, serial: str):
+    """Call an optional registry accessor, or None if this registry (or a
+    test fake) does not have it. printer_bed_type/printer_nozzle exist on
+    PrinterRegistry but not on every fake."""
+    fn = getattr(registry, method, None)
+    if fn is None:
+        return None
+    try:
+        return fn(serial)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _maybe_spool(ledger, serial: str):
+    """The loaded spool's id for a printer, or None. Never let a spool lookup
+    fail a start -- a ledger problem must not cost a print."""
+    if ledger is None:
+        return None
+    try:
+        loaded = ledger.loaded_spool(serial)
+        return loaded["id"] if loaded else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _close_run_quietly(ledger, run_id, end_state: str, serial: str,
+                       detail: str) -> None:
+    """Close a ledger run without ever letting a ledger problem surface as a
+    print-path failure."""
+    if ledger is None or run_id is None:
+        return
+    try:
+        ledger.close_run(run_id, end_state=end_state)
+        ledger.add_event(printer_serial=serial, run_id=run_id,
+                         kind="start_unconfirmed", source="server",
+                         payload={"detail": detail})
+    except Exception as e:  # noqa: BLE001
+        log.error("could not close ledger run %s: %s", run_id, e)
 
 log = logging.getLogger("server.main")
 
@@ -89,6 +131,20 @@ class EditPrinter(BaseModel):
     # None = not submitted, keep the stored model. "" = the user picked
     # Unknown. Distinct, so an old client omitting the field can't wipe it.
     model_id: str | None = None
+    # None = not submitted, keep the stored plate. Unlike model_id there is
+    # no "" Unknown sentinel here -- every printer HAS a plate installed, so
+    # registry.update() degrades any value outside store.BED_TYPES to
+    # DEFAULT_BED_TYPE rather than accepting it verbatim (see
+    # PrinterConfig.bed_type for why getting this wrong is a real, measured
+    # print failure: 35 C vs the 65 C this lab's Textured PEI Plate needs).
+    bed_type: str | None = None
+    # None = not submitted, keep the stored diameter. Mirrors bed_type
+    # exactly: no "" Unknown sentinel, every printer HAS a nozzle installed,
+    # so registry.update() degrades any value outside store.NOZZLES to
+    # DEFAULT_NOZZLE rather than accepting it verbatim (see
+    # PrinterConfig.nozzle -- a wrong diameter selects the wrong machine
+    # profile when slicing).
+    nozzle: str | None = None
 
 
 class DetectionUpdate(BaseModel):
@@ -105,6 +161,103 @@ class DetectionUpdate(BaseModel):
 
 class ArmBody(BaseModel):
     armed: bool
+
+
+class PatchRun(BaseModel):
+    """Operator corrections to a recorded run.
+
+    end_state is editable because an operator stopping a print at the
+    printer's own screen is indistinguishable from a genuine failure -- both
+    report FAILED (master.md section 3.1) -- so the recorder writes the honest
+    default and a human fixes it here.
+    """
+
+    end_state: str | None = None
+    actual_grams: float | None = None
+    notes: str | None = None
+
+
+class PatchPiece(BaseModel):
+    status: str | None = None
+    inspected_by: str | None = None
+    notes: str | None = None
+
+
+class BulkPieces(BaseModel):
+    status: str
+    inspected_by: str | None = None
+    overrides: list[dict] = []
+
+
+class BadgeRef(BaseModel):
+    code: str
+    note: str | None = None
+
+
+class NewPart(BaseModel):
+    part_number: str
+    revision: str = "A"
+    name: str = ""
+    notes: str | None = None
+
+
+class EditPart(BaseModel):
+    part_number: str | None = None
+    revision: str | None = None
+    name: str | None = None
+    notes: str | None = None
+
+
+class RecipeBody(BaseModel):
+    name: str = ""
+    preset_tier: str | None = None
+    filament_material: str | None = None
+    nozzle: str | None = None
+    bed_type: str | None = None
+    supports: bool | None = None
+    copies_per_plate: int | None = None
+    expected_seconds: float | None = None
+    expected_grams: float | None = None
+    is_default: bool | None = None
+
+
+class SliceFromPart(BaseModel):
+    part_id: str
+    recipe_id: str
+
+
+class NewSpool(BaseModel):
+    spool_code: str
+    material: str = ""
+    colour: str | None = None
+    brand: str | None = None
+    filament_profile: str | None = None
+    initial_grams: float | None = None
+    purchase_cost: float | None = None
+    currency: str | None = None
+    supplier: str | None = None
+    purchased_at: str | None = None
+    status: str | None = None
+    ams_slot: int | None = None
+
+
+class EditSpool(BaseModel):
+    material: str | None = None
+    colour: str | None = None
+    brand: str | None = None
+    filament_profile: str | None = None
+    initial_grams: float | None = None
+    purchase_cost: float | None = None
+    currency: str | None = None
+    supplier: str | None = None
+    purchased_at: str | None = None
+    status: str | None = None
+    ams_slot: int | None = None
+    spool_code: str | None = None
+
+
+class LoadSpool(BaseModel):
+    spool_id: str | None = None
 
 
 class AddQueueJob(BaseModel):
@@ -137,39 +290,161 @@ def _comparable(printers: list[dict]) -> list[dict]:
 
 def _with_detection(printers: list[dict], detection) -> list[dict]:
     """Attach a `detection` object to each summary (None unless it's the
-    capture printer). Detection state lives in detection.py, not the service."""
-    if detection is None:
-        return printers
+    capture printer), plus `detection_available`: whether this SERVER has a
+    detector wired at all. Detection state lives in detection.py, not the
+    service.
+
+    The flag exists because `detection=None` is a real deployment, not just a
+    test seam: the desktop build passes it (torch/ultralytics are deliberately
+    out of that bundle). Without the flag the client cannot tell "you haven't
+    marked a capture printer yet" from "this build has no detector" -- both
+    just look like a missing detection object. Reported 2026-07-23 from the
+    packaged app: the Detection page told the user to mark a capture printer on
+    the Overview page, they did, and nothing changed, because marking one
+    cannot conjure a detector that was never bundled.
+    """
+    available = detection is not None
     for p in printers:
-        p["detection"] = detection.snapshot(p.get("serial"))
+        p["detection_available"] = available
+        if available:
+            p["detection"] = detection.snapshot(p.get("serial"))
     return printers
+
+
+def _with_bed_type(printers: list[dict], registry) -> list[dict]:
+    """Attach each printer's CONFIGURED build plate to its summary.
+
+    Deliberately not part of svc.summary()/PrinterService/MockPrinter, the
+    way model_id is: nothing about the live MQTT connection needs bed_type
+    (see PrinterRegistry.printer_bed_type), so growing every service
+    implementation another constructor argument for it would be pure churn.
+    Reading it straight from the registry here, at request time, is the same
+    shape as _with_detection above.
+
+    This has to run everywhere summaries() does (GET /api/printers and both
+    /ws send sites), not just the PUT response: EditPrinterForm prefills its
+    form state from the printer summary it already has, not from the PUT
+    response of a save that hasn't happened yet. Without this, the form
+    would always show DEFAULT_BED_TYPE on open and silently overwrite a
+    deliberately-chosen plate the next time someone saves an unrelated field
+    (name, capture, ...) -- exactly the class of bug access_code's own
+    keep-blank-means-keep-current convention exists to avoid.
+    """
+    for p in printers:
+        p["bed_type"] = registry.printer_bed_type(p.get("serial"))
+    return printers
+
+
+def _with_nozzle(printers: list[dict], registry) -> list[dict]:
+    """Attach each printer's CONFIGURED nozzle diameter to its summary.
+
+    Mirrors _with_bed_type exactly, for the same reason: nothing about the
+    live MQTT connection needs nozzle (see PrinterRegistry.printer_nozzle),
+    and this has to run everywhere summaries() does (GET /api/printers and
+    both /ws send sites), not just the PUT response, so EditPrinterForm can
+    prefill from the summary it already has instead of always showing
+    DEFAULT_NOZZLE and silently overwriting a deliberately-chosen diameter
+    on the next unrelated save.
+    """
+    for p in printers:
+        p["nozzle"] = registry.printer_nozzle(p.get("serial"))
+    return printers
+
+
+class LoginBody(BaseModel):
+    password: str = ""
 
 
 def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
-               detection=None, queue=None) -> FastAPI:
+               detection=None, queue=None, slicer=None, auth=None,
+               ledger=None, recorder=None, partstore=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake). `queue` is
     anything with add(serial, job), remove(serial, id) -> bool,
     reorder(serial, ids), get(serial) -> list, totals(serial) -> dict
     (PrintQueue, or a test fake); None disables the queue routes entirely,
-    same "None means inert" convention as `detection`."""
+    same "None means inert" convention as `detection`. `slicer` is a
+    SliceCoordinator (or a test fake); None disables the slice routes
+    entirely, same "None means inert" convention.
+
+    `ledger` is a server.ledger.Ledger (or a test fake); None disables every
+    traceability route, the same "None means inert" convention as `queue`,
+    `detection`, and `slicer`. `partstore` stores model bytes; None disables
+    model up/download (part metadata still works).
+    """
 
     @asynccontextmanager
     async def lifespan(_app):
-        if detection is not None:
-            detection.start()
+        # Track what actually STARTED, and stop only that, in reverse order.
+        # With two lifecycle components, a raise from the second start() must
+        # not skip the finally entirely and leave the first one (detection)
+        # running while the app fails to boot -- that was possible when both
+        # start() calls sat outside the try.
+        started = []
         try:
+            if detection is not None:
+                detection.start()
+                started.append(detection)
+            if slicer is not None:
+                slicer.start()
+                started.append(slicer)
+            if recorder is not None:
+                recorder.start()
+                started.append(recorder)
             yield
         finally:
-            if detection is not None:
-                detection.stop()
+            for component in reversed(started):
+                component.stop()
 
     app = FastAPI(title="bambu-monitor", lifespan=lifespan)
 
+    # --- authentication ---------------------------------------------------
+    # auth=None means inert (same convention as queue/detection/slicer): the
+    # desktop app and the dev workflow bind loopback, where there is nowhere to
+    # type a password and nothing beyond this machine can reach us anyway.
+    # __main__ refuses to bind a non-loopback host WITHOUT an auth, so "served
+    # to the LAN" and "password required" cannot come apart.
+    def _needs_session(path: str) -> bool:
+        # Only the API. The static frontend must stay reachable or the login
+        # page could never load, and /api/login must stay open or nobody could
+        # ever obtain a session.
+        return path.startswith("/api/") and path != "/api/login"
+
+    @app.middleware("http")
+    async def _require_session(request, call_next):
+        if auth is not None and _needs_session(request.url.path):
+            if not auth.valid(request.cookies.get(auth.COOKIE)):
+                return JSONResponse({"detail": "authentication required"},
+                                    status_code=401)
+        return await call_next(request)
+
+    @app.post("/api/login")
+    def login(body: LoginBody, response: Response):
+        if auth is None:
+            return {"ok": True}          # nothing to log into
+        token = auth.login(body.password)
+        if token is None:
+            raise HTTPException(401, "wrong password")
+        # HttpOnly so page scripts can't read it; SameSite=Lax is enough for a
+        # same-origin dashboard. Not Secure -- there is no TLS on the LAN, a
+        # limitation recorded in the design spec.
+        response.set_cookie(auth.COOKIE, token, httponly=True,
+                            samesite="lax", path="/")
+        return {"ok": True}
+
+    @app.post("/api/logout")
+    def logout(request: Request, response: Response):
+        if auth is not None:
+            auth.logout(request.cookies.get(auth.COOKIE))
+            response.delete_cookie(auth.COOKIE, path="/")
+        return {"ok": True}
+
     @app.get("/api/printers")
     def list_printers():
-        return {"printers": _with_detection(registry.summaries(), detection)}
+        printers = _with_nozzle(_with_bed_type(registry.summaries(), registry),
+                                registry)
+        return {"printers": _with_detection(printers, detection)}
 
     @app.post("/api/printers", status_code=201)
     def add_printer(body: AddPrinter):
@@ -189,11 +464,19 @@ def create_app(registry, runs_dir: pathlib.Path,
             result = registry.update(serial, host=body.host,
                                      access_code=body.access_code,
                                      name=body.name, capture=body.capture,
-                                     model_id=body.model_id)
+                                     model_id=body.model_id,
+                                     bed_type=body.bed_type,
+                                     nozzle=body.nozzle)
         except ValueError as e:
             raise HTTPException(400, str(e))
         if result is None:
             raise HTTPException(404, "unknown printer")
+        # svc.summary() doesn't carry bed_type/nozzle (see _with_bed_type/
+        # _with_nozzle) -- attach them here too so the response the frontend
+        # awaits after a save reflects reality immediately, not just the
+        # next /ws tick.
+        result["bed_type"] = registry.printer_bed_type(serial)
+        result["nozzle"] = registry.printer_nozzle(serial)
         return result
 
     @app.delete("/api/printers/{serial}", status_code=204)
@@ -290,6 +573,11 @@ def create_app(registry, runs_dir: pathlib.Path,
         if queue is None:
             raise HTTPException(404, "queue not enabled on this server")
 
+    def _require_ledger():
+        if ledger is None:
+            raise HTTPException(404, "traceability is not enabled on this "
+                                     "server")
+
     @app.get("/api/printers/{serial}/queue")
     def get_queue(serial: str):
         _require_queue()
@@ -385,11 +673,42 @@ def create_app(registry, runs_dir: pathlib.Path,
             raise HTTPException(
                 409, f"{job['name']} is {mismatch}. Re-slice it for this "
                      "printer, or remove it from the queue.")
+        # Open the ledger row BEFORE publishing. Two reasons, both load-bearing:
+        # RunRecorder adopts an already-open row instead of creating one, so
+        # this is what stops its 1 s tick racing us into a duplicate
+        # unattributed run; and a start the printer ignores still leaves a
+        # record, which nothing in this system used to keep.
+        run_id = None
+        if ledger is not None:
+            try:
+                run_id = ledger.open_run(
+                    printer_serial=serial,
+                    printer_name=(svc.summary().get("name") or ""),
+                    source="queue",
+                    queue_job_id=job.get("id"),
+                    sd_path=job.get("sd_path"),
+                    subtask_name=job.get("name"),
+                    planned_seconds=job.get("seconds"),
+                    planned_grams=job.get("grams"),
+                    bed_type=_maybe(registry, "printer_bed_type", serial),
+                    nozzle=_maybe(registry, "printer_nozzle", serial),
+                    part_id=job.get("part_id"),
+                    recipe_id=job.get("recipe_id"),
+                    spool_id=_maybe_spool(ledger, serial))
+            except Exception as e:  # noqa: BLE001
+                # A ledger problem must never cost a print -- master.md
+                # section 11's boot invariant, one layer up.
+                log.error("could not open a ledger run for %s: %s", serial, e)
+
         try:
             svc.start_print(job["sd_path"], plate=job.get("plate") or 1)
         except PrinterBusy as e:
+            _close_run_quietly(ledger, run_id, "START_UNCONFIRMED",
+                               serial, str(e))
             raise HTTPException(409, str(e))
         except SdError as e:
+            _close_run_quietly(ledger, run_id, "START_UNCONFIRMED",
+                               serial, str(e))
             raise HTTPException(502, str(e))
 
         # Read the module globals here, not as verify_start's defaults: a
@@ -397,6 +716,9 @@ def create_app(registry, runs_dir: pathlib.Path,
         # burn the full timeout, and it would be un-tunable at runtime).
         started = verify_start(svc, timeout=START_VERIFY_S, poll=START_POLL_S)
         if not started:
+            _close_run_quietly(
+                ledger, run_id, "START_UNCONFIRMED", serial,
+                "the printer never reported a print starting")
             return {"started": False, "job": job,
                     "detail": "the printer did not report a print starting; "
                               "the job is still queued",
@@ -405,6 +727,466 @@ def create_app(registry, runs_dir: pathlib.Path,
         queue.remove(serial, job_id)
         return {"started": True, "job": job,
                 "jobs": queue.get(serial), "totals": queue.totals(serial)}
+
+    # --- traceability: runs, pieces, badges -------------------------------
+
+    def _run_payload(run_id: str) -> dict:
+        run = ledger.get_run(run_id)
+        if run is None:
+            raise HTTPException(404, "unknown run")
+        pieces = []
+        for piece in ledger.pieces_for(run_id):
+            piece["badges"] = ledger.piece_badges(piece["id"])
+            pieces.append(piece)
+        return {"run": run, "events": ledger.events_for(run_id),
+                "pieces": pieces, "badges": ledger.run_badges(run_id)}
+
+    ZERO_COUNTS = {"total": 0, "good": 0, "scrap": 0, "rework": 0,
+                   "pending": 0}
+
+    @app.get("/api/runs")
+    def list_runs(serial: str | None = None, limit: int = 50,
+                  offset: int = 0):
+        _require_ledger()
+        limit = max(1, min(int(limit), 500))
+        runs = ledger.list_runs(serial=serial, limit=limit,
+                                offset=max(0, int(offset)))
+        # One grouped query for the whole page, not one per row.
+        counts = ledger.piece_counts([r["id"] for r in runs])
+        for run in runs:
+            run["piece_counts"] = counts.get(run["id"], dict(ZERO_COUNTS))
+        return {"runs": runs}
+
+    @app.get("/api/runs/{run_id}")
+    def get_run(run_id: str):
+        _require_ledger()
+        return _run_payload(run_id)
+
+    @app.get("/api/badges")
+    def list_badges():
+        _require_ledger()
+        return {"badges": ledger.badges()}
+
+    def _badge_id(code: str) -> str:
+        for badge in ledger.badges():
+            if badge["code"] == code:
+                return badge["id"]
+        raise HTTPException(400, f"unknown badge {code!r}")
+
+    @app.patch("/api/runs/{run_id}")
+    def patch_run(run_id: str, body: PatchRun):
+        """Operator corrections, including attributing a run recorded as
+        unattributed. Without this every screen-started print would be
+        permanent dead weight in the record."""
+        _require_ledger()
+        run = ledger.get_run(run_id)
+        if run is None:
+            raise HTTPException(404, "unknown run")
+        fields = {}
+        if body.end_state is not None:
+            if body.end_state not in END_STATES:
+                raise HTTPException(
+                    400, f"end_state must be one of {', '.join(END_STATES)}")
+            fields["end_state"] = body.end_state
+        if body.actual_grams is not None:
+            # An operator-entered figure is a measurement, not an estimate --
+            # the basis column has to say so, or it reads as our arithmetic.
+            fields["actual_grams"] = float(body.actual_grams)
+            fields["actual_grams_basis"] = "manual"
+        if fields:
+            ledger.update_run(run_id, **fields)
+        if body.notes:
+            ledger.add_event(printer_serial=run["printer_serial"],
+                             run_id=run_id, kind="operator_note",
+                             source="operator", payload={"note": body.notes})
+        return _run_payload(run_id)
+
+    @app.patch("/api/pieces/{piece_id}")
+    def patch_piece(piece_id: str, body: PatchPiece):
+        _require_ledger()
+        if body.status is not None and body.status not in PIECE_STATUSES:
+            raise HTTPException(
+                400, f"status must be one of {', '.join(PIECE_STATUSES)}")
+        ok = ledger.set_piece(piece_id, status=body.status,
+                              inspected_by=body.inspected_by,
+                              notes=body.notes)
+        if not ok:
+            raise HTTPException(404, "unknown piece")
+        return {"ok": True}
+
+    @app.post("/api/runs/{run_id}/pieces/bulk")
+    def bulk_pieces(run_id: str, body: BulkPieces):
+        """One action for a whole plate. See the ledger's set_pieces_bulk for
+        why this is not a convenience."""
+        _require_ledger()
+        if ledger.get_run(run_id) is None:
+            raise HTTPException(404, "unknown run")
+        try:
+            # set_pieces_bulk validates status AND every override index up
+            # front, raising ValueError -- so only ValueError is a client
+            # error here. A KeyError/TypeError would be a real internal bug and
+            # must NOT be masked as a 400.
+            changed = ledger.set_pieces_bulk(
+                run_id, body.status, inspected_by=body.inspected_by,
+                overrides=body.overrides)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"changed": changed, **_run_payload(run_id)}
+
+    @app.post("/api/runs/{run_id}/badges")
+    def add_run_badge(run_id: str, body: BadgeRef):
+        _require_ledger()
+        if ledger.get_run(run_id) is None:
+            raise HTTPException(404, "unknown run")
+        ledger.add_run_badge(run_id, _badge_id(body.code),
+                             applied_by="operator", note=body.note)
+        return {"badges": ledger.run_badges(run_id)}
+
+    @app.delete("/api/runs/{run_id}/badges")
+    def remove_run_badge(run_id: str, body: BadgeRef):
+        _require_ledger()
+        ledger.remove_run_badge(run_id, _badge_id(body.code))
+        return {"badges": ledger.run_badges(run_id)}
+
+    @app.post("/api/pieces/{piece_id}/badges")
+    def add_piece_badge(piece_id: str, body: BadgeRef):
+        _require_ledger()
+        # Symmetric with add_run_badge's run check: without this a badge on a
+        # typo'd piece_id would INSERT against a ghost piece and return 200,
+        # masking the client bug instead of the clean 404 it gets elsewhere.
+        if ledger.get_piece(piece_id) is None:
+            raise HTTPException(404, "unknown piece")
+        ledger.add_piece_badge(piece_id, _badge_id(body.code),
+                               applied_by="operator", note=body.note)
+        return {"badges": ledger.piece_badges(piece_id)}
+
+    @app.delete("/api/pieces/{piece_id}/badges")
+    def remove_piece_badge(piece_id: str, body: BadgeRef):
+        _require_ledger()
+        ledger.remove_piece_badge(piece_id, _badge_id(body.code))
+        return {"badges": ledger.piece_badges(piece_id)}
+
+    # --- traceability: parts catalogue + recipes --------------------------
+
+    def _part_payload(part_id: str) -> dict:
+        part = ledger.get_part(part_id)
+        if part is None:
+            raise HTTPException(404, "unknown part")
+        recipes = ledger.recipes_for(part_id)
+        default = ledger.default_recipe(part_id)
+        return {"part": part, "recipes": recipes,
+                "default_recipe_id": default["id"] if default else None}
+
+    @app.get("/api/parts")
+    def list_parts():
+        _require_ledger()
+        parts = ledger.list_parts()
+        for p in parts:
+            d = ledger.default_recipe(p["id"])
+            p["default_recipe_id"] = d["id"] if d else None
+        return {"parts": parts}
+
+    @app.post("/api/parts", status_code=201)
+    def create_part(body: NewPart):
+        _require_ledger()
+        try:
+            pid = ledger.create_part(part_number=body.part_number,
+                                     revision=body.revision, name=body.name,
+                                     notes=body.notes)
+        except sqlite3.IntegrityError:
+            raise HTTPException(
+                409, f"{body.part_number} revision {body.revision} already exists")
+        return _part_payload(pid)
+
+    @app.get("/api/parts/{part_id}")
+    def get_part(part_id: str):
+        _require_ledger()
+        return _part_payload(part_id)
+
+    @app.put("/api/parts/{part_id}")
+    def edit_part(part_id: str, body: EditPart):
+        _require_ledger()
+        if ledger.get_part(part_id) is None:
+            raise HTTPException(404, "unknown part")
+        fields = {k: v for k, v in body.model_dump().items() if v is not None}
+        if fields:
+            try:
+                ledger.update_part(part_id, **fields)
+            except sqlite3.IntegrityError:
+                raise HTTPException(
+                    409, "that part_number and revision already exist")
+        return _part_payload(part_id)
+
+    @app.delete("/api/parts/{part_id}", status_code=204)
+    def archive_part(part_id: str):
+        _require_ledger()
+        ledger.archive_part(part_id)
+        if partstore is not None:
+            partstore.delete(part_id)
+        return Response(status_code=204)
+
+    @app.post("/api/parts/{part_id}/model", status_code=201)
+    def upload_part_model(part_id: str, file: UploadFile = File(...)):
+        # sync def: read a possibly-large model off the wire on the threadpool,
+        # same as the SD-card upload route, so the event loop keeps serving /ws.
+        _require_ledger()
+        if partstore is None:
+            raise HTTPException(404, "model storage is not enabled")
+        if ledger.get_part(part_id) is None:
+            raise HTTPException(404, "unknown part")
+        data = file.file.read()
+        if not data:
+            raise HTTPException(400, "empty file")
+        try:
+            meta = partstore.save(part_id, file.filename, data)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        ledger.update_part(part_id, model_filename=meta["filename"],
+                           model_sha256=meta["sha256"],
+                           model_bytes=meta["bytes"])
+        return _part_payload(part_id)
+
+    @app.get("/api/parts/{part_id}/model")
+    def download_part_model(part_id: str):
+        _require_ledger()
+        part = ledger.get_part(part_id)
+        if part is None or not part.get("model_filename"):
+            raise HTTPException(404, "no model stored for this part")
+        if partstore is None:
+            raise HTTPException(404, "model storage is not enabled")
+        try:
+            data = partstore.open_bytes(part_id, part["model_filename"])
+        except OSError:
+            raise HTTPException(404, "model file missing")
+        return Response(
+            content=data, media_type="application/octet-stream",
+            headers={"Content-Disposition":
+                     f'attachment; filename="{part["model_filename"]}"'})
+
+    @app.post("/api/parts/{part_id}/recipes", status_code=201)
+    def add_part_recipe(part_id: str, body: RecipeBody):
+        _require_ledger()
+        if ledger.get_part(part_id) is None:
+            raise HTTPException(404, "unknown part")
+        fields = {k: v for k, v in body.model_dump().items()
+                  if v is not None and k not in ("name", "is_default")}
+        rid = ledger.add_recipe(part_id, name=body.name, **fields)
+        if body.is_default:
+            # route through set_default_recipe so 'exactly one default' holds
+            ledger.set_default_recipe(part_id, rid)
+        return _part_payload(part_id)
+
+    @app.put("/api/parts/{part_id}/recipes/{recipe_id}")
+    def edit_part_recipe(part_id: str, recipe_id: str, body: RecipeBody):
+        _require_ledger()
+        recipe = ledger.get_recipe(recipe_id)
+        # The recipe must belong to the part named in the URL. Without this a
+        # PUT to /parts/A/recipes/B (B belonging to part B) would default A to
+        # a foreign recipe -- see set_default_recipe.
+        if recipe is None or recipe["part_id"] != part_id:
+            raise HTTPException(404, "unknown recipe for this part")
+        make_default = body.is_default
+        fields = {k: v for k, v in body.model_dump().items()
+                  if v is not None and k not in ("is_default",)}
+        # name="" is the default; only write it if the caller actually sent one
+        if not body.name:
+            fields.pop("name", None)
+        if fields:
+            ledger.update_recipe(recipe_id, **fields)
+        if make_default:
+            ledger.set_default_recipe(part_id, recipe_id)
+        return _part_payload(part_id)
+
+    @app.delete("/api/parts/{part_id}/recipes/{recipe_id}", status_code=204)
+    def archive_part_recipe(part_id: str, recipe_id: str):
+        _require_ledger()
+        recipe = ledger.get_recipe(recipe_id)
+        # Same membership guard as edit: don't let a wrong-part URL archive
+        # someone else's recipe.
+        if recipe is None or recipe["part_id"] != part_id:
+            raise HTTPException(404, "unknown recipe for this part")
+        ledger.archive_recipe(recipe_id)
+        return Response(status_code=204)
+
+    # --- filament inventory: spools + consumption -------------------------
+
+    def _spool_detail(spool_id: str) -> dict:
+        spool = ledger.get_spool(spool_id)
+        if spool is None:
+            raise HTTPException(404, "unknown spool")
+        spool["remaining_grams"] = ledger.remaining_grams(spool_id)
+        consumption = ledger.query(
+            "SELECT * FROM filament_consumption WHERE spool_id = ? "
+            "ORDER BY created_at", (spool_id,))
+        return {"spool": spool, "consumption": consumption}
+
+    @app.get("/api/spools")
+    def list_spools():
+        _require_ledger()
+        return {"spools": ledger.list_spools()}
+
+    @app.post("/api/spools", status_code=201)
+    def create_spool(body: NewSpool):
+        _require_ledger()
+        fields = {k: v for k, v in body.model_dump().items()
+                  if v is not None and k not in ("spool_code", "material")}
+        try:
+            sid = ledger.create_spool(spool_code=body.spool_code,
+                                      material=body.material, **fields)
+        except sqlite3.IntegrityError:
+            raise HTTPException(
+                409, f"spool code {body.spool_code!r} already exists")
+        except ValueError as e:  # unknown / reserved status value
+            raise HTTPException(400, str(e))
+        return _spool_detail(sid)
+
+    @app.get("/api/spools/low")
+    def spools_low(threshold: float = 100.0):
+        _require_ledger()
+        return {"spools": ledger.low_stock(threshold)}
+
+    @app.get("/api/spools/{spool_id}")
+    def get_spool(spool_id: str):
+        _require_ledger()
+        return _spool_detail(spool_id)
+
+    @app.put("/api/spools/{spool_id}")
+    def edit_spool(spool_id: str, body: EditSpool):
+        _require_ledger()
+        if ledger.get_spool(spool_id) is None:
+            raise HTTPException(404, "unknown spool")
+        fields = {k: v for k, v in body.model_dump().items() if v is not None}
+        if fields:
+            try:
+                ledger.update_spool(spool_id, **fields)
+            except sqlite3.IntegrityError:
+                raise HTTPException(409, "that spool code already exists")
+            except ValueError as e:  # unknown / reserved status value
+                raise HTTPException(400, str(e))
+        return _spool_detail(spool_id)
+
+    @app.delete("/api/spools/{spool_id}", status_code=204)
+    def archive_spool(spool_id: str):
+        _require_ledger()
+        ledger.archive_spool(spool_id)
+        return Response(status_code=204)
+
+    @app.get("/api/printers/{serial}/spool")
+    def get_loaded_spool(serial: str):
+        _require_ledger()
+        loaded = ledger.loaded_spool(serial)
+        if loaded is not None:
+            loaded["remaining_grams"] = ledger.remaining_grams(loaded["id"])
+        return {"spool": loaded}
+
+    @app.post("/api/printers/{serial}/spool")
+    def set_loaded_spool(serial: str, body: LoadSpool):
+        """Set (or clear, with spool_id=null) which spool is loaded on a
+        printer. The start route stamps this onto the run so consumption is
+        attributed to the right spool."""
+        _require_ledger()
+        if body.spool_id is None:
+            # unload: clear whatever spool is loaded here. unload_spool is the
+            # clear-half of set_loaded_spool's transaction and the only writer
+            # of printer_serial besides it -- the free-write update_spool can
+            # no longer touch that column (see SPOOL_WRITABLE).
+            ledger.unload_spool(serial)
+            return {"spool": None}
+        if ledger.get_spool(body.spool_id) is None:
+            raise HTTPException(404, "unknown spool")
+        ledger.set_loaded_spool(serial, body.spool_id)
+        return {"spool": ledger.get_spool(body.spool_id)}
+
+    def _require_slicer() -> None:
+        if slicer is None:
+            raise HTTPException(
+                404, "slicing is not available on this server -- Bambu Studio "
+                     "was not found. Set BAMBU_STUDIO_EXE if it is installed "
+                     "elsewhere.")
+
+    @app.get("/api/printers/{serial}/slice/options")
+    def slice_options(serial: str):
+        _require_slicer()
+        # No registry.get() check here, deliberately: an unknown serial
+        # degrades to empty presets/filaments (same "unknown never blocks"
+        # convention as printer_model/printer_nozzle), not a 404 -- the
+        # coordinator itself never raises for an unknown printer.
+        return slicer.options(serial)
+
+    @app.post("/api/printers/{serial}/slice", status_code=202)
+    def start_slice(serial: str, file: UploadFile = File(...),
+                    preset: str = Form(...), material: str = Form(...),
+                    supports: bool = Form(False)):
+        # SYNC def for the same reason as the SD routes: reading a large model
+        # off the wire must not stall the event loop and freeze every
+        # WebSocket. The slice itself runs on the coordinator's own thread.
+        _require_slicer()
+        name = os.path.basename((file.filename or "").replace("\\", "/")).strip()
+        if not name:
+            raise HTTPException(400, "no filename")
+        if not name.lower().endswith(slicejobs.MODEL_EXTS):
+            raise HTTPException(
+                400, f"{name}: not a model file. Upload one of "
+                     f"{', '.join(slicejobs.MODEL_EXTS)}.")
+        data = file.file.read()
+        if not data:
+            raise HTTPException(400, "empty file")
+        try:
+            job_id = slicer.submit(serial, name, data, preset, material,
+                                   bool(supports))
+        except KeyError:
+            raise HTTPException(404, "unknown printer")
+        except ValueError as e:
+            raise HTTPException(400, str(e))  # bad choice, not a server fault
+        return {"job_id": job_id}
+
+    @app.get("/api/slice/jobs")
+    def list_slice_jobs(serial: str | None = None):
+        _require_slicer()
+        return {"jobs": slicer.list(serial)}
+
+    @app.delete("/api/slice/jobs/{job_id}", status_code=204)
+    def cancel_slice_job(job_id: str):
+        _require_slicer()
+        if not slicer.cancel(job_id):
+            raise HTTPException(404, "unknown job")
+        return Response(status_code=204)
+
+    @app.post("/api/printers/{serial}/slice/from-part", status_code=202)
+    def slice_from_part(serial: str, body: SliceFromPart):
+        """Slice a stored part with a stored recipe. The resulting queue job
+        carries part_id/recipe_id, so when it prints the run row is attributed
+        to the part -- no ad-hoc upload, and the record ties back to the
+        catalogue."""
+        _require_slicer()
+        _require_ledger()
+        if partstore is None:
+            raise HTTPException(404, "model storage is not enabled")
+        part = ledger.get_part(body.part_id)
+        if part is None:
+            raise HTTPException(404, "unknown part")
+        if not part.get("model_filename"):
+            raise HTTPException(404, "this part has no stored model to slice")
+        recipe = ledger.get_recipe(body.recipe_id)
+        if recipe is None or recipe["part_id"] != body.part_id:
+            raise HTTPException(404, "unknown recipe for this part")
+        if not recipe.get("preset_tier"):
+            raise HTTPException(400, "this recipe has no quality preset set")
+        try:
+            data = partstore.open_bytes(body.part_id, part["model_filename"])
+        except OSError:
+            raise HTTPException(404, "the part's model file is missing")
+        try:
+            job_id = slicer.submit(
+                serial, part["model_filename"], data,
+                recipe["preset_tier"], recipe.get("filament_material"),
+                bool(recipe.get("supports")),
+                part_id=body.part_id, recipe_id=body.recipe_id)
+        except KeyError:
+            raise HTTPException(404, "unknown printer")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"job_id": job_id}
 
     @app.get("/api/frame/latest")
     def frame_latest():
@@ -520,17 +1302,30 @@ def create_app(registry, runs_dir: pathlib.Path,
 
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
+        # Checked HERE, not in the HTTP middleware above: that middleware only
+        # sees http-scope requests, so a WebSocket would sail straight past it.
+        # This is also why the session is a cookie -- browsers cannot set
+        # headers on a WS handshake, but cookies ride it automatically.
+        if auth is not None and not auth.valid(sock.cookies.get(auth.COOKIE)):
+            await sock.close(code=1008)   # policy violation
+            return
         try:
             await sock.accept()
-            printers = _with_detection(registry.summaries(), detection)
+            printers = _with_detection(
+                _with_nozzle(_with_bed_type(registry.summaries(), registry),
+                            registry), detection)
             await sock.send_text(json.dumps({"printers": printers}))
             last_sent, last_time = printers, time.monotonic()
             while True:
                 await asyncio.sleep(WS_POLL_S)
                 now = time.monotonic()
-                # summaries() must stay non-blocking: it runs on the event loop
-                # and a stall here would freeze every connected client.
-                printers = _with_detection(registry.summaries(), detection)
+                # summaries()/printer_bed_type/printer_nozzle must stay
+                # non-blocking: this runs on the event loop and a stall here
+                # would freeze every connected client. All are quick,
+                # lock-guarded dict reads.
+                printers = _with_detection(
+                    _with_nozzle(_with_bed_type(registry.summaries(), registry),
+                                registry), detection)
                 changed = _comparable(printers) != _comparable(last_sent)
                 if changed or now - last_time >= WS_HEARTBEAT_S:
                     await sock.send_text(json.dumps({"printers": printers}))

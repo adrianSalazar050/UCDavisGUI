@@ -47,8 +47,9 @@ import threading
 from typing import Any, Callable
 
 from .sdcard import SdError
-from .store import (CAMERA_SOURCES, DETECTION_CLASSES, PrinterConfig,
-                    guess_model_id, normalize_roi)
+from .store import (BED_TYPES, CAMERA_SOURCES, DEFAULT_BED_TYPE,
+                    DEFAULT_NOZZLE, DETECTION_CLASSES, NOZZLES,
+                    PrinterConfig, guess_model_id, normalize_roi)
 
 log = logging.getLogger("server.registry")
 
@@ -194,13 +195,29 @@ class PrinterRegistry:
         return True
 
     def update(self, serial, *, host=None, access_code=None, name=None,
-               capture=None, model_id=None) -> dict | None:
+               capture=None, model_id=None, bed_type=None,
+               nozzle=None) -> dict | None:
         """Edit a registered printer's connection info. Returns the new summary
         dict, or None if the serial is unknown. The serial is NOT changeable.
         A blank/None access_code KEEPS the current one. Changing host or
         access_code rebuilds the service (so it reconnects with the new
         params); name/capture-only edits update the live service in place.
-        Raises ValueError on an empty host when host is provided."""
+        Raises ValueError on an empty host when host is provided.
+
+        bed_type: None = not submitted, keep the stored plate (same
+        "omission keeps the current value" convention as model_id/name/
+        capture) -- an old client, or a save that only touches host/name,
+        must never silently reset a deliberately-chosen plate back to the
+        default. Unlike model_id there is no "Unknown" sentinel here: every
+        value must be one of BED_TYPES, so a submitted-but-invalid one
+        degrades to DEFAULT_BED_TYPE rather than being stored verbatim --
+        same posture as store.py's from_dict, because a wrong plate slices
+        for the wrong temperature (see PrinterConfig.bed_type).
+
+        nozzle: same convention, mirroring bed_type exactly -- None keeps
+        the stored diameter, and a submitted-but-invalid value degrades to
+        DEFAULT_NOZZLE rather than being stored verbatim, because a wrong
+        nozzle selects the wrong machine profile (see PrinterConfig.nozzle)."""
         # Same validation posture as add(): reject wrong types outright
         # (before they can reach `.strip()` and raise a raw AttributeError,
         # or reach PrinterConfig and get silently coerced); cosmetic fields
@@ -238,6 +255,10 @@ class PrinterRegistry:
             # Unknown, which disables the check. Distinct on purpose.
             if model_id is not None:
                 cfg.model_id = model_id.strip() if isinstance(model_id, str) else ""
+            if bed_type is not None:
+                cfg.bed_type = bed_type if bed_type in BED_TYPES else DEFAULT_BED_TYPE
+            if nozzle is not None:
+                cfg.nozzle = nozzle if nozzle in NOZZLES else DEFAULT_NOZZLE
             if capture is not None:
                 if capture:
                     self._clear_capture()
@@ -321,6 +342,26 @@ class PrinterRegistry:
         with self._lock:
             cfg = self._configs.get(serial)
             return cfg.model_id if cfg is not None else ""
+
+    def printer_nozzle(self, serial: str) -> str:
+        """`serial`'s configured nozzle diameter, or the default when the
+        printer is unknown. Never "" -- callers substitute it straight into a
+        profile name, and an empty one would silently build a name that
+        matches nothing."""
+        with self._lock:
+            cfg = self._configs.get(serial)
+            return cfg.nozzle if cfg is not None else DEFAULT_NOZZLE
+
+    def printer_bed_type(self, serial: str) -> str:
+        """`serial`'s configured build plate, or the default when the printer
+        is unknown. Never "" -- run_slice patches this straight into
+        curr_bed_type, and an empty string there is indistinguishable from
+        never setting it at all, which is the exact defect this field exists
+        to fix (see PrinterConfig.bed_type for the measured 35 C-vs-65 C
+        consequence)."""
+        with self._lock:
+            cfg = self._configs.get(serial)
+            return cfg.bed_type if cfg is not None else DEFAULT_BED_TYPE
 
     def reconnect(self, serial: str) -> dict | None:
         """Rebuild `serial`'s connection using the config already stored.

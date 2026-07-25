@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { navGroups, pages } from "./app/pageRegistry.jsx";
+import LoginScreen from "./components/auth/LoginScreen.jsx";
 import NavGroup from "./components/ui/NavGroup.jsx";
 import StatusPill from "./components/ui/StatusPill.jsx";
+import { checkAuth } from "./api/printer.js";
 import { usePrinters } from "./hooks/usePrinters.js";
 
 const CONN = {
@@ -12,7 +14,30 @@ const CONN = {
 const SERVER_DOWN = { status: "danger", label: "Server offline" };
 const NO_PRINTERS = { status: "warn", label: "No printers" };
 
+// Auth gate. Probes a protected route once on mount; the dashboard proper only
+// mounts once we're allowed in, so usePrinters' WebSocket never opens (and
+// never retries) against a server that would just close it with 1008.
+// A localhost/desktop server has no auth, so the probe passes and this is
+// invisible. If the probe itself fails (server down) we render the dashboard
+// anyway -- that surfaces as "Server offline", which is the honest message,
+// rather than a login box nobody can satisfy.
 export default function App() {
+  const [authed, setAuthed] = useState(null);   // null = still probing
+
+  useEffect(() => {
+    let alive = true;
+    checkAuth()
+      .then((ok) => alive && setAuthed(ok))
+      .catch(() => alive && setAuthed(true));
+    return () => { alive = false; };
+  }, []);
+
+  if (authed === null) return null;             // no flash of the wrong screen
+  if (!authed) return <LoginScreen onSuccess={() => setAuthed(true)} />;
+  return <Dashboard />;
+}
+
+function Dashboard() {
   const [active, setActive] = useState("overview");
   const [selected, setSelected] = useState(null);
   const { printers, wsUp } = usePrinters();

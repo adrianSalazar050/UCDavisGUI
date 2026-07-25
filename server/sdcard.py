@@ -42,6 +42,14 @@ FTPS_PORT = 990
 FTP_USER = "bblp"
 TIMEOUT_S = 10.0
 
+# Bounded politeness window for the post-upload TLS unwrap, NOT a transfer
+# timeout -- see ImplicitFTP_TLS.storbinary for why this exists at all. It
+# only needs to be long enough for a well-behaved server's close_notify to
+# arrive; on hardware that reply (when it comes at all) is near-instant, so
+# 2s is generous headroom, not a tuned value that needs to survive a slow
+# link.
+UNWRAP_TIMEOUT_S = 2.0
+
 # "-rw-r--r--  1 root root  1048576 Jul 16 13:05 Benchy.3mf"
 #  type       links owner group size  month day time-or-year  name
 _LIST_RE = re.compile(
@@ -212,6 +220,62 @@ class ImplicitFTP_TLS(ftplib.FTP_TLS):
             conn = self.context.wrap_socket(conn, server_hostname=self.host,
                                             session=self.sock.session)
         return conn, size
+
+    def storbinary(self, cmd, fp, blocksize=8192, callback=None, rest=None):
+        """Same as ftplib.FTP_TLS.storbinary, except the post-transfer TLS
+        unwrap is bounded and its failure is tolerated instead of fatal.
+
+        Measured on a real A1, phase by phase, with the stdlib's unbounded
+        unwrap() and a 120s socket timeout:
+
+            connect      0.87s
+            login        0.02s
+            prot_p       0.03s
+            transfercmd  0.28s
+            sendall      1.74s     <- the data goes across fine
+            unwrap     120.01s     <- TimeoutError: the read operation timed out
+            close        0.00s
+            voidresp     0.04s  -> "226"    <- the server said Transfer
+                                                complete the whole time
+
+        stdlib FTP_TLS.storbinary calls conn.unwrap() unconditionally and
+        lets whatever it raises propagate. unwrap() blocks waiting for the
+        peer's TLS close_notify on the data channel, and this printer never
+        sends one -- so every upload "failed" after waiting out the full
+        socket timeout, even though the file had already landed correctly
+        (confirmed byte-identical: MD5 match, plus the .gcode.3mf's internal
+        gcode checksum). Re-tested with the fix: short-timeout unwrap then
+        close totalled 4.51s, response "226", file byte-identical.
+
+        We still attempt unwrap() -- bounded to UNWRAP_TIMEOUT_S -- rather
+        than skip it outright (also verified on hardware: 3.78s total, same
+        clean result). unwrap() is what tells a well-behaved server the data
+        stream ended deliberately rather than being truncated, and some FTPS
+        servers require it before they will accept the file. Sending it and
+        declining to wait long for a reply is correct for both kinds of
+        server; skipping it entirely would be a gamble on every server that
+        isn't this one. The real verdict on the upload was always the
+        server's own reply below, via voidresp() -- that call is left
+        completely alone, so a genuine STOR failure (e.g. "552 Disk full.")
+        still raises and still becomes an SdError upstream.
+        """
+        self.voidcmd('TYPE I')
+        with self.transfercmd(cmd, rest) as conn:
+            while 1:
+                buf = fp.read(blocksize)
+                if not buf:
+                    break
+                conn.sendall(buf)
+                if callback:
+                    callback(buf)
+            _SSLSocket = ftplib._SSLSocket
+            if _SSLSocket is not None and isinstance(conn, _SSLSocket):
+                try:
+                    conn.settimeout(UNWRAP_TIMEOUT_S)
+                    conn.unwrap()
+                except (OSError, ValueError):
+                    pass
+        return self.voidresp()
 
 
 def list_dir(host: str, access_code: str, path: str = "/") -> list[dict]:
