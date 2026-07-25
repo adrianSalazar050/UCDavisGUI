@@ -143,33 +143,35 @@ def test_available_filaments_lists_only_what_resolves():
 MULTI_INDEX = dict(INDEX, **{
     "Bambu Lab P1P 0.4 nozzle": {"name": "Bambu Lab P1P 0.4 nozzle"},
     "Bambu Lab P1S 0.4 nozzle": {"name": "Bambu Lab P1S 0.4 nozzle"},
-    "0.20mm Standard @BBL P1P": {"name": "0.20mm Standard @BBL P1P"},
-    # Generic filaments -- the base INDEX only has process profiles, so add one
-    # filament per supported process token (A1, A1M, P1P) for the resolution
-    # guard below.
+    # The P1/X1 family shares the X1C process + filament profiles (verified
+    # against real P1S/X1C slices 2026-07-25), so the fixture carries the X1C
+    # names, not @BBL P1P.
+    "0.20mm Standard @BBL X1C": {"name": "0.20mm Standard @BBL X1C"},
     "Generic PLA @BBL A1": {"name": "Generic PLA @BBL A1"},
     "Generic PLA @BBL A1M": {"name": "Generic PLA @BBL A1M"},
-    "Generic PLA @BBL P1P": {"name": "Generic PLA @BBL P1P"},
+    "Bambu PLA Basic @BBL X1C": {},   # X-series has no "Generic PLA"
 })
 
 
-def test_p1p_resolves_a_preset_and_a_filament():
+def test_p1p_resolves_via_the_shared_x1c_process_and_filament():
+    # The P1P's bed is its own machine profile, but its process + filament come
+    # from the shared X1C profiles (real slices confirm the family sharing).
+    assert machine_profile_name("C11", "0.4") == "Bambu Lab P1P 0.4 nozzle"
     got = resolve_preset("standard", "C11", "0.4", MULTI_INDEX)
-    assert got["process"] == "0.20mm Standard @BBL P1P"
-    assert filament_profile_name("PLA", "C11", MULTI_INDEX) == "Generic PLA @BBL P1P"
-    assert {f["material"] for f in available_filaments("C11", MULTI_INDEX)} \
-        >= {"PLA"}
+    assert got["process"] == "0.20mm Standard @BBL X1C"
+    assert filament_profile_name("PLA", "C11", MULTI_INDEX) == "Bambu PLA Basic @BBL X1C"
 
 
-def test_p1s_machine_is_p1s_but_process_and_filament_reuse_p1p():
-    # THE TRAP: the P1S has its own MACHINE profile but no @BBL P1S process or
-    # filament -- both reuse P1P. A naive PROCESS_TOKENS["C12"]="P1S" resolves
-    # nothing. Machine name must be the P1S; process/filament must be P1P.
+def test_p1s_machine_is_p1s_but_process_and_filament_are_x1c():
+    # THE TRAP, confirmed by a real P1S slice: the P1S has its own MACHINE
+    # profile ("Bambu Lab P1S") but Bambu Studio slices it with the X1C
+    # process/filament profiles. Machine token = P1S (the bed); process/
+    # filament token = X1C (the family-shared settings).
     assert machine_profile_name("C12", "0.4") == "Bambu Lab P1S 0.4 nozzle"
     got = resolve_preset("standard", "C12", "0.4", MULTI_INDEX)
-    assert got["process"] == "0.20mm Standard @BBL P1P"     # P1P, not P1S
+    assert got["process"] == "0.20mm Standard @BBL X1C"     # X1C, not P1S/P1P
     assert got["machine"] == "Bambu Lab P1S 0.4 nozzle"     # but the P1S bed
-    assert filament_profile_name("PLA", "C12", MULTI_INDEX) == "Generic PLA @BBL P1P"
+    assert filament_profile_name("PLA", "C12", MULTI_INDEX) == "Bambu PLA Basic @BBL X1C"
 
 
 # --- Follow-up: X1 Carbon (X1C), which has no Generic <material> profiles ---

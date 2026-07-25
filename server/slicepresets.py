@@ -35,24 +35,27 @@ MACHINE_TOKENS = {
 }
 
 # Bambu model id -> the token used in PROCESS and FILAMENT profile names.
-# NOT derivable from MACHINE_TOKENS. Two traps, both the "one printer, two
-# tokens" split master.md 6.3 documents for the A1 mini:
+# NOT derivable from MACHINE_TOKENS -- verified against REAL sliced files, not
+# just profile-name guessing. The traps here are the whole reason this is a
+# separate map:
 #   - the mini is "A1 mini" in machine names but "A1M" here;
-#   - the P1S is "P1S" in machine names but REUSES "P1P" here -- there is no
-#     "@BBL P1S" process or filament profile in the tree at all (verified
-#     2026-07-25). PROCESS_TOKENS["C12"] = "P1S" would resolve nothing.
-# The X1 Carbon (BL-P001) is supported now: its filaments resolve via the
-# candidate list in _filament_candidates (it has NO "Generic <material>"
-# profiles -- PLA is "Bambu PLA Basic @BBL X1C", ABS is "Bambu ABS @BBL X1C",
-# TPU is "Bambu TPU 95A @BBL X1C"). The PLAIN X1 (BL-P002) is still absent on
-# purpose: its only process profiles are 0.6/0.8-nozzle Standard, so nothing
-# resolves at the default 0.4 nozzle.
+#   - THE P1/X1 FAMILY SHARES "X1C" for process AND filament. Confirmed by
+#     real Bambu-Studio-sliced examples on 2026-07-25: a P1S slice recorded
+#     printer_settings_id "Bambu Lab P1S 0.4 nozzle" but print_settings_id
+#     "0.20mm Standard @BBL X1C" and filament "... @BBL X1C"; an X1 Carbon
+#     slice did the same. So the MACHINE token stays per-model (P1S / P1P /
+#     X1 Carbon -- the bed), but the process/filament token is "X1C" for all
+#     of them. (A "@BBL P1P" process profile also exists and resolves, but it
+#     is NOT what Bambu Studio picks for these machines -- matching the tool's
+#     own choice is what keeps our slices identical to a hand slice.)
+# The PLAIN X1 (BL-P002) is still absent on purpose: its only process profiles
+# are 0.6/0.8-nozzle Standard, so nothing resolves at the default 0.4 nozzle.
 PROCESS_TOKENS = {
     "N2S": "A1",        # A1
     "N1": "A1M",        # A1 mini   -- process token differs from machine
-    "C11": "P1P",       # P1P
-    "C12": "P1P",       # P1S       -- ...but P1P's process/filament profiles
-    "BL-P001": "X1C",   # X1 Carbon -- process/filament token, NOT "X1 Carbon"
+    "C11": "X1C",       # P1P       -- P1/X1 family shares X1C (see above)
+    "C12": "X1C",       # P1S       -- CONFIRMED by a real P1S slice
+    "BL-P001": "X1C",   # X1 Carbon -- CONFIRMED by a real X1 Carbon slice
 }
 
 
