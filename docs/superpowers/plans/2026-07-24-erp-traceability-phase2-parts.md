@@ -1,10 +1,14 @@
 # ERP Traceability Phase 2 — Parts Catalogue + Recipes Implementation Plan
 
-> **STATUS: IN PROGRESS (started 2026-07-24).** Backend tasks (1–6) are being
-> implemented autonomously against the established Phase 1 patterns; the
-> frontend (Task 7) and the slice-from-recipe integration (Task 8) are a
-> deliberate review checkpoint — they touch UI (verified by eye) and the
-> existing slice flow. Implements **Phase 2** of
+> **STATUS: SHIPPED (2026-07-24), Tasks 1–8.** All of Phase 2 landed: schema
+> v2, part/recipe helpers, `PartStore`, the routes, the Parts UI, and the
+> slice-from-part path. A backend code review (probe-verified) found two
+> catalogue invariants enforced only by route convention (a recipe could get
+> two defaults; a wrong-part URL could corrupt a foreign default) — both now
+> enforced structurally at the data layer (commit `1bbc091`). Model
+> upload/download round trip verified live; 681 backend + 26 frontend tests
+> green. **Not yet verified on hardware:** a real slice-from-part print
+> producing a part-attributed run. Implements **Phase 2** of
 > `docs/superpowers/specs/2026-07-24-erp-traceability-design.md` (§4.1, §9,
 > §10). **`master.md` is authoritative wherever this file disagrees.**
 

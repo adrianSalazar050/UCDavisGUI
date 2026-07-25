@@ -2133,9 +2133,19 @@ model upload + download, and recipe add/edit/archive. A duplicate
 through `set_default_recipe`, whose clear-then-set runs in one transaction, so
 "exactly one default" holds at every observable moment.
 
-**Shipped so far:** the schema, `PartStore`, the helpers, the routes, and the
-frontend API wrappers — all tested (backend green). **Not yet built:** the
-Parts UI page and slicing a stored part from a stored recipe (the run row's
-`part_id`/`recipe_id` columns already exist, ready for that wiring). See
-`docs/superpowers/plans/2026-07-24-erp-traceability-phase2-parts.md`, whose
-Tasks 7–8 are a deliberate review checkpoint.
+**Closing the loop: slice a stored part.** `POST
+/api/printers/{serial}/slice/from-part` `{part_id, recipe_id}` reads the model
+bytes from `PartStore` and the tier/filament/supports off the recipe, runs the
+existing slice pipeline (§6), and stamps `part_id`/`recipe_id` onto the queue
+job — so when that job prints, Phase 1's start route carries the part straight
+into the run row (`part_id`/`recipe_id` were reserved in `RUN_WRITABLE` for
+exactly this). A **Parts** page (fleet-wide, not per-printer) manages the
+catalogue and offers a per-recipe "Slice for &lt;printer&gt;" action.
+
+**Shipped:** the schema, `PartStore`, the helpers, the routes, the
+slice-from-part path, the frontend wrappers, and the Parts UI — all tested
+(681 backend, 26 frontend, model upload/download round trip verified live).
+**Not yet verified on hardware:** a part sliced end to end into a printed,
+part-attributed run — the pieces are all in place and unit-tested, but no real
+slice-from-part print has been run yet. See
+`docs/superpowers/plans/2026-07-24-erp-traceability-phase2-parts.md`.
