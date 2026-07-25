@@ -1,11 +1,16 @@
-import { useRef, useState } from "react";
+import { Suspense, lazy, useRef, useState } from "react";
 import { startSlice, startSliceBlob } from "../../api/printer.js";
 import Button from "../ui/Button.jsx";
 import Field from "../ui/Field.jsx";
-import StlViewer from "./StlViewer.jsx";
 import OrientControls from "./OrientControls.jsx";
 import { IDENTITY, addRotation, isIdentity } from "./stlGeometry.js";
-import { bakeRotatedStl } from "./stlBake.js";
+
+// three.js is heavy (~150 KB gz) and only ever needed once someone opens the
+// Slice page AND picks an STL. Lazy-load the viewer so three.js lands in its
+// own chunk, out of the main dashboard bundle. stlGeometry (pure math) and
+// OrientControls (no three) stay static. The bake path (also three.js) is
+// dynamically imported at submit time below, for the same reason.
+const StlViewer = lazy(() => import("./StlViewer.jsx"));
 
 const MODEL_ACCEPT = ".stl,.3mf,.step,.stp,.obj";
 const isStl = (name) => /\.stl$/i.test(name || "");
@@ -68,6 +73,9 @@ export default function SliceForm({ serial, options, onSubmitted }) {
     setErr(null);
     try {
       if (buffer && !isIdentity(rotation)) {
+        // Dynamic import so three.js (via stlBake) stays out of the main
+        // bundle -- only pulled in when a rotated STL is actually baked.
+        const { bakeRotatedStl } = await import("./stlBake.js");
         const blob = bakeRotatedStl(buffer, rotation);
         const rotatedName = file.name.replace(/\.stl$/i, "") + "-oriented.stl";
         await startSliceBlob(serial, blob, rotatedName,
@@ -94,8 +102,10 @@ export default function SliceForm({ serial, options, onSubmitted }) {
       <div className="slice-layout__viewer">
         {showViewer ? (
           <>
-            <StlViewer arrayBuffer={buffer} rotation={rotation}
-                       bed={options.bed} onFit={setFits} />
+            <Suspense fallback={<div className="empty">Loading 3D viewer…</div>}>
+              <StlViewer arrayBuffer={buffer} rotation={rotation}
+                         bed={options.bed} onFit={setFits} />
+            </Suspense>
             <OrientControls rotation={rotation} onRotate={rotate}
                             onReset={() => setRotation(IDENTITY)} disabled={busy} />
             {!options.bed && (
