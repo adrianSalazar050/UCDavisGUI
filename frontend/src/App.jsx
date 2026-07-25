@@ -15,7 +15,7 @@ const NO_PRINTERS = { status: "warn", label: "No printers" };
 export default function App() {
   const [active, setActive] = useState("overview");
   const [selected, setSelected] = useState(null);
-  const { printers, wsUp } = usePrinters();
+  const { printers, robot, wsUp } = usePrinters();
 
   // One printer is the common case — never make the user pick. Also repairs
   // the selection when the selected printer is removed.
@@ -62,7 +62,8 @@ export default function App() {
           <StatusPill status={conn.status}>{conn.label}</StatusPill>
         </header>
         <div className={!wsUp ? "dimmed" : ""}>
-          <Page printers={printers} selected={selected} onSelect={select} />
+          <Page printers={printers} selected={selected} onSelect={select}
+                robot={robot} wsUp={wsUp} />
         </div>
       </div>
     </div>

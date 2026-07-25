@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import pathlib
 import signal
 
@@ -19,6 +20,7 @@ from .main import create_app
 from .printer import MockPrinter, PrinterService
 from .queue import MemoryQueueStore, PrintQueue, QueueStore
 from .registry import PrinterRegistry
+from .robot import MockRobotBackend, RobotManager, RosRobotBackend
 from .store import MemoryStore, PrinterStore
 
 log = logging.getLogger("server.__main__")
@@ -84,6 +86,20 @@ def main() -> int:
     p.add_argument("--detect-interval", type=float, default=DEFAULT_INTERVAL_S,
                    help="seconds between detector captures (default: "
                         "%(default)s)")
+    p.add_argument("--robot-mode", choices=("disabled", "mock", "ros"),
+                   default="disabled",
+                   help="robot control backend (default disabled)")
+    p.add_argument("--robot-type", choices=("ar4", "lite6"), default="ar4",
+                   help="robot configuration used by the ROS backend")
+    p.add_argument("--robot-sim", action="store_true",
+                   help="connect robot control to Gazebo/sim topics")
+    default_robot_repo = pathlib.Path(os.environ.get(
+        "AR4_AUTOMATION_REPO",
+        pathlib.Path.home() / "ar4Automating3DPrinter"))
+    p.add_argument("--robot-repo", type=pathlib.Path,
+                   default=default_robot_repo,
+                   help="path to ar4Automating3DPrinter (or set "
+                        "AR4_AUTOMATION_REPO)")
     a = p.parse_args()
 
     logging.basicConfig(
@@ -127,8 +143,19 @@ def main() -> int:
         else QueueStore(runs_dir.parent / "queues.json")
     queue = PrintQueue(queue_store)
 
+    robot = None
+    if a.robot_mode == "mock":
+        robot = RobotManager(MockRobotBackend)
+    elif a.robot_mode == "ros":
+        robot = RobotManager(
+            lambda: RosRobotBackend(
+                repo_path=a.robot_repo,
+                robot=a.robot_type,
+                sim=a.robot_sim))
+
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
-    app = create_app(registry, runs_dir, dist, detection=coordinator, queue=queue)
+    app = create_app(registry, runs_dir, dist, detection=coordinator,
+                     queue=queue, robot=robot)
     # uvicorn re-raises the signal it caught using whatever handler was
     # installed beforehand. SIGBREAK's OS default kills the process outright
     # (skipping `finally`), so map it to KeyboardInterrupt like SIGINT gets.

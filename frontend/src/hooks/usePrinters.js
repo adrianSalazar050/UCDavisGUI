@@ -7,6 +7,7 @@ const MAX_BACKOFF_MS = 10000;
 // the first message), wsUp is whether the socket is currently open.
 export function usePrinters() {
   const [printers, setPrinters] = useState([]);
+  const [robot, setRobot] = useState(null);
   const [wsUp, setWsUp] = useState(false);
 
   useEffect(() => {
@@ -29,7 +30,9 @@ export function usePrinters() {
         // exception; it would NOT close the connection or crash React, but
         // dropping the update silently would be worse than noting it).
         try {
-          setPrinters(JSON.parse(e.data).printers ?? []);
+          const payload = JSON.parse(e.data);
+          setPrinters(payload.printers ?? []);
+          if ("robot" in payload) setRobot(payload.robot);
         } catch (err) {
           console.error("usePrinters: malformed WS message", err);
         }
@@ -53,5 +56,5 @@ export function usePrinters() {
     };
   }, []);
 
-  return { printers, wsUp };
+  return { printers, robot, wsUp };
 }

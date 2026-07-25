@@ -23,6 +23,7 @@ from .printer import PrinterBusy
 from .registry import DuplicateSerial
 from .sdcard import SdError
 from .store import CAMERA_SOURCES, model_mismatch
+from .robot import (RobotBusy, RobotCommandError, RobotUnavailable)
 
 # How long to wait for a started print to show up in gcode_state before
 # reporting it as not-started. The A1 goes FAILED/IDLE -> PREPARE within a
@@ -118,6 +119,11 @@ class ReorderQueueJobs(BaseModel):
     ids: list[str]
 
 
+class RobotCommandBody(BaseModel):
+    action: str
+    parameters: dict = {}
+
+
 def _comparable(printers: list[dict]) -> list[dict]:
     """report_age_s ticks every sample; ignore it when deciding whether the
     state meaningfully changed."""
@@ -137,21 +143,26 @@ def _with_detection(printers: list[dict], detection) -> list[dict]:
 
 def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
-               detection=None, queue=None) -> FastAPI:
+               detection=None, queue=None, robot=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake). `queue` is
     anything with add(serial, job), remove(serial, id) -> bool,
     reorder(serial, ids), get(serial) -> list, totals(serial) -> dict
     (PrintQueue, or a test fake); None disables the queue routes entirely,
-    same "None means inert" convention as `detection`."""
+    same "None means inert" convention as `detection`. `robot` optionally
+    supplies start(), stop(), snapshot(), submit(), and cancel()."""
 
     @asynccontextmanager
     async def lifespan(_app):
         if detection is not None:
             detection.start()
+        if robot is not None:
+            robot.start()
         try:
             yield
         finally:
+            if robot is not None:
+                robot.stop()
             if detection is not None:
                 detection.stop()
 
@@ -476,23 +487,65 @@ def create_app(registry, runs_dir: pathlib.Path,
         return Response(content=data, media_type="image/jpeg",
                         headers={"Cache-Control": "no-store"})
 
+    def _require_robot():
+        if robot is None:
+            raise HTTPException(404, "robot control is not enabled")
+        return robot
+
+    @app.get("/api/robot/status")
+    def robot_status():
+        return _require_robot().snapshot()
+
+    @app.post("/api/robot/commands", status_code=202)
+    def robot_command(body: RobotCommandBody):
+        controller = _require_robot()
+        try:
+            return controller.submit(body.action, body.parameters)
+        except RobotCommandError as exc:
+            raise HTTPException(400, str(exc))
+        except RobotBusy as exc:
+            raise HTTPException(409, str(exc))
+        except RobotUnavailable as exc:
+            raise HTTPException(503, str(exc))
+
+    @app.post("/api/robot/commands/{command_id}/cancel")
+    def cancel_robot_command(command_id: str):
+        controller = _require_robot()
+        if not controller.cancel(command_id):
+            raise HTTPException(404, "robot command is not active")
+        return controller.snapshot()
+
+    def _live_payload():
+        printers = _with_detection(registry.summaries(), detection)
+        payload = {"printers": printers}
+        if robot is not None:
+            payload["robot"] = robot.snapshot()
+        return payload
+
+    def _live_comparable(payload):
+        value = {"printers": _comparable(payload["printers"])}
+        if "robot" in payload:
+            value["robot"] = payload["robot"]
+        return value
+
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
         try:
             await sock.accept()
-            printers = _with_detection(registry.summaries(), detection)
-            await sock.send_text(json.dumps({"printers": printers}))
-            last_sent, last_time = printers, time.monotonic()
+            payload = _live_payload()
+            await sock.send_text(json.dumps(payload))
+            last_sent, last_time = payload, time.monotonic()
             while True:
                 await asyncio.sleep(WS_POLL_S)
                 now = time.monotonic()
                 # summaries() must stay non-blocking: it runs on the event loop
                 # and a stall here would freeze every connected client.
-                printers = _with_detection(registry.summaries(), detection)
-                changed = _comparable(printers) != _comparable(last_sent)
+                payload = _live_payload()
+                changed = (
+                    _live_comparable(payload) != _live_comparable(last_sent))
                 if changed or now - last_time >= WS_HEARTBEAT_S:
-                    await sock.send_text(json.dumps({"printers": printers}))
-                    last_sent, last_time = printers, now
+                    await sock.send_text(json.dumps(payload))
+                    last_sent, last_time = payload, now
         except WebSocketDisconnect:
             pass
 

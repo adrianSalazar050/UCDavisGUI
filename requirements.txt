@@ -1,7 +1,12 @@
 # runtime
 paho-mqtt>=2.0
-opencv-python>=4.9
-numpy>=1.26
+opencv-python>=4.9,<4.12
+# ROS 2 Humble's cv_bridge and transforms3d are built against the NumPy 1.x
+# API. NumPy 2.x fails at import before the robot backend can start.
+numpy>=1.26,<2
+# Ubuntu's older transforms3d still references np.float, removed in NumPy
+# 1.24; tf_transformations imports this package during robot startup.
+transforms3d>=0.4.2
 fastapi>=0.110
 uvicorn[standard]>=0.29
 # multipart form parsing -- required by the SD upload route (POST .../files)
