@@ -264,6 +264,20 @@ RECIPE_WRITABLE = frozenset({
     "supports", "copies_per_plate", "expected_seconds", "expected_grams",
 })
 
+# Columns create_spool()/update_spool() will write. spool_code is included
+# so a rare catalogue correction can go through update_spool's single
+# _checked() guard rather than a second, uncontrolled code path -- same
+# reasoning as PART_WRITABLE above. `status`/`printer_serial` ARE listed
+# here (unlike is_default on recipes) because a plain load/unload is just
+# data correction; the ONE-LOADED-PER-PRINTER invariant is enforced by
+# set_loaded_spool doing a clear-then-set in a single transaction, not by
+# forbidding the columns outright.
+SPOOL_WRITABLE = frozenset({
+    "material", "colour", "brand", "filament_profile", "initial_grams",
+    "purchase_cost", "currency", "supplier", "purchased_at", "status",
+    "printer_serial", "ams_slot", "spool_code",
+})
+
 # Who applies a badge. DETECTOR is the automated system's identity (the
 # recorder writes machine-observed badges under it); OPERATOR is a human.
 DETECTOR = "detector"
@@ -978,6 +992,123 @@ class Ledger:
         self.execute(
             "UPDATE part_recipes SET archived = 1, updated_at = ? "
             "WHERE id = ?", (ts, recipe_id))
+
+    # ---------------- filament spools ----------------
+
+    def create_spool(self, *, spool_code: str, material: str = "",
+                     **fields) -> str:
+        """Insert a filament spool and return its id.
+
+        UNIQUE(spool_code) on the table (schema v3) is what actually
+        enforces "no duplicate code" -- this raises sqlite3.IntegrityError
+        on a collision, same discipline as create_part's
+        UNIQUE(part_number, revision).
+        """
+        _checked(fields, SPOOL_WRITABLE)
+        ts = self._clock()
+        spool_id = new_id()
+        cols = ["id", "spool_code", "material", "created_at", "updated_at"]
+        vals = [spool_id, spool_code, material, ts, ts]
+        for key, value in fields.items():
+            cols.append(key)
+            vals.append(value)
+        placeholders = ", ".join("?" for _ in cols)
+        self.execute(f"INSERT INTO filament_spools ({', '.join(cols)}) "
+                     f"VALUES ({placeholders})", vals)
+        return spool_id
+
+    def get_spool(self, spool_id: str) -> dict | None:
+        rows = self.query(
+            "SELECT * FROM filament_spools WHERE id = ?", (spool_id,))
+        return rows[0] if rows else None
+
+    def list_spools(self, *, include_archived: bool = False) -> list[dict]:
+        """Every spool, each carrying a computed `remaining_grams` -- see the
+        module docstring's design rule (spec 4.6): remaining is DERIVED from
+        initial_grams minus summed consumption, never a stored column, so it
+        can never drift out of sync with the consumption rows that back it.
+
+        ONE grouped query rather than one remaining_grams() call per row:
+        the spool list renders every spool at once and a per-row query
+        there is N round trips for a column (same reasoning as
+        piece_counts above).
+        """
+        sql = ("SELECT s.*, "
+               "s.initial_grams - COALESCE(SUM(c.grams), 0) AS remaining_grams "
+               "FROM filament_spools s "
+               "LEFT JOIN filament_consumption c ON c.spool_id = s.id")
+        if not include_archived:
+            sql += " WHERE s.archived = 0"
+        sql += " GROUP BY s.id ORDER BY s.spool_code"
+        return self.query(sql)
+
+    def update_spool(self, spool_id: str, **fields) -> None:
+        _checked(fields, SPOOL_WRITABLE)
+        if not fields:
+            return
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        params = list(fields.values()) + [self._clock(), spool_id]
+        self.execute(
+            f"UPDATE filament_spools SET {sets}, updated_at = ? WHERE id = ?",
+            params)
+
+    def archive_spool(self, spool_id: str) -> None:
+        ts = self._clock()
+        self.execute(
+            "UPDATE filament_spools SET archived = 1, updated_at = ? "
+            "WHERE id = ?", (ts, spool_id))
+
+    def remaining_grams(self, spool_id: str) -> float | None:
+        """initial_grams minus summed consumption for one spool. None both
+        when the spool has no initial weight recorded (nothing to subtract
+        from -- surfaced as None, never coerced to 0, per spec 4.6) and when
+        the spool id does not exist at all."""
+        rows = self.query(
+            "SELECT s.initial_grams - COALESCE(SUM(c.grams), 0) AS r "
+            "FROM filament_spools s "
+            "LEFT JOIN filament_consumption c ON c.spool_id = s.id "
+            "WHERE s.id = ? GROUP BY s.id", (spool_id,))
+        return rows[0]["r"] if rows else None
+
+    def set_loaded_spool(self, printer_serial: str, spool_id: str) -> None:
+        """Make `spool_id` the sole in_use spool on `printer_serial`. The
+        clear-then-set is ONE transaction so a printer is never observed
+        with zero or two loaded spools at once -- the same
+        'exactly one at every observable moment' discipline as
+        set_default_recipe above.
+        """
+        ts = self._clock()
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE filament_spools SET status = 'sealed', "
+                "printer_serial = NULL, updated_at = ? "
+                "WHERE printer_serial = ? AND status = 'in_use'",
+                (ts, printer_serial))
+            conn.execute(
+                "UPDATE filament_spools SET status = 'in_use', "
+                "printer_serial = ?, updated_at = ? WHERE id = ?",
+                (printer_serial, ts, spool_id))
+
+    def loaded_spool(self, printer_serial: str) -> dict | None:
+        rows = self.query(
+            "SELECT * FROM filament_spools WHERE printer_serial = ? "
+            "AND status = 'in_use' LIMIT 1", (printer_serial,))
+        return rows[0] if rows else None
+
+    # ---------------- filament consumption ----------------
+
+    def add_consumption(self, spool_id: str, *, run_id: str | None = None,
+                        grams: float, basis: str | None = None) -> str:
+        """Record one consumption event against a spool. `grams` is
+        required -- a consumption row that consumed nothing is not a
+        consumption row."""
+        ts = self._clock()
+        consumption_id = new_id()
+        self.execute(
+            "INSERT INTO filament_consumption (id, spool_id, run_id, grams, "
+            "basis, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (consumption_id, spool_id, run_id, grams, basis, ts, ts))
+        return consumption_id
 
     def close(self) -> None:
         """Closing twice is safe -- sqlite3.Connection.close() is a no-op on

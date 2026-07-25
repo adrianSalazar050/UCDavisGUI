@@ -637,3 +637,45 @@ def test_schema_upgrades_v2_to_v3(tmp_path):
 
 def test_fresh_database_is_at_v3(led):
     assert led.query("SELECT version FROM schema_version")[0]["version"] == 3
+
+
+# ---------------- filament spools ----------------
+
+def test_spool_remaining_grams_is_initial_minus_consumption(led):
+    sid = led.create_spool(spool_code="S-1", material="PLA", initial_grams=1000.0)
+    led.add_consumption(sid, run_id=None, grams=120.0, basis="planned")
+    led.add_consumption(sid, run_id=None, grams=80.0, basis="proportional")
+    assert led.remaining_grams(sid) == 800.0
+    row = [s for s in led.list_spools() if s["id"] == sid][0]
+    assert row["remaining_grams"] == 800.0
+
+
+def test_remaining_is_none_without_an_initial_weight(led):
+    sid = led.create_spool(spool_code="S-2", material="PLA")
+    assert led.remaining_grams(sid) is None
+    row = [s for s in led.list_spools() if s["id"] == sid][0]
+    assert row["remaining_grams"] is None
+
+
+def test_exactly_one_loaded_spool_per_printer(led):
+    a = led.create_spool(spool_code="A", material="PLA")
+    b = led.create_spool(spool_code="B", material="PETG")
+    led.set_loaded_spool("PRN1", a)
+    led.set_loaded_spool("PRN1", b)
+    assert led.loaded_spool("PRN1")["id"] == b
+    loaded = [s for s in led.list_spools() if s["status"] == "in_use"
+              and s["printer_serial"] == "PRN1"]
+    assert [s["id"] for s in loaded] == [b]
+
+
+def test_a_duplicate_spool_code_is_rejected(led):
+    import sqlite3 as _sq
+    led.create_spool(spool_code="DUP", material="PLA")
+    with pytest.raises(_sq.IntegrityError):
+        led.create_spool(spool_code="DUP", material="PETG")
+
+
+def test_update_spool_rejects_unknown_column(led):
+    sid = led.create_spool(spool_code="X", material="PLA")
+    with pytest.raises(ValueError):
+        led.update_spool(sid, bogus=1)
