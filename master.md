@@ -5,7 +5,7 @@ existing specialist docs rather than restating them.
 
 | Doc | What it covers |
 |---|---|
-| `README.md` | Quick start, the data-collection scripts (`capture.py`, `check_registration.py`, `probe_gcode.py`), and the research framing + exit criterion |
+| `README.md` | Deliberately minimal front door: install, `python -m server --lan`, first-time printer setup, and the detector's exit criterion. Everything else points here |
 | `CONNECTION.md` | Verified LAN/MQTT connection parameters (A1 and A1 mini), TLS specifics, prerequisites, troubleshooting |
 | `FAILURE_DETECTOR_REPORT.md` | YOLO training run, test metrics, webcam-resolution robustness study, and §8 the A1-camera domain adaptation |
 | `desktop/README.md`, `desktop/LINUX-BUILD.md` | Building the Electron installer (Windows) and the AppImage (Mint) — §8 |
@@ -390,13 +390,31 @@ Compares two runs of the *same* file layer by layer: sub-pixel translation via
 `cv2.phaseCorrelate` (the number that actually matters) plus mean absolute
 difference, and writes a residual montage. Exits non-zero with a verdict when
 the bed isn't parking repeatably or the frames are too noisy. Deliberately no
-ML. See `README.md` §2 for how to read the table.
+ML. Run two successful prints of one file, then
+`python check_registration.py runs/<A> runs/<B>`:
+
+| Result | Meaning |
+|---|---|
+| shift < 2 px, MAD low | registered — proceed |
+| shift large | bed not parking repeatably → force it with `G1 Y5 F6000` in layer-change custom G-code |
+| shift small, MAD high | lighting/exposure/blur → lock camera exposure + WB, raise `--settle` |
+| MAD rises with layer | drift or self-occlusion → check the montage |
+
+**Do not trust a detector until this passes.** If subtraction cannot tell two
+good prints apart, a network agreeing with you is a coincidence.
 
 #### `probe_gcode.py` — the CAXTON question
-During a live print, sends `M104` / `M220` / `M221`, holds, restores, and
-snapshots telemetry around each. Answers whether the printer honours live
-parameter overrides (i.e. whether CAXTON-style self-labelling is possible here).
-M104/M220 read off telemetry; M221 you read off the part.
+During a live print of a big flat part, sends `M104` / `M220` / `M221`, holds,
+restores, and snapshots telemetry around each. Answers whether the printer
+honours live parameter overrides — i.e. whether CAXTON-style self-labelling is
+possible here. There is no ack, so the printer never says it ignored you:
+M104/M220 you read off telemetry, **M221 you read off the part**.
+
+| Outcome | Consequence |
+|---|---|
+| all honoured | CAXTON self-labelling can be reproduced on a closed-ecosystem printer — that is a paper |
+| M104/M220 only | partial: temp + speed heads. Flow/Z must come from slicer-side induction, one label per print |
+| none | no self-labelling here. Borrow CAXTON's weights instead of rebuilding its dataset |
 
 #### `train_failure_detector.py`
 Fine-tunes YOLOv8 on the Roboflow `3d-printing-failure-detection` v1 export.
