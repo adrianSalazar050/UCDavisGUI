@@ -679,3 +679,21 @@ def test_update_spool_rejects_unknown_column(led):
     sid = led.create_spool(spool_code="X", material="PLA")
     with pytest.raises(ValueError):
         led.update_spool(sid, bogus=1)
+
+
+# ---------------- filament consumption + low-stock ----------------
+
+def test_low_stock_lists_only_spools_below_the_threshold(led):
+    low = led.create_spool(spool_code="LOW", material="PLA", initial_grams=100.0)
+    led.add_consumption(low, run_id=None, grams=90.0, basis="planned")
+    led.create_spool(spool_code="FULL", material="PLA", initial_grams=1000.0)
+    led.create_spool(spool_code="UNK", material="PLA")   # no initial weight
+    got = {s["spool_code"] for s in led.low_stock(50.0)}
+    assert got == {"LOW"}
+
+
+def test_consumption_is_linked_to_a_run(led):
+    sid = led.create_spool(spool_code="S", material="PLA", initial_grams=500.0)
+    led.add_consumption(sid, run_id="r1", grams=42.0, basis="planned")
+    rows = led.consumption_for_run("r1")
+    assert len(rows) == 1 and rows[0]["grams"] == 42.0

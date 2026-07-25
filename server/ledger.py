@@ -1110,6 +1110,31 @@ class Ledger:
             (consumption_id, spool_id, run_id, grams, basis, ts, ts))
         return consumption_id
 
+    def consumption_for_run(self, run_id: str) -> list[dict]:
+        return self.query(
+            "SELECT * FROM filament_consumption WHERE run_id = ? "
+            "ORDER BY created_at, rowid", (run_id,))
+
+    def low_stock(self, threshold_grams: float) -> list[dict]:
+        """Spools (not archived) whose derived remaining_grams is known and
+        under `threshold_grams`. A spool with no initial_grams has an
+        unknown remaining weight, not a low one, so it is excluded by the
+        `IS NOT NULL` half of the HAVING clause rather than silently
+        sorting under every real threshold as a bare `< ?` would (NULL < x
+        is NULL, which SQL rightly treats as "unknown", but making that
+        explicit here means the exclusion doesn't depend on a reader
+        recalling SQL's three-valued logic)."""
+        sql = ("SELECT s.*, "
+               "s.initial_grams - COALESCE(SUM(c.grams), 0) AS remaining_grams "
+               "FROM filament_spools s "
+               "LEFT JOIN filament_consumption c ON c.spool_id = s.id "
+               "WHERE s.archived = 0 "
+               "GROUP BY s.id "
+               "HAVING remaining_grams IS NOT NULL "
+               "AND remaining_grams < ? "
+               "ORDER BY s.spool_code")
+        return self.query(sql, (threshold_grams,))
+
     def close(self) -> None:
         """Closing twice is safe -- sqlite3.Connection.close() is a no-op on
         a connection that is already closed. Calling query()/execute()
