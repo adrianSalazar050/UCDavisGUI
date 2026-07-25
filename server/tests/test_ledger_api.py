@@ -634,3 +634,63 @@ def test_slice_from_part_404s_without_a_slicer(tmp_path, led):
     res = client.post("/api/printers/S1/slice/from-part",
                       json={"part_id": pid, "recipe_id": rid})
     assert res.status_code == 404
+
+
+def test_spool_routes_404_without_a_ledger(no_ledger_client):
+    assert no_ledger_client.get("/api/spools").status_code == 404
+
+
+def test_create_list_and_remaining_a_spool(client, led):
+    res = client.post("/api/spools", json={
+        "spool_code": "S-100", "material": "PLA", "initial_grams": 1000.0})
+    assert res.status_code == 201
+    sid = res.json()["spool"]["id"]
+    led.add_consumption(sid, run_id=None, grams=250.0, basis="planned")
+    row = [s for s in client.get("/api/spools").json()["spools"] if s["id"] == sid][0]
+    assert row["remaining_grams"] == 750.0
+
+
+def test_a_duplicate_spool_code_is_409(client):
+    client.post("/api/spools", json={"spool_code": "DUP", "material": "PLA"})
+    dup = client.post("/api/spools", json={"spool_code": "DUP", "material": "PETG"})
+    assert dup.status_code == 409
+
+
+def test_get_spool_includes_consumption(client, led):
+    sid = client.post("/api/spools", json={"spool_code": "X", "material": "PLA"}
+                      ).json()["spool"]["id"]
+    led.add_consumption(sid, run_id="r1", grams=30.0, basis="planned")
+    body = client.get(f"/api/spools/{sid}").json()
+    assert body["spool"]["id"] == sid
+    assert len(body["consumption"]) == 1
+
+
+def test_edit_and_archive_a_spool(client):
+    sid = client.post("/api/spools", json={"spool_code": "E", "material": "PLA"}
+                      ).json()["spool"]["id"]
+    assert client.put(f"/api/spools/{sid}", json={"brand": "Bambu"}).status_code == 200
+    assert client.delete(f"/api/spools/{sid}").status_code == 204
+    assert client.get("/api/spools").json()["spools"] == []
+
+
+def test_low_stock_route_filters_by_threshold(client, led):
+    low = client.post("/api/spools", json={"spool_code": "LOW", "material": "PLA",
+                                           "initial_grams": 100.0}).json()["spool"]["id"]
+    led.add_consumption(low, run_id=None, grams=90.0, basis="planned")
+    client.post("/api/spools", json={"spool_code": "FULL", "material": "PLA",
+                                     "initial_grams": 1000.0})
+    codes = {s["spool_code"] for s in client.get("/api/spools/low",
+             params={"threshold": 50}).json()["spools"]}
+    assert codes == {"LOW"}
+
+
+def test_set_and_get_the_loaded_spool_for_a_printer(client, led):
+    a = client.post("/api/spools", json={"spool_code": "A", "material": "PLA"}
+                    ).json()["spool"]["id"]
+    assert client.get("/api/printers/PRN1/spool").json()["spool"] is None
+    res = client.post("/api/printers/PRN1/spool", json={"spool_id": a})
+    assert res.status_code == 200
+    assert client.get("/api/printers/PRN1/spool").json()["spool"]["id"] == a
+    # unload
+    client.post("/api/printers/PRN1/spool", json={"spool_id": None})
+    assert client.get("/api/printers/PRN1/spool").json()["spool"] is None

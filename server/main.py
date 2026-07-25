@@ -224,6 +224,40 @@ class SliceFromPart(BaseModel):
     recipe_id: str
 
 
+class NewSpool(BaseModel):
+    spool_code: str
+    material: str = ""
+    colour: str | None = None
+    brand: str | None = None
+    filament_profile: str | None = None
+    initial_grams: float | None = None
+    purchase_cost: float | None = None
+    currency: str | None = None
+    supplier: str | None = None
+    purchased_at: str | None = None
+    status: str | None = None
+    ams_slot: int | None = None
+
+
+class EditSpool(BaseModel):
+    material: str | None = None
+    colour: str | None = None
+    brand: str | None = None
+    filament_profile: str | None = None
+    initial_grams: float | None = None
+    purchase_cost: float | None = None
+    currency: str | None = None
+    supplier: str | None = None
+    purchased_at: str | None = None
+    status: str | None = None
+    ams_slot: int | None = None
+    spool_code: str | None = None
+
+
+class LoadSpool(BaseModel):
+    spool_id: str | None = None
+
+
 class AddQueueJob(BaseModel):
     """POST body for queuing an SD-card file. sd_path is the only
     user-supplied field -- id/name/seconds/grams/source are all derived
@@ -963,6 +997,92 @@ def create_app(registry, runs_dir: pathlib.Path,
             raise HTTPException(404, "unknown recipe for this part")
         ledger.archive_recipe(recipe_id)
         return Response(status_code=204)
+
+    # --- filament inventory: spools + consumption -------------------------
+
+    def _spool_detail(spool_id: str) -> dict:
+        spool = ledger.get_spool(spool_id)
+        if spool is None:
+            raise HTTPException(404, "unknown spool")
+        spool["remaining_grams"] = ledger.remaining_grams(spool_id)
+        consumption = ledger.query(
+            "SELECT * FROM filament_consumption WHERE spool_id = ? "
+            "ORDER BY created_at", (spool_id,))
+        return {"spool": spool, "consumption": consumption}
+
+    @app.get("/api/spools")
+    def list_spools():
+        _require_ledger()
+        return {"spools": ledger.list_spools()}
+
+    @app.post("/api/spools", status_code=201)
+    def create_spool(body: NewSpool):
+        _require_ledger()
+        fields = {k: v for k, v in body.model_dump().items()
+                  if v is not None and k not in ("spool_code", "material")}
+        try:
+            sid = ledger.create_spool(spool_code=body.spool_code,
+                                      material=body.material, **fields)
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, f"spool code {body.spool_code!r} already exists")
+        return _spool_detail(sid)
+
+    @app.get("/api/spools/low")
+    def spools_low(threshold: float = 100.0):
+        _require_ledger()
+        return {"spools": ledger.low_stock(threshold)}
+
+    @app.get("/api/spools/{spool_id}")
+    def get_spool(spool_id: str):
+        _require_ledger()
+        return _spool_detail(spool_id)
+
+    @app.put("/api/spools/{spool_id}")
+    def edit_spool(spool_id: str, body: EditSpool):
+        _require_ledger()
+        if ledger.get_spool(spool_id) is None:
+            raise HTTPException(404, "unknown spool")
+        fields = {k: v for k, v in body.model_dump().items() if v is not None}
+        if fields:
+            try:
+                ledger.update_spool(spool_id, **fields)
+            except sqlite3.IntegrityError:
+                raise HTTPException(409, "that spool code already exists")
+        return _spool_detail(spool_id)
+
+    @app.delete("/api/spools/{spool_id}", status_code=204)
+    def archive_spool(spool_id: str):
+        _require_ledger()
+        ledger.archive_spool(spool_id)
+        return Response(status_code=204)
+
+    @app.get("/api/printers/{serial}/spool")
+    def get_loaded_spool(serial: str):
+        _require_ledger()
+        loaded = ledger.loaded_spool(serial)
+        if loaded is not None:
+            loaded["remaining_grams"] = ledger.remaining_grams(loaded["id"])
+        return {"spool": loaded}
+
+    @app.post("/api/printers/{serial}/spool")
+    def set_loaded_spool(serial: str, body: LoadSpool):
+        """Set (or clear, with spool_id=null) which spool is loaded on a
+        printer. The start route stamps this onto the run so consumption is
+        attributed to the right spool."""
+        _require_ledger()
+        if body.spool_id is None:
+            # unload: mark any in_use spool on this printer back to sealed
+            # and clear its printer_serial, mirroring the clear-half of
+            # set_loaded_spool's clear-then-set transaction.
+            loaded = ledger.loaded_spool(serial)
+            if loaded is not None:
+                ledger.update_spool(loaded["id"], status="sealed",
+                                    printer_serial=None)
+            return {"spool": None}
+        if ledger.get_spool(body.spool_id) is None:
+            raise HTTPException(404, "unknown spool")
+        ledger.set_loaded_spool(serial, body.spool_id)
+        return {"spool": ledger.get_spool(body.spool_id)}
 
     def _require_slicer() -> None:
         if slicer is None:
