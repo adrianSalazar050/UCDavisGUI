@@ -793,3 +793,6 @@ a { color: var(--primary); }
 .orient-controls__label { width: 1.4em; font-weight: 600; }
 .orient-controls__deg { width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
 @media (max-width: 800px) { .slice-layout { grid-template-columns: 1fr; } }
+
+/* Inventory: low-stock spool row highlight (2026-07-25) */
+.row-warn td { background: color-mix(in srgb, var(--warn, #e0a800) 12%, transparent); }

@@ -1,6 +1,7 @@
 import Dashboard from "../pages/Dashboard.jsx";
 import Detection from "../pages/Detection.jsx";
 import History from "../pages/History.jsx";
+import Inventory from "../pages/Inventory.jsx";
 import Overview from "../pages/Overview.jsx";
 import Parts from "../pages/Parts.jsx";
 import Queue from "../pages/Queue.jsx";
@@ -23,6 +24,7 @@ export const pages = {
   // After queue: history is what the queue turns into once a job has run.
   history: { title: "History", group: "Monitor", component: History },
   parts: { title: "Parts", group: "Monitor", component: Parts },
+  inventory: { title: "Inventory", group: "Monitor", component: Inventory },
 };
 
 export function navGroups() {

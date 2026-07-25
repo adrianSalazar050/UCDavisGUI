@@ -444,3 +444,69 @@ export async function sliceFromPart(serial, part_id, recipe_id) {
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }
+
+// --- filament inventory / spools (Phase 3) ------------------------------
+// All 404 when the server has no ledger, same "None means inert" convention.
+
+export async function fetchSpools() {
+  const res = await fetch("/api/spools");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// { spool (with remaining_grams), consumption }
+export async function fetchSpool(spoolId) {
+  const res = await fetch(`/api/spools/${encodeURIComponent(spoolId)}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function createSpool(body) {
+  const res = await fetch("/api/spools", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function updateSpool(spoolId, body) {
+  const res = await fetch(`/api/spools/${encodeURIComponent(spoolId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function archiveSpool(spoolId) {
+  const res = await fetch(`/api/spools/${encodeURIComponent(spoolId)}`,
+                          { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+export async function fetchLowStock(threshold = 100) {
+  const res = await fetch(`/api/spools/low?threshold=${encodeURIComponent(threshold)}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// The spool loaded on a printer (or { spool: null }).
+export async function fetchLoadedSpool(serial) {
+  const res = await fetch(`/api/printers/${encodeURIComponent(serial)}/spool`);
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+// spoolId=null unloads. Returns { spool }.
+export async function setLoadedSpool(serial, spoolId) {
+  const res = await fetch(`/api/printers/${encodeURIComponent(serial)}/spool`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spool_id: spoolId }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
