@@ -132,3 +132,50 @@ def test_available_filaments_lists_only_what_resolves():
     got = available_filaments("N2S", FIL_INDEX)
     assert [f["material"] for f in got] == ["PLA", "PETG"]
     assert got[0]["profile"] == "Generic PLA @BBL A1"
+
+
+# --- Feature A: presets for P1P and P1S (2026-07-25) ---------------------
+# A miniature index carrying one profile per newly-supported model, named
+# exactly as they appear in the installed vendor tree (verified 2026-07-25).
+MULTI_INDEX = dict(INDEX, **{
+    "Bambu Lab P1P 0.4 nozzle": {"name": "Bambu Lab P1P 0.4 nozzle"},
+    "Bambu Lab P1S 0.4 nozzle": {"name": "Bambu Lab P1S 0.4 nozzle"},
+    "0.20mm Standard @BBL P1P": {"name": "0.20mm Standard @BBL P1P"},
+    # Generic filaments -- the base INDEX only has process profiles, so add one
+    # filament per supported process token (A1, A1M, P1P) for the resolution
+    # guard below.
+    "Generic PLA @BBL A1": {"name": "Generic PLA @BBL A1"},
+    "Generic PLA @BBL A1M": {"name": "Generic PLA @BBL A1M"},
+    "Generic PLA @BBL P1P": {"name": "Generic PLA @BBL P1P"},
+})
+
+
+def test_p1p_resolves_a_preset_and_a_filament():
+    got = resolve_preset("standard", "C11", "0.4", MULTI_INDEX)
+    assert got["process"] == "0.20mm Standard @BBL P1P"
+    assert filament_profile_name("PLA", "C11") == "Generic PLA @BBL P1P"
+    assert {f["material"] for f in available_filaments("C11", MULTI_INDEX)} \
+        >= {"PLA"}
+
+
+def test_p1s_machine_is_p1s_but_process_and_filament_reuse_p1p():
+    # THE TRAP: the P1S has its own MACHINE profile but no @BBL P1S process or
+    # filament -- both reuse P1P. A naive PROCESS_TOKENS["C12"]="P1S" resolves
+    # nothing. Machine name must be the P1S; process/filament must be P1P.
+    assert machine_profile_name("C12", "0.4") == "Bambu Lab P1S 0.4 nozzle"
+    got = resolve_preset("standard", "C12", "0.4", MULTI_INDEX)
+    assert got["process"] == "0.20mm Standard @BBL P1P"     # P1P, not P1S
+    assert got["machine"] == "Bambu Lab P1S 0.4 nozzle"     # but the P1S bed
+    assert filament_profile_name("PLA", "C12") == "Generic PLA @BBL P1P"
+
+
+def test_every_supported_model_resolves_something():
+    # Guard: every model we claim to support must resolve at least one preset
+    # AND one filament against its real profile names -- a wrong token is a
+    # silent empty dropdown otherwise.
+    from server.slicepresets import MACHINE_TOKENS
+    assert set(MACHINE_TOKENS) == {"N2S", "N1", "C11", "C12"}, \
+        "a model was added/removed without updating this guard"
+    for mid in MACHINE_TOKENS:
+        assert available_presets(mid, "0.4", MULTI_INDEX), f"{mid}: no presets"
+        assert available_filaments(mid, MULTI_INDEX), f"{mid}: no filaments"

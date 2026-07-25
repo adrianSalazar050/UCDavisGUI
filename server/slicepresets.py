@@ -24,11 +24,32 @@ TIERS = {
 }
 
 # Bambu model id -> the token used in MACHINE profile names.
-MACHINE_TOKENS = {"N2S": "A1", "N1": "A1 mini"}
+# Every token here is verified against the installed vendor profiles
+# (resources/profiles/BBL/**), not derived -- see the two traps below.
+MACHINE_TOKENS = {
+    "N2S": "A1",        # A1        (verified on hardware)
+    "N1": "A1 mini",    # A1 mini
+    "C11": "P1P",       # P1P
+    "C12": "P1S",       # P1S       -- its OWN machine profile...
+}
 
 # Bambu model id -> the token used in PROCESS and FILAMENT profile names.
-# Not derivable from MACHINE_TOKENS: the mini is "A1M" here, "A1 mini" there.
-PROCESS_TOKENS = {"N2S": "A1", "N1": "A1M"}
+# NOT derivable from MACHINE_TOKENS. Two traps, both the "one printer, two
+# tokens" split master.md 6.3 documents for the A1 mini:
+#   - the mini is "A1 mini" in machine names but "A1M" here;
+#   - the P1S is "P1S" in machine names but REUSES "P1P" here -- there is no
+#     "@BBL P1S" process or filament profile in the tree at all (verified
+#     2026-07-25). PROCESS_TOKENS["C12"] = "P1S" would resolve nothing.
+# The X-series (X1/X1C, BL-P00x) is deliberately absent: it has no
+# "Generic <material>" filament profiles, so filament_profile_name below
+# cannot resolve it -- that needs a per-model base name, a separate change
+# (see the 2026-07-25 slicing design, section 2.6).
+PROCESS_TOKENS = {
+    "N2S": "A1",        # A1
+    "N1": "A1M",        # A1 mini   -- process token differs from machine
+    "C11": "P1P",       # P1P
+    "C12": "P1P",       # P1S       -- ...but P1P's process/filament profiles
+}
 
 
 def machine_profile_name(model_id: str, nozzle: str) -> str:

@@ -1,8 +1,10 @@
 # Slicing improvements: STL preview + reorient, and presets for all Bambu models — design
 
 > **STATUS: DESIGN APPROVED 2026-07-25 — NOT IMPLEMENTED.** Two independent
-> slicing improvements, brainstormed and approved. Feature A (all-model preset
-> coverage) is a small backend change; Feature B (in-browser STL preview +
+> slicing improvements, brainstormed and approved. Feature A (preset coverage
+> for the four models whose profiles fit the existing convention — A1, A1 mini,
+> P1P, P1S; X-series deferred, see §2.2/§2.6) is a small backend change;
+> Feature B (in-browser STL preview +
 > reorient) is a larger frontend feature that adds this project's first
 > heavyweight dependency (three.js). They get separate implementation plans.
 > **`master.md` is authoritative wherever this file disagrees.**
@@ -48,45 +50,55 @@ Every other model id in `store.MODEL_NAMES` — `C11` (P1P), `C12` (P1S),
 `machine_profile_name`/`filament_profile_name` return `""` and the options
 route yields empty lists.
 
-### 2.2 The change
+### 2.2 What "all models" actually resolves to (verified 2026-07-25)
 
-Extend both maps to cover all six models, with every token **verified against
-the actually-installed vendor profiles**, not guessed. Confirmed by inspecting
-`resources/profiles/BBL/**` on this machine (2026-07-25):
+Verifying the proposed tokens against the real 1,932-profile index (not just
+eyeballing names) revealed that only **four** of the six models cleanly fit the
+existing `Generic <material> @BBL <token>` filament convention. The other two —
+the X-series — do not, for concrete reasons below. So Feature A ships the four
+that work end to end (presets **and** filaments resolve, so a user can actually
+slice), and the X-series is a scoped follow-up rather than a half-working
+dropdown.
 
-Verified against `resources/profiles/BBL/**` on this machine (2026-07-25 —
-machine profile names, and which `@BBL <token>` process/filament profiles
-exist):
+**Shipped — the four that resolve completely** (presets in all three tiers +
+generic filaments, at the 0.4 nozzle):
 
 | Model id | `MODEL_NAMES` | Machine token | Process/filament token | Notes |
 |---|---|---|---|---|
 | `N2S` | A1 | `A1` | `A1` | verified on hardware |
 | `N1` | A1 mini | `A1 mini` | `A1M` | machine ≠ process token |
 | `C11` | P1P | `P1P` | `P1P` | |
-| `C12` | P1S | `P1S` | `P1P` | **machine `P1S`, but process/filament reuse `P1P`** — there is no `@BBL P1S` profile at all |
-| `BL-P001` | X1 Carbon | `X1 Carbon` | `X1C` | machine ≠ process token |
-| `BL-P002` | X1 | `X1` | `X1` | |
+| `C12` | P1S | `P1S` | `P1P` | **machine `P1S`, but process/filament reuse `P1P`** — no `@BBL P1S` profile exists at all |
 
-**Two rows are traps, both the same "one printer, two tokens" split
-`master.md` §6.3 documents for the A1 mini:**
+The **P1S** row is the trap this table exists to record — the same "one
+printer, two tokens" split `master.md` §6.3 documents for the A1 mini, now with
+a model reusing a *different* model's process token. A naive
+`PROCESS_TOKENS["C12"] = "P1S"` yields zero presets.
 
-- **P1S** — machine profile is `Bambu Lab P1S 0.4 nozzle`, but its process and
-  filament profiles are `@BBL P1P` (confirmed: no `@BBL P1S` profile exists in
-  the tree). So P1S reuses a *different model's* process token. A naive
-  `PROCESS_TOKENS["C12"] = "P1S"` yields zero presets.
-- **X1 Carbon** — machine profile is `Bambu Lab X1 Carbon 0.4 nozzle` (token
-  `X1 Carbon`, with the space), but its process/filament profiles are `@BBL
-  X1C`. A naive `MACHINE_TOKENS["BL-P001"] = "X1C"` yields no machine profile.
+**Deferred — the X-series, and why** (`BL-P001` X1 Carbon, `BL-P002` X1):
+
+- **The X-series has no `Generic <material>` filament profiles at all.** The
+  `Generic PLA @BBL <token>` names exist only for `A1`, `A1M`, `P1P`, `P2S`,
+  `H2*` — never `X1`/`X1C`. The X-series names its baseline PLA
+  `Bambu PLA Basic @BBL X1C`, and the naming is irregular even within itself
+  (PETG is `Bambu PETG Basic`, ABS is `Bambu ABS` with no "Basic", TPU is
+  different again). So `filament_profile_name`'s single `f"Generic {material}
+  @BBL {token}"` formula cannot resolve any X-series filament. X1 Carbon
+  *presets* resolve (machine token `X1 Carbon`, process token `X1C`), but with
+  no filament it can't slice — shipping it would be a dropdown that dead-ends.
+- **The plain X1 (`BL-P002`) is a degenerate case.** Its only process profiles
+  are `0.30mm Standard @BBL X1 0.6 nozzle` and `0.40mm Standard @BBL X1 0.8
+  nozzle` — no 0.4-nozzle tier, no Optimal/Extra Draft. The curated tier system
+  resolves nothing for it at the default nozzle. It is a rare legacy machine.
+
+Supporting the X-series well means a small **per-model filament base-name**
+layer (X-series → `Bambu <material> Basic` with per-material exceptions), which
+is its own change with its own verification — not the "extend two dicts" this
+feature is. It is written up in §2.6 as the follow-up.
 
 `machine_profile_name` already formats as `f"Bambu Lab {token} {nozzle}
-nozzle"`, which produces the correct `Bambu Lab X1 Carbon 0.4 nozzle` from the
-`X1 Carbon` token — no format change needed, only the right tokens. This is
-exactly why the tokens are two separate maps and must be read off real profile
-names, never derived from each other.
-
-The final tokens are locked in by the plan against the installed index (and,
-if the user drops a real P1S/X1-sliced `.gcode.3mf` on the desktop, cross-
-checked against the `printer_model_id` and profile names it recorded).
+nozzle"`, so the `A1 mini` / `P1S` tokens (with spaces) produce the right
+machine names with no format change — only the right tokens matter.
 
 ### 2.3 What does NOT change
 
@@ -98,11 +110,23 @@ checked against the `printer_model_id` and profile names it recorded).
   `PrinterConfig.bed_type` is already configurable per printer, so no model-
   specific bed logic is needed.
 
+### 2.6 Follow-up: X-series filament support
+
+Not in this feature; recorded so the deferral is a decision, not an omission.
+To support X1 Carbon (and any future X-series), `filament_profile_name` needs a
+per-model **filament base name**, because the X-series has no `Generic
+<material>` profiles. Verified names for X1 Carbon (`X1C`), 0.4 nozzle:
+`Bambu PLA Basic @BBL X1C`, `Bambu PETG Basic @BBL X1C`, `Bambu ABS @BBL X1C`
+(no "Basic"), and TPU needs its own lookup (none of the tried names matched).
+The plain X1 (`BL-P002`) would remain unsupported at 0.4 nozzle regardless —
+its process profiles only exist at 0.6/0.8. This is a small, self-contained
+change with its own index verification; a candidate for its own spec.
+
 ### 2.4 Honesty about verification
 
-Only the A1 mapping is verified on real hardware here. The other five match the
+Only the A1 mapping is verified on real hardware here. P1P and P1S match the
 installed profile names and community knowledge, but no one on this project has
-sliced-and-printed on a real P1P/P1S/X1. The spec and code record that: the
+sliced-and-printed on a real P1P/P1S. The spec and code record that: the
 tokens are *correct against the profiles*, not *proven on the machines*.
 
 ### 2.5 Testing
@@ -111,10 +135,9 @@ tokens are *correct against the profiles*, not *proven on the machines*.
   preset and **at least one** filament against a fixture of real profile names
   (a small hand-built index containing one profile per model). A wrong token
   fails the suite rather than surfacing as a silent empty dropdown.
-- Tests that pin the two traps specifically, so a future "cleanup" that
-  naively derives one token from the other breaks loudly: the P1S process token
-  is `P1P` (not `P1S`), and the X1 Carbon machine token is `X1 Carbon` (not
-  `X1C`).
+- A test that pins the P1S trap specifically, so a future "cleanup" that
+  naively sets the P1S process token to `P1S` breaks loudly: `resolve_preset`
+  for `C12` must resolve against a `@BBL P1P` process name.
 
 ---
 
