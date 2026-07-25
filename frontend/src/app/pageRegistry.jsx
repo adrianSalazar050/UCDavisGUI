@@ -2,6 +2,7 @@ import Dashboard from "../pages/Dashboard.jsx";
 import Detection from "../pages/Detection.jsx";
 import Overview from "../pages/Overview.jsx";
 import Queue from "../pages/Queue.jsx";
+import Robot from "../pages/Robot.jsx";
 import SdFiles from "../pages/SdFiles.jsx";
 
 // Every page: key -> { title, group, component }. The sidebar and topbar
@@ -15,6 +16,8 @@ export const pages = {
   detection: { title: "Detection", group: "Monitor", component: Detection },
   sdfiles: { title: "SD Files", group: "Monitor", component: SdFiles },
   queue: { title: "Queue", group: "Monitor", component: Queue },
+  // Not a printer page: drives the arm, ignores the printers/selected props.
+  robot: { title: "Robot Arm", group: "Control", component: Robot },
 };
 
 export function navGroups() {

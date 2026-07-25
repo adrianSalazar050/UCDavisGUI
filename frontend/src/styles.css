@@ -692,3 +692,55 @@ a { color: var(--primary); }
   margin-top: var(--sp-2);
 }
 .detect-roi__error { font-size: 12px; color: var(--danger-text); }
+
+/* ---- Robot Arm page ---- */
+.robot-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.robot-cmdlist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.robot-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sp-3);
+}
+/* the docstring spans the row above the inputs */
+.robot-form__doc {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.robot-busy-note {
+  margin-top: var(--sp-2);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.robot-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--line);
+}
+.robot-result:last-child { border-bottom: none; }
+.robot-result__name { font-weight: 600; }
+.robot-result__time { font-size: 12px; color: var(--text-muted); }
+/* results can be long (a dry-run call signature, a stack message) -- give them
+   the full width and let them wrap instead of stretching the row */
+.robot-result__body {
+  flex-basis: 100%;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}

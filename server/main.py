@@ -17,6 +17,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import robot_link          # shared with the robot computer; see its header
+
 from . import runs, sdcard, threemf
 from .detection import CLASSES  # the 6 valid armed classes
 from .printer import PrinterBusy
@@ -116,6 +118,14 @@ class AddQueueJob(BaseModel):
 
 class ReorderQueueJobs(BaseModel):
     ids: list[str]
+
+
+class RobotCommand(BaseModel):
+    """POST body for the robot arm. `name` is checked against the agent's
+    whitelist, not here, so adding a command needs no change on this side."""
+
+    name: str
+    params: dict = {}
 
 
 def _comparable(printers: list[dict]) -> list[dict]:
@@ -475,6 +485,38 @@ def create_app(registry, runs_dir: pathlib.Path,
             return JSONResponse({"error": "no detector frame"}, status_code=404)
         return Response(content=data, media_type="image/jpeg",
                         headers={"Cache-Control": "no-store"})
+
+    # ---- robot arm -------------------------------------------------------
+    # Proxied to robot_agent.py on the robot computer (see robot_link.py).
+    # Sync defs on purpose: robot_link blocks on urllib, and FastAPI runs sync
+    # handlers on a threadpool, so a slow agent can't stall the event loop and
+    # freeze every connected WebSocket.
+
+    @app.get("/api/robot")
+    def robot_status():
+        """Agent liveness + command specs. An unreachable robot is a normal
+        state here (its computer may be off), so it comes back as
+        reachable:false rather than an error."""
+        try:
+            return {"reachable": True, **robot_link.ping()}
+        except robot_link.RobotError as e:
+            return {"reachable": False, "error": str(e)}
+
+    @app.post("/api/robot/command", status_code=202)
+    def robot_command(body: RobotCommand):
+        try:
+            return robot_link.send_command(body.name, body.params)
+        except robot_link.RobotError as e:
+            # 409 keeps "arm is busy" distinct from "robot unreachable"
+            code = 409 if "busy" in str(e).lower() else 502
+            raise HTTPException(code, str(e))
+
+    @app.get("/api/robot/command/{command_id}")
+    def robot_command_result(command_id: int):
+        try:
+            return robot_link.command_status(command_id)
+        except robot_link.RobotError as e:
+            raise HTTPException(502, str(e))
 
     @app.websocket("/ws")
     async def ws(sock: WebSocket):

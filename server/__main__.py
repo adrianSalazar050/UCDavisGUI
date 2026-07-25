@@ -10,6 +10,7 @@ import argparse
 import logging
 import pathlib
 import signal
+import socket
 
 import uvicorn
 
@@ -22,6 +23,11 @@ from .registry import PrinterRegistry
 from .store import MemoryStore, PrinterStore
 
 log = logging.getLogger("server.__main__")
+
+# Interfaces the dashboard answers on. 0.0.0.0 covers wifi, hotspot and the
+# tailnet, so a phone can reach it; "127.0.0.1" restricts it to this machine,
+# and a tailscale address (`tailscale ip -4`) to tailnet devices only.
+HOST = "0.0.0.0"
 
 # serial, name, mode, capture -- one of each state so the Overview grid is
 # fully exercisable with no hardware.
@@ -65,6 +71,18 @@ def mock_factory(runs_dir: pathlib.Path):
                             model_id=cfg.model_id)
 
     return make
+
+
+def _outbound_ip() -> str:
+    """This machine's address on the network it routes through. Taken off a UDP
+    socket's local end rather than gethostbyname(), which tends to answer
+    127.0.1.1; connect() on a datagram socket sends nothing."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        except OSError:                      # offline, no route to pick
+            return "this machine's IP"
 
 
 def main() -> int:
@@ -135,7 +153,12 @@ def main() -> int:
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, signal.default_int_handler)
     try:
-        uvicorn.run(app, host="127.0.0.1", port=a.port)
+        # uvicorn only logs the bind address, and 0.0.0.0 isn't one anybody can
+        # type into a phone.
+        if HOST == "0.0.0.0":
+            log.info("open the dashboard from another device at http://%s:%d",
+                     _outbound_ip(), a.port)
+        uvicorn.run(app, host=HOST, port=a.port)
     finally:
         registry.stop_all()
     return 0
