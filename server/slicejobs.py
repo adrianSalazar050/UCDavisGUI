@@ -197,8 +197,11 @@ class SliceCoordinator:
             raise ValueError(
                 f"no {tier_id!r} preset for this printer -- check its model "
                 f"and nozzle ({nozzle} mm) on the Overview page")
-        filament = slicepresets.filament_profile_name(material, model_id)
-        if not filament or filament not in self._index:
+        # filament_profile_name resolves against the index and returns "" if
+        # nothing matches, so the in-index check it used to need is now inside.
+        filament = slicepresets.filament_profile_name(
+            material, model_id, self._index)
+        if not filament:
             raise ValueError(f"no profile for {material!r} on this printer")
 
         job_id = uuid.uuid4().hex

@@ -123,9 +123,12 @@ def test_tolerates_a_malformed_state_without_raising():
 
 
 def test_filament_profile_name_uses_the_process_token():
-    assert filament_profile_name("PLA", "N2S") == "Generic PLA @BBL A1"
-    assert filament_profile_name("PLA", "N1") == "Generic PLA @BBL A1M"
-    assert filament_profile_name("NOSUCH", "N2S") == ""
+    idx = {"Generic PLA @BBL A1": {}, "Generic PLA @BBL A1M": {}}
+    assert filament_profile_name("PLA", "N2S", idx) == "Generic PLA @BBL A1"
+    assert filament_profile_name("PLA", "N1", idx) == "Generic PLA @BBL A1M"
+    assert filament_profile_name("NOSUCH", "N2S", idx) == ""
+    # A material with no profile in the index resolves to "".
+    assert filament_profile_name("ABS", "N2S", idx) == ""
 
 
 def test_available_filaments_lists_only_what_resolves():
@@ -153,7 +156,7 @@ MULTI_INDEX = dict(INDEX, **{
 def test_p1p_resolves_a_preset_and_a_filament():
     got = resolve_preset("standard", "C11", "0.4", MULTI_INDEX)
     assert got["process"] == "0.20mm Standard @BBL P1P"
-    assert filament_profile_name("PLA", "C11") == "Generic PLA @BBL P1P"
+    assert filament_profile_name("PLA", "C11", MULTI_INDEX) == "Generic PLA @BBL P1P"
     assert {f["material"] for f in available_filaments("C11", MULTI_INDEX)} \
         >= {"PLA"}
 
@@ -166,7 +169,38 @@ def test_p1s_machine_is_p1s_but_process_and_filament_reuse_p1p():
     got = resolve_preset("standard", "C12", "0.4", MULTI_INDEX)
     assert got["process"] == "0.20mm Standard @BBL P1P"     # P1P, not P1S
     assert got["machine"] == "Bambu Lab P1S 0.4 nozzle"     # but the P1S bed
-    assert filament_profile_name("PLA", "C12") == "Generic PLA @BBL P1P"
+    assert filament_profile_name("PLA", "C12", MULTI_INDEX) == "Generic PLA @BBL P1P"
+
+
+# --- Follow-up: X1 Carbon (X1C), which has no Generic <material> profiles ---
+# Real X1C filament names (verified 2026-07-25): PLA/PETG are "Bambu <m> Basic",
+# ABS is "Bambu ABS" (no Basic), TPU is grade-specific "Bambu TPU 95A".
+X1C_INDEX = {
+    "Bambu Lab X1 Carbon 0.4 nozzle": {"name": "Bambu Lab X1 Carbon 0.4 nozzle"},
+    "0.20mm Standard @BBL X1C": {"name": "0.20mm Standard @BBL X1C"},
+    "Bambu PLA Basic @BBL X1C": {},
+    "Bambu PETG Basic @BBL X1C": {},
+    "Bambu ABS @BBL X1C": {},
+    "Bambu TPU 95A @BBL X1C": {},
+}
+
+
+def test_x1_carbon_machine_token_has_a_space_but_process_token_is_x1c():
+    assert machine_profile_name("BL-P001", "0.4") == "Bambu Lab X1 Carbon 0.4 nozzle"
+    got = resolve_preset("standard", "BL-P001", "0.4", X1C_INDEX)
+    assert got["process"] == "0.20mm Standard @BBL X1C"
+    assert got["machine"] == "Bambu Lab X1 Carbon 0.4 nozzle"
+
+
+def test_x1c_filaments_resolve_via_the_candidate_list():
+    # The X-series has no Generic profiles -- each material resolves to a
+    # different Bambu-branded base name, picked from the index.
+    assert filament_profile_name("PLA", "BL-P001", X1C_INDEX) == "Bambu PLA Basic @BBL X1C"
+    assert filament_profile_name("PETG", "BL-P001", X1C_INDEX) == "Bambu PETG Basic @BBL X1C"
+    assert filament_profile_name("ABS", "BL-P001", X1C_INDEX) == "Bambu ABS @BBL X1C"
+    assert filament_profile_name("TPU", "BL-P001", X1C_INDEX) == "Bambu TPU 95A @BBL X1C"
+    assert {f["material"] for f in available_filaments("BL-P001", X1C_INDEX)} \
+        == {"PLA", "PETG", "ABS", "TPU"}
 
 
 def test_every_supported_model_resolves_something():
@@ -174,8 +208,9 @@ def test_every_supported_model_resolves_something():
     # AND one filament against its real profile names -- a wrong token is a
     # silent empty dropdown otherwise.
     from server.slicepresets import MACHINE_TOKENS
-    assert set(MACHINE_TOKENS) == {"N2S", "N1", "C11", "C12"}, \
+    assert set(MACHINE_TOKENS) == {"N2S", "N1", "C11", "C12", "BL-P001"}, \
         "a model was added/removed without updating this guard"
+    idx = dict(MULTI_INDEX, **X1C_INDEX)   # covers every supported model
     for mid in MACHINE_TOKENS:
-        assert available_presets(mid, "0.4", MULTI_INDEX), f"{mid}: no presets"
-        assert available_filaments(mid, MULTI_INDEX), f"{mid}: no filaments"
+        assert available_presets(mid, "0.4", idx), f"{mid}: no presets"
+        assert available_filaments(mid, idx), f"{mid}: no filaments"

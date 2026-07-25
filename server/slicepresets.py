@@ -31,6 +31,7 @@ MACHINE_TOKENS = {
     "N1": "A1 mini",    # A1 mini
     "C11": "P1P",       # P1P
     "C12": "P1S",       # P1S       -- its OWN machine profile...
+    "BL-P001": "X1 Carbon",  # X1 Carbon -- machine token has a SPACE
 }
 
 # Bambu model id -> the token used in PROCESS and FILAMENT profile names.
@@ -40,15 +41,18 @@ MACHINE_TOKENS = {
 #   - the P1S is "P1S" in machine names but REUSES "P1P" here -- there is no
 #     "@BBL P1S" process or filament profile in the tree at all (verified
 #     2026-07-25). PROCESS_TOKENS["C12"] = "P1S" would resolve nothing.
-# The X-series (X1/X1C, BL-P00x) is deliberately absent: it has no
-# "Generic <material>" filament profiles, so filament_profile_name below
-# cannot resolve it -- that needs a per-model base name, a separate change
-# (see the 2026-07-25 slicing design, section 2.6).
+# The X1 Carbon (BL-P001) is supported now: its filaments resolve via the
+# candidate list in _filament_candidates (it has NO "Generic <material>"
+# profiles -- PLA is "Bambu PLA Basic @BBL X1C", ABS is "Bambu ABS @BBL X1C",
+# TPU is "Bambu TPU 95A @BBL X1C"). The PLAIN X1 (BL-P002) is still absent on
+# purpose: its only process profiles are 0.6/0.8-nozzle Standard, so nothing
+# resolves at the default 0.4 nozzle.
 PROCESS_TOKENS = {
     "N2S": "A1",        # A1
     "N1": "A1M",        # A1 mini   -- process token differs from machine
     "C11": "P1P",       # P1P
     "C12": "P1P",       # P1S       -- ...but P1P's process/filament profiles
+    "BL-P001": "X1C",   # X1 Carbon -- process/filament token, NOT "X1 Carbon"
 }
 
 
@@ -122,21 +126,45 @@ def available_presets(model_id: str, nozzle: str, index: dict) -> list:
 MATERIALS = ("PLA", "PETG", "ABS", "TPU")
 
 
-def filament_profile_name(material: str, model_id: str) -> str:
-    """Filament profile name, or "" when unavailable. Filament profiles use
-    the same token as process profiles (A1 / A1M), not the machine one."""
+def _filament_candidates(material: str, token: str) -> list:
+    """Candidate filament-profile names for a material, most-generic first.
+
+    Different model families name their baseline filament differently, and
+    resolving against the installed index (rather than one hardcoded formula)
+    is what lets one code path cover all of them:
+      - A1 / A1 mini / P1P / P1S -> "Generic <material> @BBL <token>";
+      - X1 Carbon has NO Generic profiles -- PLA/PETG are "Bambu <m> Basic",
+        ABS is "Bambu ABS" (no "Basic"), TPU is grade-specific "Bambu TPU 95A"
+        (95A is the common grade). Verified against the tree 2026-07-25.
+    """
+    return [
+        f"Generic {material} @BBL {token}",       # A/P-series
+        f"Bambu {material} Basic @BBL {token}",   # X1C PLA/PETG
+        f"Bambu {material} @BBL {token}",         # X1C ABS
+        f"Bambu {material} 95A @BBL {token}",     # X1C TPU (grade 95A)
+    ]
+
+
+def filament_profile_name(material: str, model_id: str, index: dict) -> str:
+    """The best filament profile for a material on a printer, verified to
+    exist in `index`, or "" when none resolves. Filament profiles use the
+    process token (A1 / A1M / X1C), not the machine one, and the exact name
+    varies by model family -- see _filament_candidates."""
     token = PROCESS_TOKENS.get(model_id)
     if not token or material not in MATERIALS:
         return ""
-    return f"Generic {material} @BBL {token}"
+    for candidate in _filament_candidates(material, token):
+        if candidate in index:
+            return candidate
+    return ""
 
 
 def available_filaments(model_id: str, index: dict) -> list:
     """Every material whose profile this slicer actually ships."""
     out = []
     for material in MATERIALS:
-        name = filament_profile_name(material, model_id)
-        if name and name in index:
+        name = filament_profile_name(material, model_id, index)
+        if name:
             out.append({"material": material, "profile": name})
     return out
 
