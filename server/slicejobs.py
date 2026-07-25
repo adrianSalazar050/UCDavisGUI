@@ -166,10 +166,15 @@ class SliceCoordinator:
         }
 
     def submit(self, serial, filename, data, tier_id, material,
-               supports) -> str:
+               supports, *, part_id=None, recipe_id=None) -> str:
         """Queue a slice. Raises KeyError (unknown printer) or ValueError
         (unusable preset/filament) -- both are 4xx at the route, and both are
-        checked HERE so a doomed job never reaches the worker."""
+        checked HERE so a doomed job never reaches the worker.
+
+        part_id/recipe_id are optional provenance: when a slice is submitted
+        for a stored part+recipe (rather than an ad-hoc upload), they ride
+        along on the job so the eventual queue entry -- and, once printed,
+        the run row -- is attributed back to the part."""
         if self._registry.get(serial) is None:
             raise KeyError(serial)
         model_id = self._registry.printer_model(serial)
@@ -198,6 +203,7 @@ class SliceCoordinator:
             "bed_type": None,
             "created": self._clock(), "error": None,
             "seconds": None, "grams": None, "sd_path": None,
+            "part_id": part_id, "recipe_id": recipe_id,
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -249,11 +255,13 @@ class SliceCoordinator:
             job["state"] = "slicing"
             serial, name, supports = job["serial"], job["name"], job["supports"]
             source_name = job["source_name"]
+            part_id = job.get("part_id")
+            recipe_id = job.get("recipe_id")
 
         work = self._work_dir / job_id
         try:
             self._do(job_id, serial, name, source_name, preset, filament_name,
-                     data, supports, work)
+                     data, supports, work, part_id=part_id, recipe_id=recipe_id)
         except Exception as e:
             # log.exception (not log.warning) so the traceback always lands
             # in the log, not just a bare "%s" of the message. The catch-all
@@ -282,7 +290,7 @@ class SliceCoordinator:
             shutil.rmtree(work, ignore_errors=True)
 
     def _do(self, job_id, serial, name, source_name, preset, filament_name,
-            data, supports, work) -> None:
+            data, supports, work, *, part_id=None, recipe_id=None) -> None:
         work.mkdir(parents=True, exist_ok=True)
         # The plan's original line here computed this as
         # `work / posixpath.basename(...) or work / "model.stl"` -- operator
@@ -333,6 +341,7 @@ class SliceCoordinator:
             # sliced file would otherwise skip the model guard entirely
             # (master.md 5.3). We know which printer we sliced for.
             "model_id": self._registry.printer_model(serial) or None,
+            "part_id": part_id, "recipe_id": recipe_id,
         })
         self._finish(job_id, "done", sd_path=target)
 

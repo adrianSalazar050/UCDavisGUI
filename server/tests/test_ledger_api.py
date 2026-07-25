@@ -334,6 +334,27 @@ def test_a_ledger_failure_never_blocks_the_print(tmp_path, led):
     assert svc.started, "start_print was never called -- the ledger blocked it"
 
 
+PART_JOB = {"id": "j1", "sd_path": "/Bracket.gcode.3mf", "name": "Bracket",
+            "seconds": 900, "grams": 12.5, "source": "3mf", "model_id": "",
+            "part_id": "p1", "recipe_id": "r1"}
+
+
+def test_a_confirmed_start_of_a_part_attributed_job_carries_part_and_recipe(
+        tmp_path, led):
+    # Task 8: a queue job that carries part_id/recipe_id (because it was
+    # sliced from a stored part+recipe) must land on the run row it opens.
+    svc = StartableService()
+    app = create_app(StartRegistry(svc), tmp_path,
+                     queue=FakeQueue([PART_JOB]), ledger=led)
+    client = TestClient(app)
+    res = client.post("/api/printers/S1/queue/j1/start")
+    assert res.json()["started"] is True
+    runs = led.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["part_id"] == "p1"
+    assert runs[0]["recipe_id"] == "r1"
+
+
 def test_a_printer_busy_start_records_unconfirmed(tmp_path, led):
     """start_print raising PrinterBusy -> the run opened before it closes as
     START_UNCONFIRMED, and the 409 still propagates."""
@@ -482,3 +503,125 @@ def test_a_recipe_route_rejects_a_foreign_part_id(parts_client, led):
     # and archiving through the wrong part is refused too
     assert parts_client.delete(f"/api/parts/{a}/recipes/{rb}").status_code == 404
     assert led.get_recipe(rb)["archived"] == 0
+
+
+# --- slice-from-part -------------------------------------------------------
+
+
+class FakeSlicer:
+    def __init__(self):
+        self.submits = []
+
+    def submit(self, serial, filename, data, tier_id, material, supports,
+               *, part_id=None, recipe_id=None):
+        self.submits.append({"serial": serial, "filename": filename,
+                             "data": data, "tier_id": tier_id,
+                             "material": material, "supports": supports,
+                             "part_id": part_id, "recipe_id": recipe_id})
+        return "job-xyz"
+
+
+@pytest.fixture
+def parts_slice_client(tmp_path, led):
+    store = FakePartStore()
+    fake_slicer = FakeSlicer()
+    app = create_app(FakeRegistry(), tmp_path, ledger=led, partstore=store,
+                     slicer=fake_slicer)
+    client = TestClient(app)
+    client._store = store
+    client._slicer = fake_slicer
+    return client
+
+
+def _part_with_model_and_recipe(client, led, *, part_number="X", **recipe_fields):
+    """Helper: a part with a stored model and one recipe, via the real
+    ledger + fake part store (mirrors the shape upload_part_model leaves
+    behind)."""
+    pid = client.post("/api/parts",
+                      json={"part_number": part_number}).json()["part"]["id"]
+    data = b"solid cube\n" * 10
+    up = client.post(f"/api/parts/{pid}/model",
+                     files={"file": ("cube.stl", data,
+                                     "application/octet-stream")})
+    assert up.status_code == 201
+    fields = {"preset_tier": "standard", "filament_material": "PLA",
+              "supports": True}
+    fields.update(recipe_fields)
+    rid = led.add_recipe(pid, name="Standard", **fields)
+    return pid, rid, data
+
+
+def test_slice_from_part_submits_with_the_recipes_settings(
+        parts_slice_client, led):
+    client = parts_slice_client
+    pid, rid, data = _part_with_model_and_recipe(client, led)
+    res = client.post(f"/api/printers/S1/slice/from-part",
+                      json={"part_id": pid, "recipe_id": rid})
+    assert res.status_code == 202
+    assert res.json() == {"job_id": "job-xyz"}
+    submitted = client._slicer.submits[0]
+    assert submitted["serial"] == "S1"
+    assert submitted["filename"] == "cube.stl"
+    assert submitted["data"] == data
+    assert submitted["tier_id"] == "standard"
+    assert submitted["material"] == "PLA"
+    assert submitted["supports"] is True
+    assert submitted["part_id"] == pid
+    assert submitted["recipe_id"] == rid
+
+
+def test_slice_from_part_404s_for_an_unknown_part(parts_slice_client, led):
+    _, rid, _ = _part_with_model_and_recipe(parts_slice_client, led)
+    res = parts_slice_client.post(
+        "/api/printers/S1/slice/from-part",
+        json={"part_id": "nope", "recipe_id": rid})
+    assert res.status_code == 404
+
+
+def test_slice_from_part_404s_for_an_unknown_recipe(parts_slice_client, led):
+    pid, _, _ = _part_with_model_and_recipe(parts_slice_client, led)
+    res = parts_slice_client.post(
+        "/api/printers/S1/slice/from-part",
+        json={"part_id": pid, "recipe_id": "nope"})
+    assert res.status_code == 404
+
+
+def test_slice_from_part_404s_when_the_recipe_belongs_to_another_part(
+        parts_slice_client, led):
+    client = parts_slice_client
+    pid_a, _, _ = _part_with_model_and_recipe(client, led, part_number="A")
+    pid_b, rid_b, _ = _part_with_model_and_recipe(client, led, part_number="B")
+    res = client.post("/api/printers/S1/slice/from-part",
+                      json={"part_id": pid_a, "recipe_id": rid_b})
+    assert res.status_code == 404
+
+
+def test_slice_from_part_404s_when_the_part_has_no_stored_model(
+        parts_slice_client, led):
+    client = parts_slice_client
+    pid = client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    rid = led.add_recipe(pid, name="Standard", preset_tier="standard",
+                         filament_material="PLA")
+    res = client.post("/api/printers/S1/slice/from-part",
+                      json={"part_id": pid, "recipe_id": rid})
+    assert res.status_code == 404
+
+
+def test_slice_from_part_400s_when_the_recipe_has_no_preset_tier(
+        parts_slice_client, led):
+    client = parts_slice_client
+    pid, rid, _ = _part_with_model_and_recipe(client, led, preset_tier=None)
+    res = client.post("/api/printers/S1/slice/from-part",
+                      json={"part_id": pid, "recipe_id": rid})
+    assert res.status_code == 400
+
+
+def test_slice_from_part_404s_without_a_slicer(tmp_path, led):
+    store = FakePartStore()
+    app = create_app(FakeRegistry(), tmp_path, ledger=led, partstore=store)
+    client = TestClient(app)
+    pid = client.post("/api/parts", json={"part_number": "X"}).json()["part"]["id"]
+    rid = led.add_recipe(pid, name="Standard", preset_tier="standard")
+    res = client.post("/api/printers/S1/slice/from-part",
+                      json={"part_id": pid, "recipe_id": rid})
+    assert res.status_code == 404

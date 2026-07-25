@@ -207,6 +207,11 @@ class RecipeBody(BaseModel):
     is_default: bool | None = None
 
 
+class SliceFromPart(BaseModel):
+    part_id: str
+    recipe_id: str
+
+
 class AddQueueJob(BaseModel):
     """POST body for queuing an SD-card file. sd_path is the only
     user-supplied field -- id/name/seconds/grams/source are all derived
@@ -630,7 +635,9 @@ def create_app(registry, runs_dir: pathlib.Path,
                     planned_seconds=job.get("seconds"),
                     planned_grams=job.get("grams"),
                     bed_type=_maybe(registry, "printer_bed_type", serial),
-                    nozzle=_maybe(registry, "printer_nozzle", serial))
+                    nozzle=_maybe(registry, "printer_nozzle", serial),
+                    part_id=job.get("part_id"),
+                    recipe_id=job.get("recipe_id"))
             except Exception as e:  # noqa: BLE001
                 # A ledger problem must never cost a print -- master.md
                 # section 11's boot invariant, one layer up.
@@ -998,6 +1005,42 @@ def create_app(registry, runs_dir: pathlib.Path,
         if not slicer.cancel(job_id):
             raise HTTPException(404, "unknown job")
         return Response(status_code=204)
+
+    @app.post("/api/printers/{serial}/slice/from-part", status_code=202)
+    def slice_from_part(serial: str, body: SliceFromPart):
+        """Slice a stored part with a stored recipe. The resulting queue job
+        carries part_id/recipe_id, so when it prints the run row is attributed
+        to the part -- no ad-hoc upload, and the record ties back to the
+        catalogue."""
+        _require_slicer()
+        _require_ledger()
+        if partstore is None:
+            raise HTTPException(404, "model storage is not enabled")
+        part = ledger.get_part(body.part_id)
+        if part is None:
+            raise HTTPException(404, "unknown part")
+        if not part.get("model_filename"):
+            raise HTTPException(404, "this part has no stored model to slice")
+        recipe = ledger.get_recipe(body.recipe_id)
+        if recipe is None or recipe["part_id"] != body.part_id:
+            raise HTTPException(404, "unknown recipe for this part")
+        if not recipe.get("preset_tier"):
+            raise HTTPException(400, "this recipe has no quality preset set")
+        try:
+            data = partstore.open_bytes(body.part_id, part["model_filename"])
+        except OSError:
+            raise HTTPException(404, "the part's model file is missing")
+        try:
+            job_id = slicer.submit(
+                serial, part["model_filename"], data,
+                recipe["preset_tier"], recipe.get("filament_material"),
+                bool(recipe.get("supports")),
+                part_id=body.part_id, recipe_id=body.recipe_id)
+        except KeyError:
+            raise HTTPException(404, "unknown printer")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"job_id": job_id}
 
     @app.get("/api/frame/latest")
     def frame_latest():

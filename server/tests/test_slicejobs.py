@@ -220,6 +220,21 @@ def test_run_once_is_a_noop_with_nothing_queued(tmp_path):
     make(tmp_path).run_once()
 
 
+def test_a_slice_submitted_for_a_part_carries_part_and_recipe_onto_the_job(
+        tmp_path):
+    # Task 8: slicing a STORED part with a STORED recipe must stamp
+    # part_id/recipe_id onto the resulting queue job, so the run row it
+    # eventually opens is attributed back to the part.
+    q = FakeQueue()
+    c = make(tmp_path, queue=q)
+    c.submit("AAA", "p.stl", b"x", "standard", "PLA", False,
+             part_id="p1", recipe_id="r1")
+    c.run_once()
+    qserial, qjob = q.jobs[0]
+    assert qjob["part_id"] == "p1"
+    assert qjob["recipe_id"] == "r1"
+
+
 # -- Issue 1: stop()/start() thread lifecycle --------------------------------
 #
 # Nothing above touches start()/stop() at all -- that's exactly why the
