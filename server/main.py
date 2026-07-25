@@ -1024,7 +1024,10 @@ def create_app(registry, runs_dir: pathlib.Path,
             sid = ledger.create_spool(spool_code=body.spool_code,
                                       material=body.material, **fields)
         except sqlite3.IntegrityError:
-            raise HTTPException(409, f"spool code {body.spool_code!r} already exists")
+            raise HTTPException(
+                409, f"spool code {body.spool_code!r} already exists")
+        except ValueError as e:  # unknown / reserved status value
+            raise HTTPException(400, str(e))
         return _spool_detail(sid)
 
     @app.get("/api/spools/low")
@@ -1048,6 +1051,8 @@ def create_app(registry, runs_dir: pathlib.Path,
                 ledger.update_spool(spool_id, **fields)
             except sqlite3.IntegrityError:
                 raise HTTPException(409, "that spool code already exists")
+            except ValueError as e:  # unknown / reserved status value
+                raise HTTPException(400, str(e))
         return _spool_detail(spool_id)
 
     @app.delete("/api/spools/{spool_id}", status_code=204)
@@ -1071,13 +1076,11 @@ def create_app(registry, runs_dir: pathlib.Path,
         attributed to the right spool."""
         _require_ledger()
         if body.spool_id is None:
-            # unload: mark any in_use spool on this printer back to sealed
-            # and clear its printer_serial, mirroring the clear-half of
-            # set_loaded_spool's clear-then-set transaction.
-            loaded = ledger.loaded_spool(serial)
-            if loaded is not None:
-                ledger.update_spool(loaded["id"], status="sealed",
-                                    printer_serial=None)
+            # unload: clear whatever spool is loaded here. unload_spool is the
+            # clear-half of set_loaded_spool's transaction and the only writer
+            # of printer_serial besides it -- the free-write update_spool can
+            # no longer touch that column (see SPOOL_WRITABLE).
+            ledger.unload_spool(serial)
             return {"spool": None}
         if ledger.get_spool(body.spool_id) is None:
             raise HTTPException(404, "unknown spool")

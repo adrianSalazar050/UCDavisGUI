@@ -668,6 +668,46 @@ def test_exactly_one_loaded_spool_per_printer(led):
     assert [s["id"] for s in loaded] == [b]
 
 
+def test_free_write_cannot_forge_a_second_loaded_spool(led):
+    # Regression for the Phase-3 review's issue 1 (the is_default class of
+    # bug): the loaded marker `in_use` must be reachable ONLY through
+    # set_loaded_spool. This replays the exact HTTP-only exploit the review
+    # found -- a status-only edit used to leave printer_serial sticky, then a
+    # second status="in_use" edit forged a two-loaded-spool state.
+    a = led.create_spool(spool_code="A", material="PLA")
+    b = led.create_spool(spool_code="B", material="PETG")
+    led.set_loaded_spool("PRN1", a)          # A: in_use@PRN1
+    led.update_spool(a, status="sealed")     # unload A the "free" way
+    led.set_loaded_spool("PRN1", b)          # B: in_use@PRN1
+    # The old exploit: re-mark A in_use via the free write. Now rejected...
+    with pytest.raises(ValueError):
+        led.update_spool(a, status="in_use")
+    # ...and even if it had gone through, printer_serial is no longer writable
+    # via the free path, so it could not have pointed A back at PRN1.
+    with pytest.raises(ValueError):
+        led.update_spool(a, printer_serial="PRN1")
+    # Invariant holds: exactly one in_use spool on PRN1, and it is B.
+    loaded = [s for s in led.list_spools()
+              if s["status"] == "in_use" and s["printer_serial"] == "PRN1"]
+    assert [s["id"] for s in loaded] == [b]
+
+
+def test_create_spool_rejects_reserved_and_unknown_status(led):
+    with pytest.raises(ValueError):
+        led.create_spool(spool_code="Z1", material="PLA", status="in_use")
+    with pytest.raises(ValueError):
+        led.create_spool(spool_code="Z2", material="PLA", status="frobnicate")
+
+
+def test_unload_spool_clears_the_loaded_marker(led):
+    a = led.create_spool(spool_code="U", material="PLA")
+    led.set_loaded_spool("PRN1", a)
+    led.unload_spool("PRN1")
+    assert led.loaded_spool("PRN1") is None
+    got = led.get_spool(a)
+    assert got["status"] == "sealed" and got["printer_serial"] is None
+
+
 def test_a_duplicate_spool_code_is_rejected(led):
     import sqlite3 as _sq
     led.create_spool(spool_code="DUP", material="PLA")

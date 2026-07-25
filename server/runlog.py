@@ -176,7 +176,7 @@ class RunRecorder:
             end_state = "STOPPED_BY_MONITOR"
 
         grams, basis = self._grams(run, end_state)
-        self.ledger.close_run(
+        closed = self.ledger.close_run(
             run["id"], end_state=end_state,
             stopped_by_monitor=int(bool(stopped)),
             **({"actual_grams": grams, "actual_grams_basis": basis}
@@ -198,8 +198,14 @@ class RunRecorder:
         # actual_grams estimate + basis -- the printer never reports consumed
         # filament, so this inherits that estimate's honesty (the basis says
         # which kind). No spool, or no gram estimate -> no consumption row.
+        #
+        # Gated on `closed` (this call is the one that transitioned the run
+        # terminal), NOT just on reaching a terminal state: add_consumption is
+        # not idempotent, so re-observing FINISH must not decrement twice.
+        # close_run's WHERE end_state IS NULL makes the run row idempotent;
+        # this makes the spool decrement ride the same single transition.
         spool_id = run.get("spool_id")
-        if spool_id and grams:
+        if closed and spool_id and grams:
             try:
                 self.ledger.add_consumption(spool_id, run_id=run["id"],
                                             grams=grams, basis=basis)

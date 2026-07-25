@@ -243,6 +243,20 @@ END_STATES = ("FINISH", "FAILED", "STOPPED_BY_MONITOR",
 
 PIECE_STATUSES = ("pending_inspection", "good", "rework", "scrap")
 
+# A spool's lifecycle states. `in_use` is SPECIAL and deliberately excluded
+# from the free-write paths (create_spool/update_spool): it is the loaded
+# marker, and the ONE-LOADED-PER-PRINTER invariant only holds if the ONLY way
+# to reach it is set_loaded_spool's clear-then-set transaction. Reachable via a
+# free write, `update_spool(status="in_use")` would load a second spool on a
+# printer without clearing the first -- the exact fail-open the recipe
+# is_default column was hardened against. The other three are plain data the
+# operator may set directly: sealed (new/unloaded), spent (emptied),
+# retired (removed from service).
+SPOOL_STATUSES = ("sealed", "in_use", "spent", "retired")
+# The subset a free write (create_spool/update_spool) may set -- everything
+# EXCEPT in_use, per the note above.
+SPOOL_FREE_STATUSES = frozenset(SPOOL_STATUSES) - {"in_use"}
+
 # Columns create_part()/update_part() will write. part_number and revision
 # are ordinarily set once at creation (as explicit named params on
 # create_part, not through **fields) but are included here too so a rare
@@ -267,15 +281,20 @@ RECIPE_WRITABLE = frozenset({
 # Columns create_spool()/update_spool() will write. spool_code is included
 # so a rare catalogue correction can go through update_spool's single
 # _checked() guard rather than a second, uncontrolled code path -- same
-# reasoning as PART_WRITABLE above. `status`/`printer_serial` ARE listed
-# here (unlike is_default on recipes) because a plain load/unload is just
-# data correction; the ONE-LOADED-PER-PRINTER invariant is enforced by
-# set_loaded_spool doing a clear-then-set in a single transaction, not by
-# forbidding the columns outright.
+# reasoning as PART_WRITABLE above.
+#
+# `status` IS writable, but the VALUE `in_use` is rejected in
+# create_spool/update_spool (see SPOOL_FREE_STATUSES) so the loaded marker
+# stays reachable only through set_loaded_spool. `printer_serial` is
+# DELIBERATELY absent -- exactly like is_default on recipes: the only writers
+# are set_loaded_spool (load) and unload_spool (unload), both raw transactions.
+# Leaving it in the free-write path is what let a status-only edit keep a stale
+# printer_serial and forge a second in_use spool. Enforce the invariant by
+# construction, not by trusting the comment.
 SPOOL_WRITABLE = frozenset({
     "material", "colour", "brand", "filament_profile", "initial_grams",
     "purchase_cost", "currency", "supplier", "purchased_at", "status",
-    "printer_serial", "ams_slot", "spool_code",
+    "ams_slot", "spool_code",
 })
 
 # Who applies a badge. DETECTOR is the automated system's identity (the
@@ -304,6 +323,25 @@ def _checked(fields: dict, allowed: frozenset) -> dict:
     if bad:
         raise ValueError(f"not writable columns: {sorted(bad)}")
     return fields
+
+
+def _check_spool_status(fields: dict) -> None:
+    """Guard the spool `status` VALUE on the free-write paths.
+
+    A recognised status keeps the column meaningful (contrast the unvalidated
+    free-text it used to be), and rejecting `in_use` keeps the loaded marker
+    reachable only through set_loaded_spool -- so the free-write paths can
+    never forge a second loaded spool on a printer. `set_loaded_spool` sets
+    `in_use` with a raw UPDATE, not through here, so it is unaffected.
+    """
+    status = fields.get("status")
+    if status is None:
+        return
+    if status not in SPOOL_STATUSES:
+        raise ValueError(f"unknown spool status {status!r}")
+    if status not in SPOOL_FREE_STATUSES:
+        raise ValueError(
+            f"status {status!r} is set only by loading the spool")
 
 
 class Ledger:
@@ -597,14 +635,20 @@ class Ledger:
             params)
 
     def close_run(self, run_id: str, *, end_state: str,
-                  ended_at: str | None = None, **fields) -> None:
+                  ended_at: str | None = None, **fields) -> bool:
         """Set the terminal state, but ONLY on a run that is still open.
+        Returns True iff THIS call is the one that closed the run.
 
         The `end_state IS NULL` predicate is what makes this idempotent. Both
         the recorder and the start route can reach a close for the same run
         (a start that verifies, then the printer going terminal a second
         later), and the FIRST verdict is the true one -- a later re-close
         would otherwise overwrite FINISH with whatever the next poll saw.
+
+        The bool return lets a caller do a once-per-run side effect (the spool
+        decrement in runlog) exactly on the true close, instead of every time
+        it re-observes the terminal state -- consumption is not idempotent on
+        its own, so it must ride on this transition, not repeat with it.
         """
         if end_state not in END_STATES:
             raise ValueError(f"unknown end_state {end_state!r}")
@@ -615,10 +659,11 @@ class Ledger:
         for key, value in fields.items():
             sets.append(f"{key} = ?")
             params.append(value)
-        self.execute(
+        rowcount = self.execute(
             f"UPDATE print_runs SET {', '.join(sets)} "
             f"WHERE id = ? AND end_state IS NULL",
             params + [run_id])
+        return rowcount > 0
 
     def get_run(self, run_id: str) -> dict | None:
         rows = self.query("SELECT * FROM print_runs WHERE id = ?", (run_id,))
@@ -1005,6 +1050,7 @@ class Ledger:
         UNIQUE(part_number, revision).
         """
         _checked(fields, SPOOL_WRITABLE)
+        _check_spool_status(fields)
         ts = self._clock()
         spool_id = new_id()
         cols = ["id", "spool_code", "material", "created_at", "updated_at"]
@@ -1044,6 +1090,7 @@ class Ledger:
 
     def update_spool(self, spool_id: str, **fields) -> None:
         _checked(fields, SPOOL_WRITABLE)
+        _check_spool_status(fields)
         if not fields:
             return
         sets = ", ".join(f"{k} = ?" for k in fields)
@@ -1088,6 +1135,18 @@ class Ledger:
                 "UPDATE filament_spools SET status = 'in_use', "
                 "printer_serial = ?, updated_at = ? WHERE id = ?",
                 (printer_serial, ts, spool_id))
+
+    def unload_spool(self, printer_serial: str) -> None:
+        """Clear whatever spool is loaded on `printer_serial` -- the
+        clear-half of set_loaded_spool, on its own. This is the ONLY writer of
+        `printer_serial` besides set_loaded_spool (the column is not in
+        SPOOL_WRITABLE), so unloading cannot leave a stale printer_serial that
+        a later status edit could reuse to forge a second in_use spool."""
+        self.execute(
+            "UPDATE filament_spools SET status = 'sealed', "
+            "printer_serial = NULL, updated_at = ? "
+            "WHERE printer_serial = ? AND status = 'in_use'",
+            (self._clock(), printer_serial))
 
     def loaded_spool(self, printer_serial: str) -> dict | None:
         rows = self.query(

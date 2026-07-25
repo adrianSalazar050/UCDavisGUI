@@ -301,6 +301,25 @@ def test_finish_records_filament_consumption_against_the_runs_spool(led):
     assert led.remaining_grams(sid) == 980.0
 
 
+def test_reobserving_a_terminal_run_does_not_double_decrement(led):
+    # Regression for the Phase-3 review's issue 2: add_consumption is not
+    # idempotent, so a second _end for the same run (the recorder seeing the
+    # terminal state twice) must NOT charge the spool again. The fix gates the
+    # decrement on close_run's transition, mirroring the run row's own
+    # idempotency. Replays the review's exact probe: call _end twice.
+    sid = led.create_spool(spool_code="S", material="PLA", initial_grams=1000.0)
+    run = led.open_run(printer_serial="S1", source="queue",
+                       spool_id=sid, planned_grams=20.0)
+    rec = RunRecorder(FakeRegistry([]), led)
+    run_row = led.get_run(run)
+    fin = summary(state="FINISH")
+    rec._end("S1", run_row, fin, "FINISH")   # true close -> one decrement
+    rec._end("S1", run_row, fin, "FINISH")   # re-observed -> must be a no-op
+    cons = led.consumption_for_run(run)
+    assert len(cons) == 1
+    assert led.remaining_grams(sid) == 980.0
+
+
 def test_a_run_without_a_spool_records_no_consumption(led):
     run = led.open_run(printer_serial="S1", source="queue", planned_grams=20.0)
     run_ticks(led, [[summary(state="IDLE")],
