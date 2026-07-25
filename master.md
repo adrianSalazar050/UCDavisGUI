@@ -2176,3 +2176,60 @@ slice-from-part path, the frontend wrappers, and the Parts UI — all tested
 part-attributed run — the pieces are all in place and unit-tested, but no real
 slice-from-part print has been run yet. See
 `docs/superpowers/plans/2026-07-24-erp-traceability-phase2-parts.md`.
+
+## 15. Filament inventory (Phase 3)
+
+The ledger gained two tables at **schema version 3** so filament can be tracked
+by the gram: a **spool** is a physical reel (`spool_code` unique, material,
+colour, brand, `initial_grams`, purchase cost, supplier, status), and a
+**consumption** row charges a spool for the filament a run drew. As with §14
+the migration is forward-only and atomic — `MIGRATIONS[3]` is appended, and a
+v1 or v2 `ledger.db` upgrades in place keeping every recorded run (proven on
+the real ledger, v1→v2→v3).
+
+**`remaining_grams` is derived, never stored.** It is
+`initial_grams - COALESCE(SUM(consumption), 0)`, computed the same way in all
+three places that need it (`list_spools`, `remaining_grams`, `low_stock`), so
+it can never drift from the consumption rows that back it. When a spool has no
+recorded `initial_grams` it surfaces as **`null`** — "unknown", never coerced
+to `0` — and low-stock deliberately excludes those rather than sorting an
+unknown under every threshold. The frontend renders `null` as "—".
+
+**The loaded-spool link is operator-set.** A printer can't reliably report
+which spool is mounted, so the operator picks it on the Inventory page. `POST
+/api/printers/{serial}/spool` marks exactly one spool `in_use` on that printer;
+the start route stamps that `spool_id` onto the run, and when the run goes
+terminal the recorder writes one consumption row against it using the run's own
+`actual_grams` estimate + basis (§13's honesty about the estimate carries
+through — the printer never reports consumed filament).
+
+**Two invariants are enforced by construction, not convention** — the Phase-2
+review's two bug classes were caught reproduced here and fixed at the source:
+- *One loaded spool per printer.* The `in_use` marker is reachable **only**
+  through `set_loaded_spool` (a clear-then-set transaction). The free-write
+  `create_spool`/`update_spool` reject the value `in_use` (`SPOOL_FREE_STATUSES`),
+  `printer_serial` is not in `SPOOL_WRITABLE` at all, and unload goes through a
+  dedicated `unload_spool`. A status-only HTTP edit can no longer leave a stale
+  `printer_serial` behind and forge a second loaded spool.
+- *Consumption is charged once per run.* `close_run` returns whether **this**
+  call is the one that transitioned the run terminal, and the spool decrement
+  rides that single transition — so the recorder re-observing `FINISH` cannot
+  double-charge a spool (`add_consumption` is not idempotent on its own).
+
+**Routes** (`/api/spools`, behind `_require_ledger`): list/create/get/edit/
+archive, `GET /api/spools/low?threshold=` (declared before `/{spool_id}` so the
+path param doesn't swallow it), and the per-printer load/unload pair. A
+duplicate `spool_code` is a **409**; an unknown or reserved `status` value is a
+**400**. An **Inventory** page (fleet-wide, like Parts) adds spools, shows the
+list with derived remaining grams and a low-stock highlight, and carries the
+per-printer loaded-spool control.
+
+**Shipped:** the schema, helpers, the recorder consumption write, the routes,
+the frontend wrappers, and the Inventory UI — all tested (716 backend, 33
+frontend), with regression tests replaying both hardened exploit sequences, and
+the spool HTTP loop (create → load → read-back → unload, plus the 400 guards)
+smoke-tested live against the mock server. **Not yet verified on hardware:** a
+real print decrementing a real loaded spool end to end — the recorder path is
+unit-tested (`test_finish_records_filament_consumption...`) but no hardware run
+has charged a spool yet. See
+`docs/superpowers/plans/2026-07-25-erp-traceability-phase3-spools.md`.
