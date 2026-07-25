@@ -193,6 +193,20 @@ class RunRecorder:
                                   part_id=run.get("part_id"),
                                   order_line_id=run.get("order_line_id"))
 
+        # Decrement the spool this run drew from, if one was loaded when it
+        # started (the start route stamps run.spool_id). Uses the run's own
+        # actual_grams estimate + basis -- the printer never reports consumed
+        # filament, so this inherits that estimate's honesty (the basis says
+        # which kind). No spool, or no gram estimate -> no consumption row.
+        spool_id = run.get("spool_id")
+        if spool_id and grams:
+            try:
+                self.ledger.add_consumption(spool_id, run_id=run["id"],
+                                            grams=grams, basis=basis)
+            except Exception as e:  # noqa: BLE001
+                log.error("could not record consumption for run %s: %s",
+                          run["id"], e)
+
     def _stopped_by_monitor(self, serial: str) -> bool:
         if self.detection is None:
             return False

@@ -63,6 +63,18 @@ def _maybe(registry, method: str, serial: str):
         return None
 
 
+def _maybe_spool(ledger, serial: str):
+    """The loaded spool's id for a printer, or None. Never let a spool lookup
+    fail a start -- a ledger problem must not cost a print."""
+    if ledger is None:
+        return None
+    try:
+        loaded = ledger.loaded_spool(serial)
+        return loaded["id"] if loaded else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _close_run_quietly(ledger, run_id, end_state: str, serial: str,
                        detail: str) -> None:
     """Close a ledger run without ever letting a ledger problem surface as a
@@ -637,7 +649,8 @@ def create_app(registry, runs_dir: pathlib.Path,
                     bed_type=_maybe(registry, "printer_bed_type", serial),
                     nozzle=_maybe(registry, "printer_nozzle", serial),
                     part_id=job.get("part_id"),
-                    recipe_id=job.get("recipe_id"))
+                    recipe_id=job.get("recipe_id"),
+                    spool_id=_maybe_spool(ledger, serial))
             except Exception as e:  # noqa: BLE001
                 # A ledger problem must never cost a print -- master.md
                 # section 11's boot invariant, one layer up.

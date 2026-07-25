@@ -284,3 +284,26 @@ def test_a_ledger_that_raises_never_escapes_the_tick(led):
 
     rec = RunRecorder(FakeRegistry([[summary(state="RUNNING")]]), Exploding())
     rec.tick()   # must not raise
+
+
+def test_finish_records_filament_consumption_against_the_runs_spool(led):
+    sid = led.create_spool(spool_code="S", material="PLA", initial_grams=1000.0)
+    run = led.open_run(printer_serial="S1", source="queue",
+                       spool_id=sid, planned_grams=20.0)
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING", layer=100, total=100)],
+                    [summary(state="FINISH")]])
+    cons = led.consumption_for_run(run)
+    assert len(cons) == 1
+    assert cons[0]["grams"] == 20.0
+    assert cons[0]["basis"] == "planned"
+    assert cons[0]["spool_id"] == sid
+    assert led.remaining_grams(sid) == 980.0
+
+
+def test_a_run_without_a_spool_records_no_consumption(led):
+    run = led.open_run(printer_serial="S1", source="queue", planned_grams=20.0)
+    run_ticks(led, [[summary(state="IDLE")],
+                    [summary(state="RUNNING")],
+                    [summary(state="FINISH")]])
+    assert led.consumption_for_run(run) == []

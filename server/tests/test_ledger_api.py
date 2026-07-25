@@ -372,6 +372,15 @@ def test_a_printer_busy_start_records_unconfirmed(tmp_path, led):
     assert runs[0]["end_state"] == "START_UNCONFIRMED"
 
 
+def test_start_stamps_the_loaded_spool_onto_the_run(tmp_path, led):
+    sid = led.create_spool(spool_code="LOADED", material="PLA")
+    led.set_loaded_spool("S1", sid)
+    client, _ = _start_client(tmp_path, led)
+    client.post("/api/printers/S1/queue/j1/start")
+    run = led.list_runs()[0]
+    assert run["spool_id"] == sid
+
+
 def test_a_badge_on_an_unknown_piece_is_404(client):
     """I2: a badge applied to a nonexistent piece is a clean 404, not a
     silent 200 against a ghost piece."""
