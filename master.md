@@ -232,11 +232,16 @@ itself is served from.
 
 `--host` (default `127.0.0.1`) makes exposure opt-in. **THE FAIL-CLOSED
 RULE**, enforced by `build_auth()` in `server/__main__.py`: binding anywhere
-other than loopback **without** `BAMBU_PASSWORD` set in the environment makes
-the server refuse to start, rather than boot unprotected. Putting "stop a
-print / upload a file / start a job" on a shared network must not be possible
-by forgetting a flag — this is the single most important property of the
-design.
+other than loopback with **no password resolved** makes the server refuse to
+start, rather than boot unprotected. Putting "stop a print / upload a file /
+start a job" on a shared network must not be possible by forgetting a flag —
+this is the single most important property of the design.
+
+`--lan` (§8) is a convenience wrapper over exactly that: it picks the host and
+sources the password from a file, then hands both to the *same* `build_auth`.
+It deliberately owns **no** part of the decision — `resolve_password()`
+returns `None` for a missing or blank file and lets `build_auth` refuse, so
+the rule has one implementation rather than two that can drift apart.
 
 `server/auth.py` (`Auth`) holds one shared password — SHA-256 +
 `hmac.compare_digest`, so a wrong guess cannot be timed character by
@@ -510,7 +515,7 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 | `runlog.py` | Turning `registry.summaries()` diffs into run/event rows (§13) | `RunRecorder`, `RECONCILE_DEADLINE_S` |
 | `partstore.py` | Part model bytes on disk, pure of the DB (§14) | `PartStore` |
 | `auth.py` | Shared-password auth for LAN serving (§2.1) | `Auth`, `is_loopback`, `LOOPBACK_HOSTS` — `build_auth` (the fail-closed rule) lives in `__main__.py`, not here |
-| `__main__.py` | CLI entry, wiring, `--mock` seeding, `--host`/`build_auth` (§2.1) | `main`, `real_factory`, `mock_factory`, `MOCK_SEED`, `build_auth` |
+| `__main__.py` | CLI entry, wiring, `--mock` seeding, `--host`/`--lan`/`build_auth` (§2.1, §8) | `main`, `real_factory`, `mock_factory`, `MOCK_SEED`, `build_auth`, `resolve_host`, `resolve_password`, `read_password_file`, `local_ipv4s`, `lan_url_lines`, `DEFAULT_HOST`, `LAN_HOST`, `PASSWORD_FILE` |
 
 **`store.py`.** `PrinterConfig` fields: `serial`, `host`, `access_code`, `name`
 (falls back to host), `capture`, `camera_source` (`"a1"`/`"webcam"`),
@@ -1473,33 +1478,64 @@ Then open <http://127.0.0.1:8000>. Printers are added **in the browser**
 (Overview → Add printer) — there are no `--serial/--access-code` flags.
 
 To serve the dashboard to the rest of the lab instead of just this machine
-(§2.1), set a password and bind beyond loopback:
+(§2.1), use **`--lan`**:
+
+```bash
+python -m server --lan
+```
+
+That is the whole command. It binds `0.0.0.0`, reads the shared password from
+**`.bambu-password`** at the repo root, and prints the URLs to hand out:
+
+```
+  Bambu Monitor -- serving to the LAN on 0.0.0.0:8000
+  password loaded from .bambu-password
+
+  hand out one of these:
+    http://192.168.182.1:8000
+    http://192.168.137.1:8000   <- same subnet as a registered printer
+    http://10.22.188.243:8000
+
+  Test with one phone before telling everyone the URL.
+```
+
+The equivalent long form still works and is what `--lan` expands to:
 
 ```bash
 BAMBU_PASSWORD=<shared password> python -m server --host 0.0.0.0
-# PowerShell: $env:BAMBU_PASSWORD="<shared password>"; python -m server --host 0.0.0.0
+# PowerShell: $env:BAMBU_PASSWORD="<pw>"; python -m server --host 0.0.0.0
 ```
 
-Everyone else then just opens `http://<that machine's LAN IP>:8000` and logs
-in with the shared password. The default with no `--host` stays
-`127.0.0.1` (this machine only, no password needed) — exposure is opt-in, and
-binding anywhere else **without** `BAMBU_PASSWORD` set refuses to start
-(§2.1's fail-closed rule).
+`BAMBU_PASSWORD` **always wins** over the file, so `--lan` changes nothing
+about the documented environment-variable path — and the desktop build, which
+never passes `--lan`, is untouched. An explicit `--host` also overrides
+`--lan`, so `--lan --host 192.168.1.5` narrows the bind rather than being
+silently widened back.
 
-**Where the password lives on the lab machine.** By convention it is a single
-line in **`.bambu-password`** at the repo root, gitignored (`.gitignore`, same
-reasoning as `printers.json*` — that file holds the printer access code). The
-server reads it into the environment at launch rather than storing it itself:
+> **`--lan` is a shortcut for typing, never a way around the password.** With
+> no password in the environment *and* no usable `.bambu-password`, it refuses
+> to start exactly as a bare `--host 0.0.0.0` would — §2.1's fail-closed rule
+> is untouched, and `test_lan_cannot_open_a_hole` exists to keep it that way
+> (verified by deliberately introducing the hole and watching it fail).
 
-```bash
-BAMBU_PASSWORD="$(cat .bambu-password)" python -m server --host 0.0.0.0
-```
+**Where the password lives.** A single line in `.bambu-password` at the repo
+root, gitignored (same reasoning as `printers.json*` — both hold a secret in
+plaintext). `cat .bambu-password` is the answer to "what is the password?",
+and rotating it is: write a new value, restart. Only the **first line** is
+read, stripped, and a UTF-8 BOM is tolerated — a BOM glued to the front of a
+password is otherwise a wrong password with no visible cause. Keeping it out
+of argv is deliberate for the same reason the printer access code is (§11): a
+command line is visible to any process listing.
 
-Nothing in the code knows about that filename — it is purely an operational
-habit, so `cat .bambu-password` is the answer to "what is the password?" and
-rotating it is: write a new value, restart. Keeping it out of argv is
-deliberate for the same reason the printer access code is (§11): a command
-line is visible to any process listing.
+**The printed addresses are candidates, not a promise.** `local_ipv4s()`
+merges two sources because neither alone is complete — `gethostbyname_ex`
+missed one of five real addresses on the dev box, so a routed-socket probe
+supplements it — and it does *not* filter out virtual adapters
+(VirtualBox/VMware/Hyper-V), because nothing here can reliably tell those from
+the real one. The `<- same subnet as a registered printer` hint is the useful
+signal: it means this machine has an address on the same segment as a printer
+it already talks to. It says nothing about whether the network permits
+client-to-client traffic.
 
 **Two things that break this setup in practice**, both DHCP:
 the serving machine's own LAN IP (the URL everyone bookmarked) and the
@@ -1740,7 +1776,7 @@ worth knowing:
 | `test_slicer.py` | Profile flattening + cycle detection, `ProfileIndex`, `find_slicer`, `build_argv`, `run_slice` against an injected fake subprocess |
 | `test_slicepresets.py` | Tier resolution (the `A1`/`A1M` token split, the anchored regex, the decoy-name trap), filament detection off a fake MQTT state |
 | `test_slicejobs.py` | The full `SliceCoordinator` state machine against a fake registry/queue and an injected fake `run_slice` — success chains to upload+queue, each failure step latches and leaves the queue untouched, the finished-job cap |
-| `test_auth.py` | `Auth` (hashing, `compare_digest`, session tokens), `is_loopback`, and `build_auth`'s fail-closed rule (§2.1) |
+| `test_auth.py` | `Auth` (hashing, `compare_digest`, session tokens), `is_loopback`, `build_auth`'s fail-closed rule (§2.1), and `--lan`'s resolution helpers — including `test_lan_cannot_open_a_hole`, which asserts the shortcut still refuses to start with no password anywhere (§8) |
 | `test_ledger.py` | The schema and every row helper: forward-only migration v1→v2→v3 on a real file, the write allowlists, `close_run`'s single-transition return, derived `remaining_grams`, the loaded-spool clear-then-set, badge auto-vs-human, corrupt-file quarantine (§13–§15) |
 | `test_ledger_api.py` | Every `/api/runs`, `/api/pieces`, `/api/badges`, `/api/parts`, and `/api/spools` route, including the 409s, the 400 guards, and that all of them 404 when `ledger=None` |
 | `test_partstore.py` | `PartStore` save/open/delete, the double-basename path guard, and re-upload replacing rather than accumulating |

@@ -108,3 +108,105 @@ def test_loopback_needs_no_password_and_stays_inert():
 def test_a_password_on_loopback_is_still_honoured():
     # Opt in to a password even locally if you want one.
     assert build_auth("127.0.0.1", "hunter2") is not None
+
+
+# --- --lan, the typing shortcut that must not become a security shortcut ----
+
+from server.__main__ import (DEFAULT_HOST, LAN_HOST, lan_url_lines,
+                             read_password_file, resolve_host,
+                             resolve_password)
+
+
+def test_lan_binds_the_world_and_no_flag_binds_loopback():
+    assert resolve_host(None, True) == LAN_HOST
+    assert resolve_host(None, False) == DEFAULT_HOST
+
+
+def test_an_explicit_host_overrides_lan():
+    # `--lan --host 192.168.1.5` narrows the bind; --lan must not widen it back.
+    assert resolve_host("192.168.1.5", True) == "192.168.1.5"
+    # And an explicit loopback stays loopback -- this is why --host defaults to
+    # None rather than DEFAULT_HOST, so "given" is distinguishable from "not".
+    assert resolve_host("127.0.0.1", True) == "127.0.0.1"
+
+
+def test_password_file_is_read_and_stripped(tmp_path):
+    f = tmp_path / ".bambu-password"
+    f.write_text("hunter2\n", encoding="utf-8")
+    assert read_password_file(f) == "hunter2"
+
+
+def test_password_file_tolerates_a_bom_and_crlf(tmp_path):
+    # A Windows editor adds both. A BOM glued to the front of a password is a
+    # wrong password with no visible cause, which is worth a test.
+    f = tmp_path / ".bambu-password"
+    f.write_bytes(b"\xef\xbb\xbfhunter2\r\n")
+    assert read_password_file(f) == "hunter2"
+
+
+def test_password_file_uses_only_the_first_line(tmp_path):
+    f = tmp_path / ".bambu-password"
+    f.write_text("hunter2\nsome note about rotation\n", encoding="utf-8")
+    assert read_password_file(f) == "hunter2"
+
+
+def test_a_missing_or_blank_password_file_is_none(tmp_path):
+    assert read_password_file(tmp_path / "nope") is None
+    blank = tmp_path / "blank"
+    blank.write_text("", encoding="utf-8")
+    assert read_password_file(blank) is None
+    spaces = tmp_path / "spaces"
+    spaces.write_text("   \n", encoding="utf-8")
+    assert read_password_file(spaces) is None
+
+
+def test_the_environment_beats_the_password_file(tmp_path):
+    f = tmp_path / ".bambu-password"
+    f.write_text("from-file", encoding="utf-8")
+    assert resolve_password("from-env", lan=True, password_file=f) == "from-env"
+
+
+def test_without_lan_the_password_file_is_ignored(tmp_path):
+    # Nothing about --lan may change how the documented BAMBU_PASSWORD path
+    # behaves, including for the desktop build, which never passes --lan.
+    f = tmp_path / ".bambu-password"
+    f.write_text("from-file", encoding="utf-8")
+    assert resolve_password(None, lan=False, password_file=f) is None
+
+
+def test_lan_reads_the_password_file(tmp_path):
+    f = tmp_path / ".bambu-password"
+    f.write_text("from-file", encoding="utf-8")
+    assert resolve_password(None, lan=True, password_file=f) == "from-file"
+
+
+def test_lan_cannot_open_a_hole(tmp_path):
+    """THE point of the flag's design. --lan is a shortcut for typing, not a
+    way around the fail-closed rule: with no password anywhere it must still
+    refuse to start, exactly as a bare `--host 0.0.0.0` would."""
+    for missing in (tmp_path / "nope", tmp_path / "blank"):
+        if missing.name == "blank":
+            missing.write_text("  \n", encoding="utf-8")
+        password = resolve_password(None, lan=True, password_file=missing)
+        assert password is None
+        with pytest.raises(SystemExit):
+            build_auth(resolve_host(None, True), password)
+
+
+def test_url_lines_mark_the_address_that_shares_a_printers_subnet():
+    lines = lan_url_lines(["10.22.188.243", "192.168.137.30"], 8000,
+                          ["192.168.137.152"])
+    assert lines[0] == "http://10.22.188.243:8000"
+    assert lines[1].startswith("http://192.168.137.30:8000")
+    assert "same subnet" in lines[1]
+
+
+def test_url_lines_mark_nothing_without_printers():
+    lines = lan_url_lines(["10.22.188.243"], 8000, [])
+    assert lines == ["http://10.22.188.243:8000"]
+
+
+def test_url_lines_survive_a_non_ip_printer_host():
+    # --mock's seeded printers have names, not addresses, as their host.
+    lines = lan_url_lines(["10.22.188.243"], 8000, ["mock-bench"])
+    assert lines == ["http://10.22.188.243:8000"]

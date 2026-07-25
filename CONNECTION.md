@@ -154,17 +154,24 @@ staleness window), and `--no-slicer` disables the slicing routes. Without
 hardware, `python -m server --mock` seeds three fake printers
 (running / stale / offline) so the whole UI can be exercised.
 
-**Serving this to the rest of the lab** needs `--host` *and* a password:
+**Serving this to the rest of the lab** is one flag:
 
 ```bash
-BAMBU_PASSWORD="$(cat .bambu-password)" python -m server --host 0.0.0.0
+python -m server --lan
 ```
 
-Binding anywhere other than loopback **without** `BAMBU_PASSWORD` set makes the
+It binds `0.0.0.0`, reads the shared password from `.bambu-password`, and
+prints the candidate URLs — marking any address that shares a subnet with a
+registered printer, which is usually the one to hand out. The long form
+(`BAMBU_PASSWORD=... python -m server --host 0.0.0.0`) still works and is
+exactly what the flag expands to.
+
+Binding anywhere other than loopback with **no password resolved** makes the
 server refuse to start rather than boot unprotected — putting "stop a print /
 upload a file / start a job" on a shared network must not be possible by
-forgetting a flag. On Windows you also have to open the inbound port once from
-an admin shell. Details and the reasoning: `master.md` §2.1 and §8.
+forgetting a flag, and `--lan` does not weaken that. On Windows you also have
+to open the inbound port once from an admin shell. Details and the reasoning:
+`master.md` §2.1 and §8.
 
 Then, for frontend dev, run `npm run dev` inside [`frontend/`](frontend)
 (port 5173, proxies `/api` and `/ws` to the backend on port 8000). For a

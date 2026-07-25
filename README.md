@@ -17,9 +17,15 @@ This file is the short version plus the research framing behind it.
 ```bash
 pip install -r requirements.txt
 cd frontend && npm install && npm run build && cd ..
-python -m server            # http://127.0.0.1:8000
+python -m server            # http://127.0.0.1:8000, this machine only
+python -m server --lan      # serve the whole lab; prints the URLs to hand out
 python -m server --mock     # no hardware: three fake printers into runs-mock/
 ```
+
+`--lan` reads the shared password from `.bambu-password` (gitignored, one
+line). With no password there *and* none in `BAMBU_PASSWORD`, it refuses to
+start rather than putting printer control on the network unprotected — see
+[`master.md` §2.1](master.md).
 
 ## Printer setup (do this first, it can fail)
 
