@@ -52,14 +52,20 @@ import urllib.request
 PROTOCOL_VERSION = 3
 
 # ---- config (edit these; no CLI args) ------------------------------------
-# The robot computer: the agent binds this address, the client connects to it.
-# "127.0.0.1" while both halves run on one machine, otherwise the robot's
-# tailnet name (the name, not 100.x.y.z -- it survives changing networks).
+# Where the client looks for the robot computer. "127.0.0.1" while both halves
+# run on one machine; otherwise the robot's hostname (a name, not 100.x.y.z or
+# a DHCP address -- it survives changing networks).
 ROBOT_HOST = "127.0.0.1"
 ROBOT_PORT = 8420
 
-# Shared secret, so a stray request from another device gets 401 rather than
-# moving an arm. Change it on both machines.
+# Interfaces the agent listens on, which is a separate question from the one
+# above: 0.0.0.0 is every interface, and is not an address anything connects
+# to. "127.0.0.1" here would refuse every device except this computer.
+BIND_HOST = "0.0.0.0"
+
+# Shared secret. With BIND_HOST open to the network this is the only thing
+# between another device on that wifi and the arm, so change it on both
+# machines rather than leaving the default.
 AUTH_TOKEN = "change-me"
 
 # Per-request timeout, not the length of a move -- results are polled.
