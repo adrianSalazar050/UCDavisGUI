@@ -1,10 +1,22 @@
 # ERP traceability: print-run ledger, pieces, inventory, and Supabase sync — design
 
-> **STATUS: DESIGN APPROVED 2026-07-24 — NOT IMPLEMENTED. No code exists
-> yet.** Nothing described below has been built, and no claim in this file is
+> **STATUS: DESIGN APPROVED 2026-07-24. Phases 1–3 SHIPPED; Phases 4–5 are
+> still design only.** The paragraph below was written before any code
+> existed and is kept as written; what has happened since:
+>
+> | Phase of §9 | State | As-built reference |
+> |---|---|---|
+> | 1 — ledger + run recording | ✅ shipped 2026-07-24, verified on the real A1 | `master.md` §13, `plans/2026-07-24-erp-traceability-phase1-ledger.md` |
+> | 2 — parts catalogue + recipes | ✅ shipped 2026-07-24 (schema v2); **hardware gate open** | `master.md` §14, `plans/2026-07-24-erp-traceability-phase2-parts.md` |
+> | 3 — filament spools + consumption | ✅ shipped 2026-07-25 (schema v3); **hardware gate open** | `master.md` §15, `plans/2026-07-25-erp-traceability-phase3-spools.md` |
+> | 4 — Supabase sync | 📐 design only, no code | — |
+> | 5 — arm ingest | 📐 design only, no code | — |
+>
+> *Original banner, 2026-07-24:* "NOT IMPLEMENTED. No code exists yet.
+> Nothing described below has been built, and no claim in this file is
 > verified on hardware. It is the agreed design for the next block of work,
 > to be implemented in the five phases of §9 — Phase 1 first, each phase
-> getting its own implementation plan.
+> getting its own implementation plan."
 >
 > Historical record from the moment of writing, not maintained afterwards.
 > **`master.md` is authoritative wherever this file disagrees with it.**

@@ -1,6 +1,17 @@
 # 3D-Printing Failure Detector — Training & Resolution-Robustness Report
 
-Sections 1–7: 2026-07-17. Section 8 (A1-camera domain adaptation): 2026-07-21.
+Sections 1–7: 2026-07-17. Section 8 (A1-camera domain adaptation): the gap was
+measured 2026-07-19, the disjoint-split re-run 2026-07-21.
+
+> **The ONNX inference backend (added 2026-07-23) changes nothing in this
+> report.** `detect.py` can now run these same weights on onnxruntime instead
+> of torch (`--backend`), which is a **runtime swap, not a model change** — it
+> was verified against ultralytics on six real A1 frames with zero detection
+> mismatches. Every number below stands regardless of which backend produced
+> it. The one thing that does *not* carry over is the `--conf` threshold: an
+> exported `.onnx` graph has a fixed square 640×640 input where ultralytics'
+> `.pt` path uses rect inference, and the same detection scored 0.312 on torch
+> against 0.521 on ONNX. See `master.md` §4.1.
 
 ## 1. What this is
 
@@ -10,8 +21,10 @@ camera frame, plus a follow-up experiment measuring how much a lower-quality
 webcam would hurt its accuracy.
 
 This is a baseline/prototype model trained on a public dataset, not the
-final classifier for the Bambu A1 mini pipeline described in
-`README.md`. That document's stance is deliberate: a generic
+final classifier for the Bambu pipeline described in
+[`README.md`](README.md) (the hardware was an A1 mini through 2026-07-19 and
+has been an A1 since 2026-07-21 — §8 belongs to the mini). That document's
+stance is deliberate: a generic
 internet-scraped dataset doesn't necessarily transfer to one specific
 printer's camera angle, lighting, and mount. Treat the numbers below as
 "does the pipeline work and how robust is it to resolution," not as a

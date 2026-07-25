@@ -30,7 +30,8 @@ desktop build doesn't need them.
 **Option B — copy it manually** (USB stick / network share). Copy the project
 folder, but you can safely skip these heavy, unnecessary directories:
 `3d-printing-failure-detection.v1i.yolov8/`, `datasets/`, `runs/`,
-`frontend/node_modules/`, `desktop/node_modules/`, `desktop/release/`, `dist/`.
+`runs-mock/`, `frontend/node_modules/`, `desktop/node_modules/`,
+`desktop/release/`, `build/`, `dist/`.
 If you copied rather than cloned, strip any Windows line endings first:
 `sed -i 's/\r$//' desktop/*.sh`.
 
@@ -64,7 +65,7 @@ binary (in a throwaway venv — your system Python is untouched), and packages t
 Electron AppImage. The script checks its prerequisites up front and prints an
 `apt install` line if anything's missing.
 
-Result: `desktop/release/Bambu Monitor 0.2.0.AppImage`
+Result: `desktop/release/Bambu Monitor <version>.AppImage`
 
 ---
 
@@ -91,7 +92,7 @@ inside it. Expect the first build to take **10–25 minutes** (it downloads an
 Ubuntu image, Python packages, and the Electron binary); later builds are much
 faster thanks to Docker's cache.
 
-Result: `desktop/release/Bambu Monitor 0.2.0.AppImage`
+Result: `desktop/release/Bambu Monitor <version>.AppImage`
 
 ---
 
@@ -107,8 +108,8 @@ sudo apt install -y libfuse2t64   # Mint 22 / Ubuntu 24.04 (package was renamed)
 Then:
 
 ```bash
-chmod +x "desktop/release/Bambu Monitor 0.2.0.AppImage"
-"./desktop/release/Bambu Monitor 0.2.0.AppImage"
+chmod +x "desktop/release/Bambu Monitor <version>.AppImage"
+"./desktop/release/Bambu Monitor <version>.AppImage"
 ```
 
 The window should open on the dashboard. To install it like a normal app, move
@@ -119,12 +120,14 @@ the AppImage anywhere you like (e.g. `~/Applications/`) and double-click it.
 ## What the app does and doesn't do
 
 - **Included:** printer registry, live status/temps/layer/HMS, print queue,
-  microSD browser, `.gcode.3mf` upload, and **automatic slicing** (STL → sliced
-  `.gcode.3mf` → queued).
+  microSD browser, `.gcode.3mf` upload, **automatic slicing** (STL → sliced
+  `.gcode.3mf` → queued), and the traceability ledger — run history, the parts
+  catalogue, and filament inventory.
 - **Not included:** YOLO failure detection and the live camera view (the torch
   dependency is deliberately excluded — see the design spec).
-- **Your data** (`printers.json`, `queues.json`, `runs/`) lives in
-  `~/.config/BambuMonitor/`. The AppImage itself is read-only.
+- **Your data** (`printers.json`, `queues.json`, `ledger.db` + its `parts/`
+  model files, and `runs/`) lives in `~/.config/BambuMonitor/`. The AppImage
+  itself is read-only, which is the whole reason nothing is written beside it.
 
 ### Enabling slicing on Linux
 

@@ -1,10 +1,28 @@
 # ERP Traceability Phase 3 — Filament Spools + Consumption Implementation Plan
 
-> **STATUS: IN PROGRESS (started 2026-07-25).** Backend (Tasks 1–5) is being
-> implemented against the established Phase 1/2 ledger patterns; the Inventory
-> UI (Task 6) is a review checkpoint. Implements **Phase 3** of
+> **STATUS: SHIPPED (2026-07-25), Tasks 1–6.** All of Phase 3 landed: schema
+> v3 (`filament_spools`, `filament_consumption`), the derived-remaining
+> helpers, the recorder's consumption write, the `/api/spools` routes, the
+> frontend wrappers, and the Inventory UI. Implements **Phase 3** of
 > `docs/superpowers/specs/2026-07-24-erp-traceability-design.md` (§4.5, §4.6,
-> §9). **`master.md` is authoritative wherever this file disagrees.**
+> §9). See `master.md` §15 for the as-built reference.
+>
+> A code review reproduced **both** of the Phase-2 review's bug classes here
+> and they were fixed at the source, not at the route: a fail-open free-write
+> allowlist could forge a second loaded spool, and a non-idempotent terminal
+> side effect could double-charge a spool when the recorder re-observed
+> `FINISH`. Both now have regression tests
+> (`test_free_write_cannot_forge_a_second_loaded_spool`,
+> `test_reobserving_a_terminal_run_does_not_double_decrement`).
+>
+> **Not verified on hardware:** no real print has decremented a real loaded
+> spool end to end yet. The recorder path is unit-tested and the HTTP loop
+> (create → load → read-back → unload) was smoke-tested against the mock
+> server, but the hardware gate is still open — the same state Phase 2 is in.
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever
+> this file disagrees with it.** Task checkboxes below were never ticked
+> during execution; read this banner, not the boxes.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development
 > or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax.

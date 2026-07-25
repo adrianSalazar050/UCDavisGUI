@@ -1,13 +1,25 @@
 # Slicing improvements: STL preview + reorient, and presets for all Bambu models — design
 
-> **STATUS: DESIGN APPROVED 2026-07-25 — NOT IMPLEMENTED.** Two independent
-> slicing improvements, brainstormed and approved. Feature A (preset coverage
-> for the four models whose profiles fit the existing convention — A1, A1 mini,
-> P1P, P1S; X-series deferred, see §2.2/§2.6) is a small backend change;
-> Feature B (in-browser STL preview +
-> reorient) is a larger frontend feature that adds this project's first
-> heavyweight dependency (three.js). They get separate implementation plans.
-> **`master.md` is authoritative wherever this file disagrees.**
+> **STATUS: BOTH FEATURES SHIPPED (2026-07-25).** Written before
+> implementation; both landed the same day.
+>
+> - **Feature A — presets for all models.** Shipped, and it went **further
+>   than this document deferred to**: `MACHINE_TOKENS`/`PROCESS_TOKENS` in
+>   `server/slicepresets.py` now cover **five** models, not four — A1 (`N2S`),
+>   A1 mini (`N1`), P1P (`C11`), P1S (`C12`) **and X1 Carbon (`BL-P001`)**.
+>   §2.2/§2.6's deferral of the X-series is therefore obsolete. The reason it
+>   became possible: real Bambu-Studio-sliced files showed the P1/X1 family
+>   **shares one process/filament token, `X1C`**, while keeping its own
+>   per-model machine token — so X1 Carbon needed no new convention, only the
+>   same two-map split. See `master.md` §6.3.
+> - **Feature B — STL preview + reorient.** Shipped as designed
+>   (`frontend/src/components/slice/{StlViewer.jsx,stlGeometry.js,stlBake.js,
+>   OrientControls.jsx}`), and three.js is indeed now this project's first
+>   heavyweight frontend dependency. Verified in a headless browser. Plan:
+>   `plans/2026-07-25-stl-preview-reorient.md`. See `master.md` §6.9.
+>
+> Historical record, not maintained. **`master.md` is authoritative wherever
+> this file disagrees.**
 
 Date: 2026-07-25
 

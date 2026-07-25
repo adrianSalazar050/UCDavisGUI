@@ -2,7 +2,8 @@
 
 Failure detection and monitoring for Bambu Lab A1 / A1 mini printers: a
 layer-indexed capture logger, a YOLO failure detector that can stop a print by
-itself, and a web dashboard for a fleet of printers.
+itself, a web dashboard for a fleet of printers, automatic slicing, and a
+traceability ledger that records every print, part, and gram of filament.
 
 Developed against an A1 mini through 2026-07-19 and an A1 from 2026-07-21. The
 server code is model-agnostic, but the **detection ROI** and the **training
@@ -39,7 +40,8 @@ Full connection details, TLS specifics, and troubleshooting:
 | | What it does |
 |---|---|
 | [`master.md`](master.md) | **Start here.** Full system documentation |
-| `server/` + `frontend/` | The dashboard: live status, camera, detection, auto-stop, print queue, microSD browser, multi-printer |
+| `server/` + `frontend/` | The dashboard: live status, camera, detection, auto-stop, print queue, microSD browser, automatic slicing, run history, parts catalogue, filament inventory, multi-printer |
+| `desktop/` | The same server packaged as an installable Electron app — [Windows](desktop/README.md), [Linux AppImage](desktop/LINUX-BUILD.md). Narrower on purpose: no detector, no torch |
 | `detect.py` | Headless detector. Owns the camera, writes `status.json` + `latest.jpg` for the server |
 | `capture.py` | Layer-indexed capture logger (the training-data collector) |
 | `check_registration.py` | The gate that decides whether the fixture is good enough to build a detector on |
@@ -152,6 +154,25 @@ That is enough to say the approach works and nowhere near enough to arm
 auto-stop. [`master.md` §12](master.md) has the full story, including how the
 first evaluation of it turned out to be circular; the exit criterion below is
 still the bar.
+
+## 5. Slicing, and the traceability ledger
+
+Two things the dashboard does beyond watching. **Automatic slicing**: upload an
+STL (preview and reorient it in the browser first, if you like), pick a quality
+tier and filament, and the server shells out to Bambu Studio, uploads the
+resulting `.gcode.3mf` to the printer's microSD, and queues it —
+[`master.md` §6](master.md). **The ledger** (`ledger.db`, SQLite, gitignored):
+every print the server observes becomes a run row with its layer progress, HMS
+events, pieces, and an *estimated* filament charge against whichever spool the
+operator marked loaded. It carries a parts catalogue (part + revision +
+slicing recipe) so a run can point at a reproducible thing —
+[`master.md` §13–§15](master.md).
+
+The honest caveats are in master.md and not repeated here, but two are worth
+knowing before you quote a number: the printer never reports filament consumed,
+so `actual_grams` is always an estimate whose row records *which kind*; and a
+print that runs while the server is down is unrecorded and unrecoverable, since
+MQTT has no history to replay.
 
 ## Exit criterion
 

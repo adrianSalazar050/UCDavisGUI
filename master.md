@@ -8,8 +8,13 @@ existing specialist docs rather than restating them.
 | `README.md` | Quick start, the data-collection scripts (`capture.py`, `check_registration.py`, `probe_gcode.py`), and the research framing + exit criterion |
 | `CONNECTION.md` | Verified LAN/MQTT connection parameters (A1 and A1 mini), TLS specifics, prerequisites, troubleshooting |
 | `FAILURE_DETECTOR_REPORT.md` | YOLO training run, test metrics, webcam-resolution robustness study, and §8 the A1-camera domain adaptation |
+| `desktop/README.md`, `desktop/LINUX-BUILD.md` | Building the Electron installer (Windows) and the AppImage (Mint) — §8 |
 | `docs/superpowers/` | Per-feature design specs and implementation plans — **historical records, not maintained**. [Index + what's stale in them](docs/superpowers/README.md) |
 | `FRONTEND-STACK-GUIDE.md` | ⚠ describes a *different* project (VERA/HORUS) whose conventions `frontend/` copied. Read for conventions, not facts |
+
+Only `master.md` and the four other root-level docs are **maintained**;
+`docs/superpowers/` is a historical record by design, and `test_docs.py` (§10)
+enforces the difference.
 
 ---
 
@@ -25,8 +30,10 @@ it is armed for is sustained for long enough. Alongside that it browses each
 printer's microSD over FTPS, plans a per-printer print queue with time and
 filament totals parsed out of `.gcode.3mf` files, slices an uploaded STL into
 a startable `.gcode.3mf` by shelling out to Bambu Studio (§6) and queues the
-result, and (separately) logs layer-indexed frames + telemetry for building
-training datasets.
+result, records every print it observes into a durable SQLite **ledger**
+(runs → pieces → badges) with a parts catalogue and gram-level filament
+inventory hanging off it, and (separately) logs layer-indexed frames +
+telemetry for building training datasets.
 
 **Data-flow narrative.**
 
@@ -61,6 +68,13 @@ training datasets.
    `PrintQueue.add` unchanged, so slicing is additive: it produces exactly the
    kind of `.gcode.3mf` step 3's queue already knew how to plan and start. See
    §6.
+10. Finally, `server/runlog.py::RunRecorder` — a fourth background thread —
+    diffs the same `registry.summaries()` payload once a second and writes what
+    it sees into `ledger.db` (§13): a run row per print, layer progress in
+    place, HMS events, pieces on FINISH, and a filament consumption row against
+    whichever spool the operator marked loaded (§15). It is a **pure observer
+    of state the server already has** — it opens no socket and commands no
+    printer — which is why it can be added without touching any of steps 1–9.
 
 ---
 
@@ -192,6 +206,13 @@ exception).
                                                      │
                               server/runs.py ────────┘ (reads, serves
                                                         /api/frame/latest)
+
+ server/runlog.py RunRecorder ── 1 s diffs of registry.summaries() ──▶ ledger.db
+   (a thread inside the server, not a process: it opens no socket and         │
+    commands no printer — it only writes down what steps 1–4 already saw)     │
+                                                                              ▼
+                                          runs · pieces · badges · parts ·
+                                          spools · consumption  (§13, §14, §15)
 ```
 
 ### 2.1 Serving the dashboard to a LAN, behind a password
@@ -295,7 +316,8 @@ grabs `--burst` frames, and keeps the sharpest.
 Headless. Grab → infer → write, forever.
 
 - `BambuCameraSource(host, access_code)` — the A1's camera stream: TLS to TCP
-  6000, a 64-byte auth packet (`bblp` + access code, both null-padded to 32),
+  6000, an **80-byte** auth packet (a 16-byte `<IIII` header — `0x40`,
+  `0x3000`, 0, 0 — then `bblp` and the access code, each null-padded to 32),
   then repeating 16-byte headers whose first 4 bytes are a little-endian JPEG
   length. `grab()` reconnects once on a drop before returning `None`.
   The access code arrives via constructor/env, **never argv**.
@@ -484,6 +506,9 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 | `slicepresets.py` | Curated quality tiers + filament mapping (§6.3) | `TIERS`, `MACHINE_TOKENS`, `PROCESS_TOKENS`, `MATERIALS`, `machine_profile_name`, `resolve_preset`, `available_presets`, `filament_profile_name`, `available_filaments`, `detect_loaded_filament` |
 | `slicejobs.py` | Slice job records, states, the worker thread (§6.4) | `SliceCoordinator`, `output_name`, `MODEL_EXTS`, `MAX_FINISHED_JOBS`, `TICK_S` |
 | `runs.py` | Finding the newest captured frame | `find_active_run`, `newest_frame`, `ACTIVE_WINDOW_S` |
+| `ledger.py` | `ledger.db` only — schema, forward-only migrations, row helpers (§13–§15) | `Ledger`, `MIGRATIONS`, `SCHEMA_VERSION`, `END_STATES`, `PIECE_STATUSES`, `RUN_WRITABLE`, `SPOOL_WRITABLE`, `SPOOL_FREE_STATUSES`, `set_default_recipe`, `set_loaded_spool`, `unload_spool`, `add_consumption` |
+| `runlog.py` | Turning `registry.summaries()` diffs into run/event rows (§13) | `RunRecorder`, `RECONCILE_DEADLINE_S` |
+| `partstore.py` | Part model bytes on disk, pure of the DB (§14) | `PartStore` |
 | `auth.py` | Shared-password auth for LAN serving (§2.1) | `Auth`, `is_loopback`, `LOOPBACK_HOSTS` — `build_auth` (the fail-closed rule) lives in `__main__.py`, not here |
 | `__main__.py` | CLI entry, wiring, `--mock` seeding, `--host`/`build_auth` (§2.1) | `main`, `real_factory`, `mock_factory`, `MOCK_SEED`, `build_auth` |
 
@@ -995,6 +1020,16 @@ traps, all measured on this install on 2026-07-22:
 | The model token differs by profile kind | the mini is `A1 mini` in **machine** profile names (`Bambu Lab A1 mini 0.4 nozzle`) but `A1M` in **process**/**filament** names (`0.20mm Standard @BBL A1M`) — one printer, two tokens, and neither is derivable from the other |
 | The nozzle suffix is conditional | omitted at 0.4 (`0.20mm Standard @BBL A1`), present otherwise (`0.30mm Standard @BBL A1 0.6 nozzle`) |
 | Layer height is not constant across nozzles | "Standard" is 0.20 mm at 0.4 and 0.30 mm at 0.6 — a hardcoded label would show a height the printer isn't using |
+| The P1/X1 family **shares one** process/filament token | P1P, P1S and X1 Carbon each keep their own **machine** token (they have different beds) but all three use `X1C` in process and filament names. Confirmed 2026-07-25 against real Bambu-Studio-sliced files: a P1S slice recorded `printer_settings_id = "Bambu Lab P1S 0.4 nozzle"` but `print_settings_id = "0.20mm Standard @BBL X1C"` |
+
+`MACHINE_TOKENS` and `PROCESS_TOKENS` are therefore **two separate maps**, and
+that is the point — the second is not derivable from the first for a single
+model in the table. Five models resolve today: A1 (`N2S`), A1 mini (`N1`),
+P1P (`C11`), P1S (`C12`), and X1 Carbon (`BL-P001`). A `"@BBL P1P"` process
+profile does exist and would resolve, but Bambu Studio does not pick it for
+these machines; matching the tool's **own** choice is what keeps a CLI slice
+identical to a hand slice, which is the standard §1.1's clean-print gate was
+measured against.
 
 So `resolve_preset(tier_id, model_id, nozzle, index)` builds a **fully
 anchored** regex (`^\d+\.\d+mm {tier} @BBL {token}{suffix}$`, `re.fullmatch`)
@@ -1309,17 +1344,42 @@ page gets the same `{printers, selected, onSelect}` props):
 | `dashboard` | `Dashboard.jsx` | Stat tiles, `CameraCard`, `AutoStopCard`, `PrintInfoCard`, `HmsCard` |
 | `detection` | `Detection.jsx` | Enable/disable, camera source, webcam index, conf slider, armed-class checkboxes, detector health, and the **draggable ROI editor** (`RoiEditor`) over the live view |
 | `sdfiles` | `SdFiles.jsx` | FTPS microSD browser with breadcrumbs + upload |
-| `slice` | `Slice.jsx` | STL upload, preset radio group, filament dropdown (prefilled from detection), tree-supports checkbox, polled job list (§6) |
+| `slice` | `Slice.jsx` | STL upload + in-browser preview/reorient (§6.9), preset radio group, filament dropdown (prefilled from detection), tree-supports checkbox, polled job list (§6) |
 | `queue` | `Queue.jsx` | Job table, reorder, remove, "Add from SD" picker, totals bar |
+| `history` | `History.jsx` | The selected printer's recorded runs (`RunTable`), one run's events + pieces (`RunDetail`, `PieceGrid`), operator corrections and badges (§13) |
+| `parts` | `Parts.jsx` | Parts catalogue: `PartList`, `PartForm`, `RecipeEditor`, per-recipe "Slice for &lt;printer&gt;" (§14) |
+| `inventory` | `Inventory.jsx` | Filament spools: `SpoolList` with derived remaining grams + low-stock highlight, `SpoolForm`, and the per-printer `LoadedSpool` control (§15) |
+
+**Two scopes, and the page list mixes them.** `overview`…`history` are
+per-printer: they read `selected` and show one machine. `parts` and
+`inventory` are **fleet-wide** — the catalogue and the spool list are not
+properties of any one printer — and touch `selected` only for their
+per-printer actions ("Slice for &lt;printer&gt;", load/unload a spool). Both
+still receive the identical `{printers, selected, onSelect}` props, so adding
+a page never means a new prop contract. `HistoryPanel` is mounted with
+`key={printer.serial}`, the same remount-don't-reset rule as `SdBrowser` and
+`QueuePanel` below.
 
 **Data layer.** `src/api/printer.js` is a set of plain `fetch` wrappers —
 `addPrinter`, `updatePrinter`, `removePrinter`, `fetchFiles`, `fetchQueue`,
 `addQueueJob`, `removeQueueJob`, `reorderQueue`, `uploadFile`, `fetchLatestFrame`,
 `updateDetection`, `armDetection`, `fetchDetectionFrame`, `fetchSliceOptions`,
-`startSlice`, `fetchSliceJobs`, `cancelSliceJob` (§6.6). Its `detail(res)`
+`startSlice`/`startSliceBlob`, `fetchSliceJobs`, `cancelSliceJob` (§6.6),
+`login`/`logout`/`checkAuth` (§2.1), the ledger set `fetchRuns`, `fetchRun`,
+`patchRun`, `patchPiece`, `bulkPieces`, `fetchBadges`, `addPieceBadge`,
+`removePieceBadge` (§13), the parts set `fetchParts`, `fetchPart`,
+`createPart`, `updatePart`, `archivePart`, `uploadPartModel`, `addRecipe`,
+`updateRecipe`, `archiveRecipe`, `sliceFromPart` (§14), and the spool set
+`fetchSpools`, `fetchSpool`, `createSpool`, `updateSpool`, `archiveSpool`,
+`fetchLowStock`, `fetchLoadedSpool`, `setLoadedSpool` (§15). Its `detail(res)`
 helper flattens FastAPI's `{"detail": ...}` — which is a *list* of validation
 objects for a 422 — so no caller can ever surface `[object Object]`. The two
 frame fetchers return an object URL the caller must revoke, or `null`.
+
+`startSliceBlob` exists because of §6.9: a *reoriented* STL is baked in the
+browser and uploaded as a `Blob` with the original filename, while an
+unrotated one still goes through `startSlice` with its original `File` — same
+route either way, and the no-rotation path stays byte-identical.
 
 **How it updates.** Three different mechanisms, on purpose:
 
@@ -1331,6 +1391,12 @@ frame fetchers return an object URL the caller must revoke, or `null`.
 | SD listing | On navigation / Refresh only | Never polled — an FTPS handshake is not instant |
 | Slice options | On navigation only, like SD listing | Fetched once per printer; describes what's available *right now* |
 | Slice jobs | Polling `fetchSliceJobs`, plus an immediate refetch on submit | 2 s |
+| Run history (list) | Polling `fetchRuns` + refetch after every correction; the open run's *detail* is fetched on selection, not polled | 5 s |
+| Parts / spools | Polling `fetchParts` / `fetchSpools` + refetch after every mutation | 8 s |
+
+The cadences are ordered by how fast the underlying thing actually moves, not
+by preference: slice jobs change state in seconds, a run's layer count every
+few, and a parts catalogue only when a human edits it.
 
 `usePrinters` reconnects with exponential backoff to 10 s, guards against
 StrictMode double-mount teardown, and keeps the last-known-good list if a frame
@@ -1340,7 +1406,9 @@ repairs the selection when the selected printer disappears.
 **The ROI editor.** `components/detection/RoiEditor.jsx` draws a draggable box
 (8 handles + move) over the live frame; the four `%` inputs and the box are two
 views of one value. The drag maths is pure and lives in `roiGeometry.js`
-(`clampRoi`, `applyHandleDrag`) — the only frontend code with unit tests.
+(`clampRoi`, `applyHandleDrag`) — the first frontend module extracted for
+testability, and the pattern §10 now applies to `runFormat.js` and
+`stlGeometry.js` too.
 
 Two rectangles are visible at once, deliberately:
 
@@ -1596,6 +1664,11 @@ never been built or run** — the dev box has no Docker (§11).
 GUI_UCDavis/
 ├─ printers.json                 registered printers (GITIGNORED — plaintext access codes)
 ├─ queues.json                   {serial: [job,...]} (gitignored; user data, no secrets)
+├─ .bambu-password               shared LAN password, one line (GITIGNORED — §8)
+├─ ledger.db                     the traceability ledger, SQLite (gitignored; §13–§15)
+├─ ledger.db-wal, ledger.db-shm  SQLite sidecars — the `ledger.db*` rule covers them
+├─ ledger.db.corrupt-<stamp>     a quarantined database, kept as evidence, never deleted (§13)
+├─ parts/<part_id>/<file>        part model bytes, beside ledger.db, written by PartStore (§14)
 ├─ runs/                         (gitignored)
 │  ├─ _detect/
 │  │  ├─ status.json             detect.py → server: ts, fps, camera, conf, detections, error
@@ -1667,14 +1740,27 @@ worth knowing:
 | `test_slicer.py` | Profile flattening + cycle detection, `ProfileIndex`, `find_slicer`, `build_argv`, `run_slice` against an injected fake subprocess |
 | `test_slicepresets.py` | Tier resolution (the `A1`/`A1M` token split, the anchored regex, the decoy-name trap), filament detection off a fake MQTT state |
 | `test_slicejobs.py` | The full `SliceCoordinator` state machine against a fake registry/queue and an injected fake `run_slice` — success chains to upload+queue, each failure step latches and leaves the queue untouched, the finished-job cap |
+| `test_auth.py` | `Auth` (hashing, `compare_digest`, session tokens), `is_loopback`, and `build_auth`'s fail-closed rule (§2.1) |
+| `test_ledger.py` | The schema and every row helper: forward-only migration v1→v2→v3 on a real file, the write allowlists, `close_run`'s single-transition return, derived `remaining_grams`, the loaded-spool clear-then-set, badge auto-vs-human, corrupt-file quarantine (§13–§15) |
+| `test_ledger_api.py` | Every `/api/runs`, `/api/pieces`, `/api/badges`, `/api/parts`, and `/api/spools` route, including the 409s, the 400 guards, and that all of them 404 when `ledger=None` |
+| `test_partstore.py` | `PartStore` save/open/delete, the double-basename path guard, and re-upload replacing rather than accumulating |
+| `test_runlog.py` | `RunRecorder`'s diff-to-rows logic: run open/close, layer progress updating a column, the deferred connection-aware reconciliation, and the once-per-run spool consumption write |
 | `test_docs.py` | The documentation itself — see below |
 
-**Frontend** (`vitest`, added 2026-07-21): `roiGeometry.test.js` covers the ROI
-drag maths. That module is pure on purpose so it *can* be tested; the React
-components around it are verified by build and by eye, which is a real gap
-rather than an oversight. The tests earned their keep immediately by catching
-`clampRoi` corrupting a valid box through floating-point error
-(`0.32 → 0.31999999999999995` on every call).
+**Frontend** (`vitest`, added 2026-07-21). Three suites, and they share one
+rule: **the maths gets extracted into a pure module and that module gets
+tested; the React component around it does not.**
+
+| Suite | Covers |
+|---|---|
+| `roiGeometry.test.js` | The ROI drag maths — `clampRoi`, `applyHandleDrag` (§4.1, §7) |
+| `runFormat.test.js` | The History page's `runOutcome` labelling (a monitor stop is not a plain failure), `pieceRollup`, and duration formatting (§13) |
+| `stlGeometry.test.js` | `addRotation`'s 360° wrap, `dropTranslation` (centre X/Y, min-Z on the plate), and `exceedsPlate` — including that an unknown bed never hard-blocks (§6.9) |
+
+The React components themselves are still verified only by build and by eye,
+which is a real gap rather than an oversight. The tests earned their keep
+immediately by catching `clampRoi` corrupting a valid box through
+floating-point error (`0.32 → 0.31999999999999995` on every call).
 
 **The docs are tested too** (`test_docs.py`). Every rule in it exists because
 the failure happened here:
@@ -1907,6 +1993,33 @@ produced. See §1.1 for the complete account of both bugs and both attempts.
   is a geometry difference, not a bug in either backend; but it means
   switching `--backend` requires re-tuning `--conf`, and an old number carried
   over unchanged can silently change whether auto-stop fires.
+- **At boot the printers have not reported yet, so "is it printing?" has no
+  answer.** §13. The first reconciliation of runs left open by a restart
+  closed *every* one of them at `start()`, because a printer physically
+  mid-print still looks idle until its first MQTT report lands — which split a
+  running print into a mislabeled `UNKNOWN` row plus a duplicate unattributed
+  one, confirmed on real hardware. Reconciliation is now **deferred and
+  connection-aware**: each open run waits for its own printer to report
+  `connection = "ok"`, and only a printer that never reports at all is closed,
+  after `RECONCILE_DEADLINE_S`. Anything that asks the registry a question at
+  startup has this problem; the answer is to wait for the report, not to
+  assume the quiet state.
+- **A terminal side effect must ride the transition, not the state.** §15. The
+  recorder re-observes `FINISH` on every tick, so decrementing a spool
+  whenever the run *is* terminal double-charges it; `add_consumption` is not
+  idempotent on its own. `close_run` therefore returns whether **this call**
+  is the one that made the run terminal, and the decrement hangs off that
+  boolean. Same shape as §5.4's dequeue-only-on-confirmation and §6.5's
+  latching failures: ask "did this happen just now", never "is this true now".
+- **A free-write allowlist that fails open forges invariants.** §15, §14. Both
+  Phase 2 and Phase 3 shipped a route-level invariant ("one default recipe",
+  "one loaded spool per printer") that a generic `PUT` could walk around,
+  because the field it keyed on was writable through the generic path. The
+  fix in both cases was structural, not another check: reserve the value
+  (`SPOOL_FREE_STATUSES`), keep the linking column out of the write set
+  (`printer_serial` is not in `SPOOL_WRITABLE`), and make the one legitimate
+  path a clear-then-set transaction. When you add a table, decide which
+  columns the free-write path may **never** touch before you write the route.
 
 ---
 
@@ -2085,6 +2198,18 @@ with no association to a model on the plate. Human verdicts attach to the
 **piece**. `badges.auto` enforces it: an automated applier (anything but an
 explicit human source) is refused any badge not marked auto.
 
+**Routes** (all behind `_require_ledger`, so all 404 when `ledger=None`):
+
+| Method + path | Notes |
+|---|---|
+| `GET /api/runs?serial=&limit=&offset=` | Newest first. `limit` is clamped to 1–500 server-side. Each row carries a `piece_counts` rollup fetched in **one** grouped query for the whole page, never one per row |
+| `GET /api/runs/{run_id}` | The run plus its events, pieces (each with badges), and run badges |
+| `PATCH /api/runs/{run_id}` | Operator corrections: `end_state` (400 outside `END_STATES`), `actual_grams` — which also stamps `actual_grams_basis = "manual"`, because an entered figure is a measurement and must not read as our arithmetic — and a free-text note recorded as an event |
+| `PATCH /api/pieces/{piece_id}` | One piece's verdict; 400 outside `PIECE_STATUSES`, 404 unknown |
+| `POST /api/runs/{run_id}/pieces/bulk` | One verdict for a whole plate with per-index overrides. Every index is validated **before any write**, and only `ValueError` maps to 400 — a `KeyError`/`TypeError` is a real bug and must not be masked |
+| `GET /api/badges` | The seeded badge catalogue |
+| `POST/DELETE /api/runs/{run_id}/badges`, `POST/DELETE /api/pieces/{piece_id}/badges` | Human badge application. A badge on an unknown run *or* piece is a 404 — symmetric on purpose, so a typo'd id can't INSERT against a ghost row and return 200 |
+
 **A restart mid-print survives, and keeps its attribution.** Reconciliation
 of runs left open by a restart is **deferred and connection-aware**, not done
 at the instant `start()` runs — because at that instant the MQTT links have
@@ -2122,10 +2247,11 @@ exact bug that fix now prevents. The recording path itself (open → track →
 FINISH → piece) is confirmed on hardware; a *queue-attributed* run reaching
 FINISH is the one thing still worth capturing on a future clean run.
 
-Design: `docs/superpowers/specs/2026-07-24-erp-traceability-design.md`. The
-parts catalogue (Phase 2) is §14 below; filament spools (Phase 3), Supabase
-sync (Phase 4), and arm ingest (Phase 5) are designed there and **not
-implemented**.
+Design: `docs/superpowers/specs/2026-07-24-erp-traceability-design.md`; plan:
+`docs/superpowers/plans/2026-07-24-erp-traceability-phase1-ledger.md`. The
+parts catalogue (**Phase 2**) is §14 below and filament spools (**Phase 3**)
+is §15; Supabase sync (Phase 4) and arm ingest (Phase 5) are designed in that
+spec and **not implemented**.
 
 ---
 
@@ -2171,11 +2297,14 @@ catalogue and offers a per-recipe "Slice for &lt;printer&gt;" action.
 
 **Shipped:** the schema, `PartStore`, the helpers, the routes, the
 slice-from-part path, the frontend wrappers, and the Parts UI — all tested
-(681 backend, 26 frontend, model upload/download round trip verified live).
+(`test_ledger.py`, `test_ledger_api.py`, `test_partstore.py`; §10), with the
+model upload/download round trip verified live.
 **Not yet verified on hardware:** a part sliced end to end into a printed,
 part-attributed run — the pieces are all in place and unit-tested, but no real
 slice-from-part print has been run yet. See
 `docs/superpowers/plans/2026-07-24-erp-traceability-phase2-parts.md`.
+
+---
 
 ## 15. Filament inventory (Phase 3)
 
@@ -2225,8 +2354,11 @@ list with derived remaining grams and a low-stock highlight, and carries the
 per-printer loaded-spool control.
 
 **Shipped:** the schema, helpers, the recorder consumption write, the routes,
-the frontend wrappers, and the Inventory UI — all tested (716 backend, 33
-frontend), with regression tests replaying both hardened exploit sequences, and
+the frontend wrappers, and the Inventory UI — all tested (`test_ledger.py`,
+`test_ledger_api.py`, `test_runlog.py`; §10), with regression tests replaying
+both hardened exploit sequences
+(`test_free_write_cannot_forge_a_second_loaded_spool`,
+`test_reobserving_a_terminal_run_does_not_double_decrement`), and
 the spool HTTP loop (create → load → read-back → unload, plus the 400 guards)
 smoke-tested live against the mock server. **Not yet verified on hardware:** a
 real print decrementing a real loaded spool end to end — the recorder path is

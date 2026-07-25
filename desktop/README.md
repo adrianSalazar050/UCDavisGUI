@@ -13,12 +13,19 @@ See the design: [`../docs/superpowers/specs/2026-07-22-electron-desktop-packagin
 |---|---|
 | `launcher.py` | Frozen-backend entry point; composes `create_app(..., detection=None)` and resolves a per-user writable data dir |
 | `bambu-backend.spec` | PyInstaller spec (onedir); bundles `frontend/dist`, excludes torch |
-| `main.js` | Electron main process: spawn backend → wait for `127.0.0.1:8000` → open window → kill backend on quit |
+| `main.js` | Electron main process: pick a free port (`getFreePort()`) → spawn backend on it → wait for it → open window → kill backend on quit |
 | `preload.js` | Minimal (empty) preload; keeps `contextIsolation` on |
 | `package.json` | Electron + electron-builder config (NSIS `.exe`, AppImage) |
 | `build-windows.ps1` | Full Windows build (run on Windows) |
-| `build-linux.sh` + `Dockerfile.build` + `build-linux-inside.sh` | Full Linux build (run on Linux Mint with Docker) |
+| `build-linux-native.sh` | Linux build on the machine you'll run it on — no Docker, links against this machine's glibc ([`LINUX-BUILD.md`](LINUX-BUILD.md) Method 1) |
+| `build-linux.sh` + `Dockerfile.build` + `build-linux-inside.sh` | Linux build inside Ubuntu 22.04 for portability to older distros (needs Docker; Method 2) |
 | `icons/` | App icons (`icon.ico`, `icon.png`) |
+
+**The port is chosen per launch, never a fixed 8000.** `main.js::getFreePort()`
+binds `:0` and passes the number to the backend as `BAMBU_PORT`. A fixed 8000
+made the readiness poll succeed against a *dev server already on 8000*, and
+Electron then showed the wrong backend — observed on the dev box, which is why
+the fixed port was removed. Don't reintroduce one.
 
 ## Build — Windows
 
@@ -52,11 +59,14 @@ cd desktop && npm install && npm start
 
 ## Where user data lives
 
-`printers.json`, `queues.json`, and `runs/` are written to a per-user dir, never
-beside the app (an AppImage is read-only):
+`printers.json`, `queues.json`, `ledger.db` (+ its `parts/` model files), and
+`runs/` are written to a per-user dir, never beside the app (an AppImage is
+read-only):
 
 - Windows: `%APPDATA%\BambuMonitor\`
-- Linux: `~/.config/BambuMonitor\`
+- Linux: `~/.config/BambuMonitor/`
+
+`launcher.py::data_dir()` resolves it; Electron passes it as `BAMBU_DATA_DIR`.
 
 ## Caveats
 

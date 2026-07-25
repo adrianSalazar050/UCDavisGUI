@@ -26,10 +26,18 @@ Every file carries a status banner directly under its title.
 | ✅ shipped | `plans/2026-07-17-detection-frontend.md` | says no JS test runner exists; vitest was added later |
 | ✅ shipped | `plans/2026-07-17-print-queue.md` | queue schema predates `model_id` |
 | ✅ shipped | `specs/2026-07-21-reconnect-roi-editor-model-check-design.md` | reconnect, ROI drag editor, printer-model check |
-| ✅ shipped | `specs/2026-07-22-auto-slicing-design.md` | automatic slicing: STL → sliced, uploaded, queued. The most current file here |
-| ✅ shipped | `plans/2026-07-22-auto-slicing.md` | Tasks 1–11 done; Task 12 (hardware gate) deliberately outstanding — see its own status line |
-| 📐 design only | `specs/2026-07-24-erp-traceability-design.md` | ERP traceability: local ledger, pieces, inventory, Supabase sync. Phases 2–5 are **not built** |
-| ✅ shipped | `plans/2026-07-24-erp-traceability-phase1-ledger.md` | Phase 1 only: the ledger + run recording. Verified on `--mock`, hardware gate (Task 18) outstanding |
+| ✅ shipped | `specs/2026-07-22-auto-slicing-design.md` | automatic slicing: STL → sliced, uploaded, queued |
+| ✅ shipped | `plans/2026-07-22-auto-slicing.md` | Tasks 1–11 shipped 2026-07-22; Task 12 (hardware gate) executed and **PASSED** 2026-07-23 — a full clean 100-layer print |
+| ✅ shipped | `specs/2026-07-22-electron-desktop-packaging-design.md` | the `desktop/` Electron installer. Windows verified; **the Linux AppImage has never been built or run** (no Docker on the dev box) |
+| ✅ shipped | `specs/2026-07-23-bed-forward-eject-design.md` | park the plate fully forward at end of print (A1 family only). Gcode confirmed; the *mechanical* outcome is still unverified on hardware |
+| ✅ shipped | `specs/2026-07-23-lan-serving-auth-design.md` | shared-password auth + `--host`, and the fail-closed rule. Plain HTTP, not TLS — that trade is recorded in the file |
+| ✅ shipped | `specs/2026-07-23-onnx-detector-backend-design.md` | the torch-free ONNX inference backend. A **backend swap, not a model change** — it changes none of `master.md` §12's conclusions |
+| 📐 partly built | `specs/2026-07-24-erp-traceability-design.md` | ERP traceability: local ledger, parts, inventory, Supabase sync, arm ingest. **Phases 1–3 are now shipped** (`master.md` §13–§15); Phases 4–5 are still design only |
+| ✅ shipped | `plans/2026-07-24-erp-traceability-phase1-ledger.md` | Phase 1: the ledger + run recording. Verified on the real A1 (a `cube` print recorded start → FINISH) |
+| ✅ shipped | `plans/2026-07-24-erp-traceability-phase2-parts.md` | Phase 2: parts catalogue + recipes + slice-from-part. Not yet verified on hardware end to end |
+| ✅ shipped | `plans/2026-07-25-erp-traceability-phase3-spools.md` | Phase 3: filament spools + consumption. Not yet verified on hardware end to end |
+| 📐 partly built | `specs/2026-07-25-slicing-preview-and-all-models-design.md` | two independent slicing improvements. **Both shipped**: Feature A (P1P/P1S presets) and Feature B (STL preview + reorient) |
+| ✅ shipped | `plans/2026-07-25-stl-preview-reorient.md` | Feature B of the above: three.js preview, rotate, auto-drop, client-side bake |
 
 ## Things that are wrong in most of these files
 
