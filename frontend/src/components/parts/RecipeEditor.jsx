@@ -9,10 +9,15 @@ const BLANK = { name: "", preset_tier: "standard", filament_material: "",
 // Recipes for one part, plus the model-file upload. All mutations go through
 // the page's `act(fn)` so the whole part payload refreshes after each -- same
 // pattern as the History page's piece edits.
-export default function RecipeEditor({ part, recipes, defaultRecipeId, busy,
+export default function RecipeEditor({ part, recipes, defaultRecipeId,
+                                       printers = [], busy,
                                        onUploadModel, onAddRecipe,
-                                       onMakeDefault, onArchiveRecipe }) {
+                                       onMakeDefault, onArchiveRecipe,
+                                       onSlice }) {
   const [form, setForm] = useState(BLANK);
+  // Which printer a "Slice" button targets. Default to the first printer.
+  const [target, setTarget] = useState(printers[0]?.serial || "");
+  const canSlice = onSlice && part.model_filename && printers.length > 0;
   const set = (k) => (e) => setForm((f) => ({
     ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
 
@@ -47,16 +52,29 @@ export default function RecipeEditor({ part, recipes, defaultRecipeId, busy,
             {part.model_filename} ({part.model_bytes} bytes)
           </span>
         )}
+        {canSlice && (
+          <label className="ui-field__help">
+            Slice for:{" "}
+            <select value={target} disabled={busy}
+                    onChange={(e) => setTarget(e.target.value)}>
+              {printers.map((p) => (
+                <option key={p.serial} value={p.serial}>
+                  {p.name || p.serial}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
       <table className="table">
         <thead>
           <tr><th>Recipe</th><th>Tier</th><th>Material</th><th>Copies</th>
-              <th>Default</th><th></th></tr>
+              <th>Default</th><th></th><th></th></tr>
         </thead>
         <tbody>
           {recipes.length === 0 && (
-            <tr><td colSpan={6} className="muted">No recipes yet.</td></tr>
+            <tr><td colSpan={7} className="muted">No recipes yet.</td></tr>
           )}
           {recipes.map((r) => (
             <tr key={r.id}>
@@ -69,6 +87,12 @@ export default function RecipeEditor({ part, recipes, defaultRecipeId, busy,
                   ? <span className="pill pill-ok">default</span>
                   : <Button size="sm" disabled={busy}
                             onClick={() => onMakeDefault(r.id)}>Make default</Button>}
+              </td>
+              <td>
+                {canSlice && (
+                  <Button size="sm" variant="primary" disabled={busy || !target}
+                          onClick={() => onSlice(r.id, target)}>Slice</Button>
+                )}
               </td>
               <td>
                 <Button size="sm" disabled={busy}

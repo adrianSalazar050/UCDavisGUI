@@ -415,3 +415,17 @@ export async function archiveRecipe(partId, recipeId) {
     { method: "DELETE" });
   if (!res.ok) throw new Error(await detail(res));
 }
+
+// Slice a stored part with a stored recipe for a printer -> { job_id }.
+// The resulting queue job carries part_id/recipe_id, so the eventual run is
+// attributed to the part (Phase 2 Task 8).
+export async function sliceFromPart(serial, part_id, recipe_id) {
+  const res = await fetch(
+    `/api/printers/${encodeURIComponent(serial)}/slice/from-part`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ part_id, recipe_id }),
+    });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
