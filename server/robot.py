@@ -474,9 +474,11 @@ class RosRobotBackend:
             return node.scrapePlate(
                 source_id=p["source_id"], scrape_id=p["scrape_id"])
         if action == "gripper_open":
+            self._require_manipulation_hardware(action)
             node.open_gripper()
             return True
         if action == "gripper_close":
+            self._require_manipulation_hardware(action)
             node.close_gripper()
             return True
         raise RobotCommandError(f"unsupported action {action}")
@@ -485,7 +487,7 @@ class RosRobotBackend:
         """Never report a physical pick/place success with a no-op gripper."""
         if not self.sim and self.node.gripper is None:
             raise RobotCommandError(
-                f"{action} requires a configured physical Lite 6 gripper; "
+                f"{action} requires a configured physical {self.robot} gripper; "
                 "motion was blocked before the first waypoint")
 
     def cancel(self) -> None:

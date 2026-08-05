@@ -89,7 +89,7 @@ def main() -> int:
     p.add_argument("--robot-mode", choices=("disabled", "mock", "ros"),
                    default="disabled",
                    help="robot control backend (default disabled)")
-    p.add_argument("--robot-type", choices=("ar4", "lite6"), default="ar4",
+    p.add_argument("--robot-type", choices=("ar4", "lite6", "xarm6"), default="ar4",
                    help="robot configuration used by the ROS backend")
     p.add_argument("--robot-sim", action="store_true",
                    help="connect robot control to Gazebo/sim topics")
