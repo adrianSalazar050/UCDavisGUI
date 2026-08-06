@@ -5,6 +5,7 @@ import SdPicker from "../components/queue/SdPicker.jsx";
 import TotalsBar from "../components/queue/TotalsBar.jsx";
 import Button from "../components/ui/Button.jsx";
 import Card from "../components/ui/Card.jsx";
+import EmptyState from "../components/ui/EmptyState.jsx";
 import PageFrame from "../components/ui/PageFrame.jsx";
 
 const POLL_MS = 4000;
@@ -14,7 +15,7 @@ const EMPTY_TOTALS = { seconds: 0, grams: 0, finish_epoch: null };
 // key={printer.serial}, same reasoning as SdFiles' SdBrowser: switching
 // printers remounts from scratch (fresh poll, no stale-printer flash)
 // instead of resetting via an Effect.
-function QueuePanel({ printer }) {
+function QueuePanel({ printer, onNavigate }) {
   const [jobs, setJobs] = useState([]);
   const [totals, setTotals] = useState(EMPTY_TOTALS);
   const [err, setErr] = useState(null);
@@ -131,54 +132,97 @@ function QueuePanel({ printer }) {
   };
 
   return (
-    <Card title={`Print Queue — ${printer.name}`}>
-      <div className="queue-toolbar">
-        <Button size="sm" onClick={() => setPickerOpen((v) => !v)}>
-          {pickerOpen ? "Close" : "Add from SD"}
-        </Button>
-      </div>
-      {pickerOpen && <SdPicker serial={printer.serial} onAdd={handleAdd} />}
-      {err && (
-        <div className="state-error">
-          <span>{err}</span>
-          <Button size="sm" onClick={load}>Retry</Button>
-        </div>
-      )}
-      {notice && <div className="queue-notice">{notice}</div>}
-      {!initialLoaded ? (
-        <div className="empty">Loading queue…</div>
-      ) : jobs.length === 0 ? (
-        <div className="empty">
-          Queue is empty — use "Add from SD" to plan a print.
-        </div>
-      ) : (
-        <QueueTable jobs={jobs} busyId={busyId}
-                    onRemove={handleRemove} onMove={handleMove}
-                    onStart={handleStart} canStart={canStart}
-                    startBlockedReason={startBlockedReason}
-                    printerModelId={printer.model_id} />
-      )}
+    <>
+      {/* Above the queue, not under it: "how long is this and when does it
+          finish" is what you weigh before pressing Print, and Print is the
+          first row of the table below. */}
       <TotalsBar totals={totals} count={jobs.length} />
-    </Card>
+      <Card title="Queued jobs, in print order">
+        <div className="queue-toolbar">
+          {/* Filling the queue is this card's own action, so it is a primary
+              button -- but "Close" dismisses a panel, and dismissing is never
+              the primary thing on screen. */}
+          <Button variant={pickerOpen ? "secondary" : "primary"}
+                  onClick={() => setPickerOpen((v) => !v)}>
+            {pickerOpen ? "Close" : "Add from SD"}
+          </Button>
+        </div>
+        {pickerOpen && <SdPicker serial={printer.serial} onAdd={handleAdd}
+                                 onNavigate={onNavigate} />}
+        {err && (
+          <div className="state-error">
+            <span>{err}</span>
+            <Button size="sm" onClick={load}>Retry</Button>
+          </div>
+        )}
+        {notice && <div className="queue-notice">{notice}</div>}
+        {!initialLoaded ? (
+          <EmptyState>Loading queue…</EmptyState>
+        ) : jobs.length === 0 ? (
+          <EmptyState
+            title="Nothing queued"
+            action={
+              <>
+                {/* The toolbar's button already says "Close" while the picker
+                    is open; a second one that reopens it would do nothing. */}
+                {!pickerOpen && (
+                  <Button variant="primary" onClick={() => setPickerOpen(true)}>
+                    Add from SD
+                  </Button>
+                )}
+                <Button onClick={() => onNavigate("slice")}>Slice a model</Button>
+              </>
+            }
+          >
+            Add a sliced .3mf from this printer's microSD card, or slice a model
+            — slicing queues the result for you.
+          </EmptyState>
+        ) : (
+          <>
+            <p className="detect-help">
+              Only the job at the top can be started; the server refuses any
+              other. Use ↑ and ↓ to choose what prints next.
+            </p>
+            <QueueTable jobs={jobs} busyId={busyId}
+                        onRemove={handleRemove} onMove={handleMove}
+                        onStart={handleStart} canStart={canStart}
+                        startBlockedReason={startBlockedReason}
+                        printerModelId={printer.model_id} />
+          </>
+        )}
+      </Card>
+    </>
   );
 }
 
-export default function Queue({ printers, selected }) {
+export default function Queue({ printers, selected, onNavigate }) {
   const printer = printers.find((p) => p.serial === selected) ?? null;
 
   if (!printer) {
     return (
       <PageFrame>
-        <div className="empty">
-          No printer selected — pick one on the Overview page.
-        </div>
+        <EmptyState
+          title="No printer selected"
+          action={printers.length === 0
+            ? <Button variant="primary" onClick={() => onNavigate("printers")}>
+                Add a printer
+              </Button>
+            : null}
+        >
+          {printers.length === 0
+            ? "A queue belongs to one machine, so there is nothing to plan "
+              + "until a printer is registered."
+            : "Every queue belongs to one machine. Pick the printer you want "
+              + "to plan work for with the switcher at the top of the page."}
+        </EmptyState>
       </PageFrame>
     );
   }
 
   return (
     <PageFrame>
-      <QueuePanel key={printer.serial} printer={printer} />
+      <QueuePanel key={printer.serial} printer={printer}
+                  onNavigate={onNavigate} />
     </PageFrame>
   );
 }

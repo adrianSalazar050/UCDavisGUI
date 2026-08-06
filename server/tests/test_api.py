@@ -723,13 +723,22 @@ def test_root_hint_when_no_dist(tmp_path):
 # ---------- detection routes + WS merge (Task 11) ----------
 
 class FakeDetection:
+    """Stands in for DetectionCoordinator at the route boundary. `capture` is
+    the CAMERA PRINTERS -- plural since 2026-08-05, when the capture flag
+    stopped being exclusive: every Bambu has its own built-in camera on its own
+    address, so N camera printers are N independent streams. A bare serial is
+    still accepted, since most tests only need one."""
+
     def __init__(self, capture="S1"):
-        self.capture = capture
+        self.capture = [capture] if isinstance(capture, str) else list(capture)
         self.armed = {}
         self.updated = []
-        self._frame = None
+        # serial -> that printer's OWN latest.jpg, mirroring the real
+        # coordinator: frame_path() takes a serial, and there is one frame per
+        # detector rather than one shared global path.
+        self._frames = {}
     def snapshot(self, serial):
-        if serial != self.capture:
+        if serial not in self.capture:
             return None
         return {"running": True, "fps": 4.0, "camera_source": "a1",
                 "camera_index": 0, "conf": 0.25,
@@ -738,7 +747,7 @@ class FakeDetection:
                 "stopped_by_monitor": False, "seconds_to_stop": None,
                 "error": None}
     def arm(self, serial, value): self.armed[serial] = value
-    def frame_path(self): return self._frame
+    def frame_path(self, serial): return self._frames.get(serial)
     def start(self): pass
     def stop(self): pass
 
@@ -759,6 +768,24 @@ def det_client(tmp_path, detection, registry=None):
     from server.main import create_app
     reg = registry or DetRegistry([FakeService("S1")])
     return TestClient(create_app(reg, tmp_path, detection=detection)), reg
+
+
+def two_camera_client(tmp_path, detection):
+    """det_client with TWO registered printers, for the multi-camera routes."""
+    return det_client(tmp_path, detection,
+                      registry=DetRegistry([FakeService("S1"),
+                                            FakeService("S2")]))
+
+
+def make_detector_frame(tmp_path, serial, data=b"\xff\xd8\xff\xe0jpeg"):
+    """Write one printer's annotated frame, one directory per serial the way
+    detection.out_dir_for lays them out. FakeDetection just hands the route the
+    path it's given, but the SHAPE is the point: each detector writes its own
+    latest.jpg, so no printer can be served another's camera."""
+    path = tmp_path / serial / "latest.jpg"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
 
 
 def test_get_detection_returns_snapshot(tmp_path):
@@ -812,32 +839,76 @@ def test_arm_toggles_and_returns_snapshot(tmp_path):
 
 
 def test_detection_frame_404_when_none(tmp_path):
-    c, _ = det_client(tmp_path, FakeDetection())
+    # A camera printer whose OWN detector hasn't written a frame yet is a 404 --
+    # and stays one while a second camera printer's detector has written its
+    # own, because there is no shared global frame to fall back on any more.
+    det = FakeDetection(capture=["S1", "S2"])
+    det._frames["S2"] = make_detector_frame(tmp_path, "S2")
+    c, _ = two_camera_client(tmp_path, det)
     assert c.get("/api/printers/S1/detection/frame").status_code == 404
+    assert c.get("/api/printers/S2/detection/frame").status_code == 200
 
 
 def test_detection_frame_served(tmp_path):
     det = FakeDetection()
-    frame = tmp_path / "latest.jpg"
-    frame.write_bytes(b"\xff\xd8\xff\xe0jpeg")
-    det._frame = frame
+    det._frames["S1"] = make_detector_frame(tmp_path, "S1")
     c, _ = det_client(tmp_path, det)
     r = c.get("/api/printers/S1/detection/frame")
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/jpeg"
 
 
+def test_detection_frame_serves_each_camera_printers_own_bytes(tmp_path):
+    # THE guarantee behind per-serial frames: two camera printers, two
+    # detectors, two different latest.jpg -- each serial gets its own bytes.
+    # Serving one printer's camera under another's name is the exact class of
+    # lie the capture flag exists to prevent, and only a byte comparison
+    # catches it: both responses are 200 image/jpeg either way, so a route that
+    # ignored the serial would look perfectly healthy.
+    det = FakeDetection(capture=["S1", "S2"])
+    det._frames["S1"] = make_detector_frame(tmp_path, "S1",
+                                            b"\xff\xd8\xff\xe0S1-frame")
+    det._frames["S2"] = make_detector_frame(tmp_path, "S2",
+                                            b"\xff\xd8\xff\xe0S2-frame")
+    c, _ = two_camera_client(tmp_path, det)
+    r1 = c.get("/api/printers/S1/detection/frame")
+    r2 = c.get("/api/printers/S2/detection/frame")
+    assert (r1.status_code, r2.status_code) == (200, 200)
+    assert r1.content != r2.content
+    assert r1.content == b"\xff\xd8\xff\xe0S1-frame"
+    assert r2.content == b"\xff\xd8\xff\xe0S2-frame"
+
+
+def test_summaries_attach_detection_to_every_camera_printer(tmp_path):
+    # capture is non-exclusive as of 2026-08-05, and this is what the frontend
+    # actually reads: it gates the camera view on a non-null `detection` object
+    # per printer (see _with_detection). While marking one printer cleared
+    # every other one, the second camera view could never exist -- so a future
+    # "cleanup" that reintroduced exclusivity would show up right here.
+    det = FakeDetection(capture=["S1", "S2"])
+    c, _ = two_camera_client(tmp_path, det)
+    printers = {p["serial"]: p
+                for p in c.get("/api/printers").json()["printers"]}
+    assert set(printers) == {"S1", "S2"}
+    for p in printers.values():
+        assert p["detection_available"] is True
+        assert p["detection"] is not None
+        assert p["detection"]["running"] is True
+
+
 def test_detection_frame_404_for_non_capture_serial(tmp_path):
-    # The route must be capture-gated like the other detection routes: a
-    # frame file existing is not enough -- the requested serial must be the
-    # capture printer, even though frame_path() itself is serial-agnostic.
+    # The route must be capture-gated like the other detection routes: a frame
+    # file existing is not enough -- the requested serial must be one of the
+    # camera printers. frame_path() takes the serial now, so this gate is a
+    # second line of defence rather than the only one; the detail text is what
+    # says which line refused ("not a camera printer", not "no detector frame").
     det = FakeDetection(capture="S1")
-    frame = tmp_path / "latest.jpg"
-    frame.write_bytes(b"\xff\xd8\xff\xe0jpeg")
-    det._frame = frame
+    det._frames["S1"] = make_detector_frame(tmp_path, "S1")
     c, _ = det_client(tmp_path, det)
     assert c.get("/api/printers/S1/detection/frame").status_code == 200
-    assert c.get("/api/printers/NOTCAP/detection/frame").status_code == 404
+    r = c.get("/api/printers/NOTCAP/detection/frame")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "not a camera printer"
 
 
 def test_ws_merges_detection_into_capture_summary(tmp_path):
@@ -1304,9 +1375,11 @@ def test_lifespan_does_not_leak_a_component_if_a_later_start_raises():
 
 
 # --- detection availability ------------------------------------------------
-# BUG reported 2026-07-23 from the packaged desktop app: the Detection page said
-# "Mark <printer> as the capture printer on the Overview page", but doing so
-# changed nothing. The desktop launcher passes detection=None (torch is
+# BUG reported 2026-07-23 from the packaged desktop app: the Detection page told
+# the user to mark <printer> as the capture printer on the printer-management
+# page (then "Overview", now "Printers"), but doing so changed nothing -- the
+# wording has since been rewritten, the defect it describes has not moved.
+# The desktop launcher passes detection=None (torch is
 # deliberately out of the bundle), and _with_detection then attached NO
 # detection key at all -- so the client could not tell "no capture printer yet"
 # from "this build has no detector", and sent the user on an impossible errand.

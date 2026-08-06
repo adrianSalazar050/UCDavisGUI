@@ -4,6 +4,7 @@ import SliceForm from "../components/slice/SliceForm.jsx";
 import SliceJobList from "../components/slice/SliceJobList.jsx";
 import Button from "../components/ui/Button.jsx";
 import Card from "../components/ui/Card.jsx";
+import EmptyState from "../components/ui/EmptyState.jsx";
 import PageFrame from "../components/ui/PageFrame.jsx";
 
 // Owns the slice options (presets/filaments/detected filament) and the
@@ -12,7 +13,7 @@ import PageFrame from "../components/ui/PageFrame.jsx";
 // QueuePanel: switching printers remounts from scratch (fresh options fetch,
 // no stale-printer flash) instead of resetting via an Effect -- see the long
 // comment in SdFiles.jsx for why the Effect-reset alternative is wrong.
-function SlicePanel({ printer }) {
+function SlicePanel({ printer, onNavigate }) {
   const [options, setOptions] = useState(null);
   const [err, setErr] = useState(null);
   const [initialLoaded, setInitialLoaded] = useState(false);
@@ -46,16 +47,19 @@ function SlicePanel({ printer }) {
 
   return (
     <>
-      <Card title={`Slice — ${printer.name}`}>
+      {/* The topbar already says "Slice" and which printer is selected, so the
+          card names what it makes rather than restating either. */}
+      <Card title="New slice">
         {err ? (
           <div className="state-error">
             <span>{err}</span>
             <Button size="sm" onClick={load}>Retry</Button>
           </div>
         ) : !initialLoaded ? (
-          <div className="empty">Loading slicer options…</div>
+          <EmptyState title="Loading slicer options…" />
         ) : (
           <SliceForm serial={printer.serial} options={options}
+                     onNavigate={onNavigate}
                      onSubmitted={() => setRefreshSignal((n) => n + 1)} />
         )}
       </Card>
@@ -66,22 +70,37 @@ function SlicePanel({ printer }) {
   );
 }
 
-export default function Slice({ printers, selected }) {
+export default function Slice({ printers, selected, onNavigate }) {
   const printer = printers.find((p) => p.serial === selected) ?? null;
 
   if (!printer) {
     return (
       <PageFrame>
-        <div className="empty">
-          No printer selected — pick one on the Overview page.
-        </div>
+        {/* Two different problems wearing one message before: an empty lab
+            needs a printer registered, a lab with printers just needs the
+            topbar switcher pointed at one. Only the first has a page to go to. */}
+        <EmptyState
+          title="No printer selected"
+          action={printers.length === 0 ? (
+            <Button variant="primary" onClick={() => onNavigate("printers")}>
+              Add a printer
+            </Button>
+          ) : null}
+        >
+          {printers.length === 0
+            ? "Slicing is per printer: its model and nozzle decide which "
+              + "profiles resolve, so register a printer first."
+            : "Pick a printer with the switcher in the top bar — its model and "
+              + "nozzle decide which presets and filaments are offered."}
+        </EmptyState>
       </PageFrame>
     );
   }
 
   return (
     <PageFrame>
-      <SlicePanel key={printer.serial} printer={printer} />
+      <SlicePanel key={printer.serial} printer={printer}
+                  onNavigate={onNavigate} />
     </PageFrame>
   );
 }

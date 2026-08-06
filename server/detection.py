@@ -151,9 +151,30 @@ class AutoStopController:
                 "stopped_by_monitor": self._stopped_by_monitor}
 
 
+def out_dir_for(root, serial: str) -> pathlib.Path:
+    """Where one printer's detector writes status.json + latest.jpg.
+
+    Per-serial, because there is one detector process per camera printer and
+    they would otherwise overwrite each other's two files -- every printer
+    would show whichever detector wrote last, which is the same class of lie
+    the `capture` flag exists to prevent.
+
+    The serial goes in the path unescaped on purpose: it comes from
+    PrinterConfig, which requires a non-empty serial, and Bambu serials are
+    alphanumeric. It is never taken from a URL.
+    """
+    return pathlib.Path(root) / serial
+
+
 class DetectorSupervisor:
-    """Keeps exactly one detect.py subprocess matching the desired target.
-    Injectable spawn/clock make it testable with no real process."""
+    """Keeps one detect.py subprocess per desired target, keyed by serial.
+    Injectable spawn/clock make it testable with no real process.
+
+    Was "exactly one subprocess" until 2026-08-05. Each printer has its own
+    built-in camera on its own address, so N camera printers are N independent
+    streams and N independent detectors; the one-process-per-*device* rule
+    (section 2) is unaffected, since no two of these ever open the same device.
+    """
 
     def __init__(self, out_dir, weights, *, python=sys.executable,
                  script=None, spawn=subprocess.Popen, clock=time.time,
@@ -168,15 +189,18 @@ class DetectorSupervisor:
         self._backoff_s = backoff_s
         self._interval_s = (DEFAULT_INTERVAL_S if interval_s is None
                             else interval_s)
-        self._target = None
-        self._proc = None
-        self._last_spawn = 0.0
+        # serial -> the target dict it was spawned for / its Popen / when.
+        # Three dicts rather than one dict of records because reconcile()
+        # compares targets, polls procs and checks backoff independently.
+        self._targets = {}
+        self._procs = {}
+        self._last_spawn = {}
 
     def build_argv(self, target) -> list:
         # NB: never the access code -- that goes in build_env for a1.
         argv = [self._python, self._script, "--source", target["camera_source"],
                 "--conf", str(target["conf"]), "--weights", str(self._weights),
-                "--out", str(self._out_dir),
+                "--out", str(out_dir_for(self._out_dir, target["serial"])),
                 "--interval", str(self._interval_s)]
         if target["camera_source"] == "a1":
             argv += ["--host", target["host"]]
@@ -197,41 +221,62 @@ class DetectorSupervisor:
         return None
 
     def _spawn(self, target) -> None:
-        self._proc = self._spawn_fn(self.build_argv(target),
-                                    env=self.build_env(target))
-        self._last_spawn = self._clock()
+        serial = target["serial"]
+        self._procs[serial] = self._spawn_fn(self.build_argv(target),
+                                             env=self.build_env(target))
+        self._last_spawn[serial] = self._clock()
 
-    def _stop_proc(self) -> None:
-        if self._proc is not None:
+    def _stop_proc(self, serial) -> None:
+        proc = self._procs.pop(serial, None)
+        if proc is not None:
             try:
-                self._proc.terminate()
+                proc.terminate()
                 # terminate() only REQUESTS the exit. Until the process is
-                # actually gone it still holds the USB camera, so a respawn that
+                # actually gone it still holds the camera, so a respawn that
                 # does not wait finds the device busy, dies with "cannot open
                 # camera index N", and gets respawned again -- a flapping loop
                 # that looks like the camera reconnecting over and over.
-                self._proc.wait(timeout=TERMINATE_TIMEOUT_S)
+                # (Also true of a printer's built-in camera, which accepts one
+                # client at a time.)
+                proc.wait(timeout=TERMINATE_TIMEOUT_S)
             except Exception as e:  # noqa: BLE001 - incl. TimeoutExpired
-                log.warning("detector terminate failed: %s", e)
-            self._proc = None
+                log.warning("detector terminate failed for %s: %s", serial, e)
 
-    def reconcile(self, target) -> None:
-        if target != self._target:
-            self._stop_proc()
-            self._target = target
-            if target is not None:
+    def _drop(self, serial) -> None:
+        self._stop_proc(serial)
+        self._targets.pop(serial, None)
+        self._last_spawn.pop(serial, None)
+
+    def reconcile(self, targets) -> None:
+        """Converge on `targets` (a list of target dicts, one per printer).
+
+        Three cases per serial, each handled independently: gone (stop it),
+        changed (stop and respawn with the new settings), unchanged but dead
+        (respawn once the backoff has elapsed). A printer whose target did not
+        change is never touched -- restarting one detector must not disturb the
+        others, since each restart drops a camera connection and loses a frame.
+        """
+        wanted = {t["serial"]: t for t in (targets or [])}
+
+        for serial in list(self._targets):
+            if serial not in wanted:
+                self._drop(serial)
+
+        for serial, target in wanted.items():
+            if self._targets.get(serial) != target:
+                self._stop_proc(serial)
+                self._targets[serial] = target
                 self._spawn(target)
-            return
-        if target is None:
-            return
-        if self._proc is not None and self._proc.poll() is not None:
-            if self._clock() - self._last_spawn >= self._backoff_s:
-                log.warning("detector exited; respawning")
-                self._spawn(target)
+                continue
+            proc = self._procs.get(serial)
+            if proc is not None and proc.poll() is not None:
+                if self._clock() - self._last_spawn.get(serial, 0.0) >= self._backoff_s:
+                    log.warning("detector for %s exited; respawning", serial)
+                    self._spawn(target)
 
     def stop(self) -> None:
-        self._stop_proc()
-        self._target = None
+        for serial in list(self._targets):
+            self._drop(serial)
 
 
 DETECT_SUBDIR = "_detect"
@@ -264,10 +309,13 @@ class DetectionCoordinator:
         self.registry = registry
         self.out_dir = pathlib.Path(runs_dir) / DETECT_SUBDIR
         self.runner = runner
-        self.reader = StatusReader(
-            self.out_dir,
-            stale_after=max(MIN_STALE_S, interval_s * STALE_INTERVALS))
-        self._last_status = self.reader._down()
+        self._stale_after = max(MIN_STALE_S, interval_s * STALE_INTERVALS)
+        # serial -> StatusReader / last status / AutoStopController. All three
+        # are per camera printer: each detector writes its own status.json
+        # under its own directory (out_dir_for), and each printer gets its own
+        # arm state and fault timer, so arming one machine never arms another.
+        self._readers = {}
+        self._last_status = {}
         self._factory = controller_factory
         self._controllers = {}
         self._tick_s = tick_s
@@ -282,33 +330,53 @@ class DetectionCoordinator:
             self._controllers[serial] = c
         return c
 
+    def _reader_for(self, serial):
+        r = self._readers.get(serial)
+        if r is None:
+            r = StatusReader(out_dir_for(self.out_dir, serial),
+                             stale_after=self._stale_after)
+            self._readers[serial] = r
+        return r
+
     def tick(self) -> None:
-        self.runner.reconcile(self.registry.detection_target())
-        cap = self.registry.capture_serial()
+        self.runner.reconcile(self.registry.detection_targets())
+        caps = set(self.registry.capture_serials())
         with self._lock:
-            # Drop controllers for any printer that is no longer the capture
-            # printer. Arming and the fault timer are meaningful only for the
-            # printer the single camera currently watches; a controller left
-            # frozen mid-fault would otherwise fire on the first frame after the
-            # camera is pointed back at it (a stale fault_since bypassing the
-            # sustain debounce). Coming back disarmed matches "arm is runtime-
-            # only" -- a capture switch is like a restart for that printer.
+            # Drop controllers and readers for any printer that is no longer a
+            # camera printer. Arming and the fault timer are meaningful only
+            # while a camera actually watches the machine; a controller left
+            # frozen mid-fault would otherwise fire on the first frame after
+            # the camera comes back (a stale fault_since bypassing the sustain
+            # debounce). Coming back disarmed matches "arm is runtime-only" --
+            # losing the camera is like a restart for that printer.
             for serial in list(self._controllers):
-                if serial != cap:
+                if serial not in caps:
                     del self._controllers[serial]
-        if cap is None:
-            return
+            for serial in list(self._readers):
+                if serial not in caps:
+                    del self._readers[serial]
+                    self._last_status.pop(serial, None)
+        for cap in caps:
+            self._tick_printer(cap)
+
+    def _tick_printer(self, cap) -> None:
+        """One camera printer's read -> decide -> actuate.
+
+        Per printer, and deliberately tolerant: an exception raised for one
+        machine must not stop the others from being checked on this tick, which
+        is why the caller's loop calls this rather than inlining it.
+        """
         cfg = self.registry.detection_config(cap)
         if cfg is None:
             return
-        status = self.reader.read()
+        status = self._reader_for(cap).read()
         # NEVER act on stale/errored detections -- feed the controller [] so a
         # dead detector can't leave a stale 'spaghetti' ticking toward a stop.
         detections = status["detections"] if status["running"] else []
         svc = self.registry.get(cap)
         gstate = svc.summary().get("gcode_state") if svc else None
         with self._lock:
-            self._last_status = status
+            self._last_status[cap] = status
             ctrl = self._controller_for(cap)
             ctrl.configure(cfg["armed_classes"], cfg["conf"])
             action = ctrl.update(detections, gstate)
@@ -320,17 +388,32 @@ class DetectionCoordinator:
                 log.error("stop_print failed for %s: %s", cap, e)
 
     def snapshot(self, serial):
-        if serial != self.registry.capture_serial():
+        if serial not in self.registry.capture_serials():
             return None
         cfg = self.registry.detection_config(serial)
         if cfg is None:
             return None
         with self._lock:
-            status = self._last_status
+            # A printer just marked as a camera printer has no status yet --
+            # "down" is the honest answer until its detector's first write,
+            # never another printer's status.
+            status = self._last_status.get(serial) or self._reader_for(serial)._down()
             snap = self._controller_for(serial).snapshot()
         return {"running": status["running"], "fps": status["fps"],
                 "camera_source": cfg["camera_source"],
                 "camera_index": cfg["camera_index"], "conf": cfg["conf"],
+                # roi was missing from this payload from the start, while
+                # PUT /detection accepted it and PrinterConfig stored it. The
+                # UI seeds its editor from d.roi, so a saved region never came
+                # back: the four % inputs and the draggable box always showed
+                # the hardcoded A1 default, "Use whole frame" (disabled on
+                # !d.roi) was permanently dead, and -- worst -- the page tells
+                # the operator the draggable box and the outline burned into
+                # the JPEG "match once you hit Apply". They visibly did not,
+                # so the fix was to re-Apply, overwriting a correct region
+                # with the default. On an A1 mini that default crops the bed
+                # out of frame entirely (section 4.1's silent false negative).
+                "roi": cfg["roi"],
                 "detect_enabled": cfg["detect_enabled"],
                 "armed": snap["armed"], "armed_classes": cfg["armed_classes"],
                 "detections": status["detections"] if status["running"] else [],
@@ -342,8 +425,15 @@ class DetectionCoordinator:
         with self._lock:
             self._controller_for(serial).arm(value)
 
-    def frame_path(self):
-        p = self.out_dir / "latest.jpg"
+    def frame_path(self, serial):
+        """The annotated JPEG for ONE printer, or None if it hasn't written yet.
+
+        Takes a serial as of 2026-08-05. It used to ignore the one the route
+        passed and return a single global path, which was harmless while only
+        one printer could have a camera and would now serve whichever detector
+        wrote last under every printer's name.
+        """
+        p = out_dir_for(self.out_dir, serial) / "latest.jpg"
         return p if p.exists() else None
 
     def _loop(self) -> None:
@@ -367,44 +457,58 @@ class MockDetectorRunner:
     """--mock stand-in for DetectorSupervisor: instead of spawning detect.py,
     write a synthetic 'spaghetti' status.json + annotated frame so the
     arm->10s->stop loop AND the live camera view both work with no camera and
-    no weights. Reuses detect.mock_infer/write_* for the same contracts."""
+    no weights. Reuses detect.mock_infer/write_* for the same contracts.
+
+    One writer thread per target, into the same per-serial directories the real
+    supervisor uses, so --mock exercises the multi-camera paths too: mark two
+    mock printers as camera printers and both show a live view.
+    """
 
     def __init__(self, out_dir, *, period_s: float = 0.5):
         self.out_dir = pathlib.Path(out_dir)
         self._period = period_s
-        self._active = False
-        self._stop = threading.Event()
-        self._thread = None
+        # serial -> (thread, stop_event). One event per thread, not one shared:
+        # stopping one printer's writer must not stop the others'.
+        self._writers = {}
 
-    def reconcile(self, target) -> None:
-        if target and not self._active:
-            self._active = True
-            self._stop.clear()
-            self._thread = threading.Thread(target=self._loop, daemon=True)
-            self._thread.start()
-        elif not target and self._active:
-            self._halt()
+    def reconcile(self, targets) -> None:
+        wanted = {t["serial"] for t in (targets or [])}
+        for serial in list(self._writers):
+            if serial not in wanted:
+                self._halt(serial)
+        for serial in wanted:
+            if serial not in self._writers:
+                stop = threading.Event()
+                thread = threading.Thread(target=self._loop,
+                                          args=(serial, stop), daemon=True)
+                self._writers[serial] = (thread, stop)
+                thread.start()
 
-    def _loop(self) -> None:
+    def _loop(self, serial, stop) -> None:
         import detect  # root module; lazy so server imports don't need cv2 early
         import numpy as np
-        while not self._stop.wait(self._period):
+        out = out_dir_for(self.out_dir, serial)
+        while not stop.wait(self._period):
             try:
                 base = np.full((360, 640, 3), 40, np.uint8)
                 dets, annotated = detect.mock_infer(base)  # spaghetti + red box
-                detect.write_frame(self.out_dir, annotated)
-                detect.write_status(self.out_dir, detect.build_status(
+                detect.write_frame(out, annotated)
+                detect.write_status(out, detect.build_status(
                     dets, ts=time.time(), fps=4.0, camera=0, conf=0.25))
             except Exception as e:  # noqa: BLE001 - no supervisor to respawn
                 # this thread; one bad write (even after H1's retries are
                 # exhausted) must not permanently kill the mock writer.
-                log.warning("mock detector write failed: %s", e)
+                log.warning("mock detector write failed for %s: %s", serial, e)
 
-    def _halt(self) -> None:
-        self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2)
-        self._active = False
+    def _halt(self, serial) -> None:
+        entry = self._writers.pop(serial, None)
+        if entry is None:
+            return
+        thread, stop = entry
+        stop.set()
+        if thread.is_alive():
+            thread.join(timeout=2)
 
     def stop(self) -> None:
-        self._halt()
+        for serial in list(self._writers):
+            self._halt(serial)

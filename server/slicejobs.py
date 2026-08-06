@@ -196,7 +196,7 @@ class SliceCoordinator:
         if preset is None:
             raise ValueError(
                 f"no {tier_id!r} preset for this printer -- check its model "
-                f"and nozzle ({nozzle} mm) on the Overview page")
+                f"and nozzle ({nozzle} mm) on the Printers page")
         # filament_profile_name resolves against the index and returns "" if
         # nothing matches, so the in-index check it used to need is now inside.
         filament = slicepresets.filament_profile_name(
@@ -372,8 +372,8 @@ class SliceCoordinator:
             self._evict_excess_finished()
 
     def _evict_excess_finished(self) -> None:
-        """Must be called with self._lock already held (same convention as
-        registry.py's `_clear_capture`).
+        """Must be called with self._lock already held (the same
+        caller-holds-the-lock convention `registry.py`'s internals use).
 
         Keeps at most `self._max_finished_jobs` TERMINAL (done/failed/
         cancelled) records, evicting the OLDEST ones first. `self._order` is

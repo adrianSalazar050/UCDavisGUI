@@ -19,7 +19,8 @@
 > | `LoDISA-GUI/vera-web/frontend/src/...` | `frontend/src/...` |
 > | no test setup | `vitest`, over three pure modules — `roiGeometry.js`, `runFormat.js`, `stlGeometry.js` (see `master.md` §10) |
 > | "no three.js, no chart library" | true of VERA, **not** of this project: `frontend/` uses three.js for the Slice page's STL preview, and it is deliberately the one heavyweight frontend dependency here (`master.md` §6.9) |
-> | pages keyed with a `permission` field | this project's `pageRegistry.jsx` has `{title, group, component}` and no per-page permission — auth is all-or-nothing |
+> | pages keyed with a `permission` field | this project's `pageRegistry.jsx` has `{title, description, group, scope, component}` and no per-page permission — auth is all-or-nothing |
+> | "dark sidebar, light content, `grid-template-columns: 260px 1fr`" as a fixed shell (§3.2 rule 4) | true above 900px only. This project collapses that sidebar into a topbar toggle below it, because `--lan` exists so that anyone in the lab can open the dashboard on a phone (`master.md` §2.1, §7.1) |
 >
 > Read it for **conventions**, not for facts about this codebase. For what
 > `frontend/` really contains, see [`master.md` §7](master.md).

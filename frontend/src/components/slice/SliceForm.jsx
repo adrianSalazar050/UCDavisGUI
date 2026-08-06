@@ -1,6 +1,7 @@
 import { Suspense, lazy, useRef, useState } from "react";
 import { startSlice, startSliceBlob } from "../../api/printer.js";
 import Button from "../ui/Button.jsx";
+import EmptyState from "../ui/EmptyState.jsx";
 import Field from "../ui/Field.jsx";
 import OrientControls from "./OrientControls.jsx";
 import { IDENTITY, addRotation, isIdentity } from "./stlGeometry.js";
@@ -14,6 +15,19 @@ const StlViewer = lazy(() => import("./StlViewer.jsx"));
 
 const MODEL_ACCEPT = ".stl,.3mf,.step,.stp,.obj";
 const isStl = (name) => /\.stl$/i.test(name || "");
+
+// The server builds a preset label as "<tier> <layer height> mm", reading the
+// height off whichever profile resolved (server/slicepresets.py) -- two facts
+// answering two questions: which quality tier, and how thick its layers are on
+// THIS nozzle. Splitting them lets the tier read first with the height beside
+// it in secondary text, so a stack of presets is scannable without inventing
+// any wording of our own. A label that doesn't match the shape is shown whole.
+const PRESET_LABEL = /^(.+?)\s+([\d.]+\s*mm)$/;
+
+function splitPresetLabel(label) {
+  const m = PRESET_LABEL.exec(label ?? "");
+  return m ? { tier: m[1], layer: m[2] } : { tier: label, layer: null };
+}
 
 // Prefers options.detected_filament, but only when the slicer actually ships
 // a profile for it -- a detected material this printer has no profile for must
@@ -32,7 +46,11 @@ function initialMaterial(options) {
 // unrotated STL (or a non-STL we can't preview) uploads its original bytes,
 // so the no-rotation path is byte-identical to before. The slicing backend is
 // unchanged. Presets/filaments/detection/bed all come from `options`.
-export default function SliceForm({ serial, options, onSubmitted }) {
+//
+// `onNavigate` is OPTIONAL: only the no-presets empty state uses it, so the
+// form still renders (minus that one button) for any caller that has no router
+// to hand.
+export default function SliceForm({ serial, options, onSubmitted, onNavigate }) {
   const [file, setFile] = useState(null);
   const [buffer, setBuffer] = useState(null); // STL ArrayBuffer for the preview
   const [rotation, setRotation] = useState(IDENTITY);
@@ -45,11 +63,24 @@ export default function SliceForm({ serial, options, onSubmitted }) {
   const fileInput = useRef(null);
 
   if (options.presets.length === 0) {
+    // Model and nozzle are edited on the Printers page (Setup) -- and naming a
+    // page is not the same as offering it, so this carries the button too.
+    const model = options.model_id || "an unrecognised model";
+    const nozzle = options.nozzle
+      ? `a ${options.nozzle} mm nozzle` : "an unknown nozzle";
     return (
-      <div className="empty">
-        No presets available for this printer. Check its model and nozzle on
-        the Overview page.
-      </div>
+      <EmptyState
+        title="No slicing presets for this printer"
+        action={onNavigate && (
+          <Button variant="primary" onClick={() => onNavigate("printers")}>
+            Check model &amp; nozzle
+          </Button>
+        )}
+      >
+        No installed Bambu Studio process profile resolves for {model} with
+        {" "}{nozzle}, so there is nothing to slice with. Correct either one on
+        the Printers page, under Setup.
+      </EmptyState>
     );
   }
 
@@ -99,10 +130,13 @@ export default function SliceForm({ serial, options, onSubmitted }) {
 
   return (
     <form className="add-form slice-layout" onSubmit={submit}>
-      <div className="slice-layout__viewer">
+      {/* `stack` is composed onto the viewer column for its vertical rhythm:
+          the plate, the rotation controls and the two notes under them had no
+          spacing between them, and no new class names may be invented. */}
+      <div className="slice-layout__viewer stack">
         {showViewer ? (
           <>
-            <Suspense fallback={<div className="empty">Loading 3D viewer…</div>}>
+            <Suspense fallback={<EmptyState title="Loading 3D viewer…" />}>
               <StlViewer arrayBuffer={buffer} rotation={rotation}
                          bed={options.bed} onFit={setFits} />
             </Suspense>
@@ -110,46 +144,64 @@ export default function SliceForm({ serial, options, onSubmitted }) {
                             onReset={() => setRotation(IDENTITY)} disabled={busy} />
             {!options.bed && (
               <div className="ui-field__help">
-                Bed size unknown — showing a default 256×256 plate.
+                Bed size unknown — this is a default 256 × 256 mm plate, so
+                treat the fit check as a guess.
               </div>
             )}
             {!fits && (
               <div className="add-form__error">
-                Model is larger than the build plate.
+                Model is larger than the build plate — try rotating it.
               </div>
             )}
           </>
         ) : file ? (
-          <div className="empty">3D preview is available for STL files only.</div>
+          <EmptyState title="No preview for this file">
+            The plate view and the rotation controls are STL-only.
+            {" "}{file.name} still slices, it just can't be reoriented here.
+          </EmptyState>
         ) : (
-          <div className="empty">Pick an STL to preview and reorient it.</div>
+          <EmptyState title="Nothing to preview yet">
+            Pick an STL and it lands on its plate here, where you can turn it
+            before slicing.
+          </EmptyState>
         )}
       </div>
 
       <div className="slice-layout__form">
-        <Field label="Model file" help={`Accepted: ${MODEL_ACCEPT}`}>
+        <Field label="Model file"
+               help="STL, 3MF, STEP or OBJ. Only STL can be previewed and turned.">
           <input ref={fileInput} type="file" accept={MODEL_ACCEPT}
                  onChange={(e) => onPick(e.target.files?.[0] ?? null)} />
         </Field>
 
         <div className="ui-field">
-          <span className="ui-field__label">Preset</span>
-          <div className="slice-presets">
-            {options.presets.map((p) => (
-              <label key={p.id} className="slice-presets__option">
-                <input type="radio" name="slice-preset" value={p.id}
-                       checked={presetId === p.id}
-                       onChange={() => setPresetId(p.id)} />
-                {p.label}
-              </label>
-            ))}
+          <span className="ui-field__label">Quality preset</span>
+          {/* role=group rather than a <fieldset>: nothing in the stylesheet
+              tames a fieldset's default border, and the visible heading above
+              is the group's name. */}
+          <div className="slice-presets" role="group" aria-label="Quality preset">
+            {options.presets.map((p) => {
+              const { tier, layer } = splitPresetLabel(p.label);
+              return (
+                <label key={p.id} className="slice-presets__option">
+                  <input type="radio" name="slice-preset" value={p.id}
+                         checked={presetId === p.id}
+                         onChange={() => setPresetId(p.id)} />
+                  <span>{tier}</span>
+                  {layer && <span className="muted">{layer}</span>}
+                </label>
+              );
+            })}
+          </div>
+          <div className="ui-field__help">
+            Thinner layers, finer detail, longer print.
           </div>
         </div>
 
         <Field label="Filament"
                help={options.detected_filament
-                 ? `Detected: ${options.detected_filament}`
-                 : "Not detected — pick what's loaded"}>
+                 ? `Detected in the printer: ${options.detected_filament}`
+                 : "Nothing detected — pick what is loaded"}>
           <select value={material} onChange={(e) => setMaterial(e.target.value)}>
             {options.filaments.map((f) => (
               <option key={f.material} value={f.material}>{f.material}</option>
@@ -157,11 +209,14 @@ export default function SliceForm({ serial, options, onSubmitted }) {
           </select>
         </Field>
 
-        <label className="add-form__check">
-          <input type="checkbox" checked={supports}
-                 onChange={(e) => setSupports(e.target.checked)} />
-          Tree supports
-        </label>
+        <div className="ui-field">
+          <span className="ui-field__label">Supports</span>
+          <label className="add-form__check">
+            <input type="checkbox" checked={supports}
+                   onChange={(e) => setSupports(e.target.checked)} />
+            Tree supports
+          </label>
+        </div>
 
         {err && <div className="add-form__error">{err}</div>}
 
@@ -169,6 +224,11 @@ export default function SliceForm({ serial, options, onSubmitted }) {
           <Button type="submit" variant="primary" busy={busy} disabled={!file}>
             Slice &amp; queue
           </Button>
+          <span className="ui-field__help">
+            {file
+              ? "Slices, uploads to the microSD card, then queues it."
+              : "Pick a model file to start."}
+          </span>
         </div>
       </div>
     </form>

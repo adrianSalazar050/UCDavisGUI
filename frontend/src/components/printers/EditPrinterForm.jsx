@@ -64,20 +64,43 @@ export default function EditPrinterForm({ printer, onDone }) {
 
   return (
     <form className="add-form" onSubmit={submit}>
+      {/* The same fields, in the four groups they actually belong to: "which
+          printer am I looking at" is not the same errand as "what plate is on
+          it", and one flat run of eight controls made you read all of them to
+          find the one you came for. Grouped by label alone, with no extra
+          wrapper -- every row keeps its add-form__row class, and styles.css
+          stacks those to one column inside a printer card, which is the only
+          place this form renders. */}
+      <div className="detect-label">Identity</div>
+      <div className="add-form__row">
+        <Field label="Name (optional)" value={form.name} onChange={set("name")}
+               placeholder="A1-bench" help="Defaults to the IP address" />
+        <Field label="Serial" value={printer.serial} disabled
+               help="Serial can't be changed" />
+      </div>
+      <div className="detect-label">Connection</div>
       <div className="add-form__row">
         <Field label="IP address" value={form.host} onChange={set("host")}
                placeholder="192.168.137.2"
                help="Printer screen: Settings → WLAN" />
-        <Field label="Serial" value={printer.serial} disabled
-               help="Serial can't be changed" />
-      </div>
-      <div className="add-form__row">
         <Field label="LAN access code" value={form.access_code}
                onChange={set("access_code")} placeholder="00000000"
                help="Leave blank to keep the current code" />
-        <Field label="Name (optional)" value={form.name} onChange={set("name")}
-               placeholder="A1-bench" help="Defaults to the IP address" />
       </div>
+      <div className="detect-label">Camera</div>
+      {/* No longer exclusive: every printer has its own built-in camera, so
+          tick this on as many as you want a live view for. Ticking it here
+          leaves every other printer's setting alone. */}
+      <label className="add-form__check">
+        <input type="checkbox" checked={form.capture} onChange={set("capture")} />
+        Show a live camera view for this printer
+      </label>
+      <div className="ui-field__help">
+        Uses the printer's own built-in camera. Tick it on more than one printer
+        to watch several at once; for a USB webcam instead, choose the source on
+        the Detection page.
+      </div>
+      <div className="detect-label">Slicing</div>
       <div className="add-form__row">
         <Field label="Printer model"
                help="Refuses starting a file sliced for another model. “Unknown” disables the check.">
@@ -106,10 +129,6 @@ export default function EditPrinterForm({ printer, onDone }) {
           </select>
         </Field>
       </div>
-      <label className="add-form__check">
-        <input type="checkbox" checked={form.capture} onChange={set("capture")} />
-        This printer is the one the webcam points at
-      </label>
       {err && <div className="add-form__error">{err}</div>}
       <div className="add-form__actions">
         <Button type="submit" variant="primary" busy={busy} disabled={!ready}>

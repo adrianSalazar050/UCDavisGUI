@@ -3,6 +3,7 @@ import { fetchFiles, uploadFile } from "../api/printer.js";
 import FileTable from "../components/sd/FileTable.jsx";
 import Button from "../components/ui/Button.jsx";
 import Card from "../components/ui/Card.jsx";
+import EmptyState from "../components/ui/EmptyState.jsx";
 import PageFrame from "../components/ui/PageFrame.jsx";
 
 const join = (path, name) => (path === "/" ? `/${name}` : `${path}/${name}`);
@@ -117,18 +118,39 @@ function SdBrowser({ printer }) {
   };
 
   return (
-    <Card title={`microSD — ${printer.name}`}>
+    // The topbar already names the printer, so the title says what this card
+    // holds instead of repeating it.
+    <Card title="Files on the card">
       <div className="sd-toolbar">
         <Crumbs path={path} onGo={setPath} />
+        {/* Outside the `.row` below on purpose: `.row input` sizes bare
+            controls, and this one is never seen. */}
         <input ref={fileInput} type="file" accept=".3mf,.gcode"
                style={{ display: "none" }} onChange={onPick} />
-        <Button size="sm" busy={uploading}
-                onClick={() => fileInput.current?.click()}>
-          Upload…
-        </Button>
-        <Button size="sm" busy={loading} onClick={() => load(path)}>
-          Refresh
-        </Button>
+        {/* `.row` and not three more children of `.sd-toolbar`, which does not
+            wrap: on a phone the hint would be squeezed into a column of
+            two-word lines between the crumbs and the buttons. In a wrapping
+            row it takes a line of its own and the buttons drop below it. */}
+        <div className="row">
+          {/* The upload rule was documented only in the comment on onPick
+              above, so the first time anyone met it was when a file they sent
+              from a subfolder was not in that subfolder. It belongs beside the
+              control that causes it. `.ui-field__help` is the kit's help-text
+              look, and this IS help for a control — just not one in a Field. */}
+          <span className="ui-field__help">
+            Uploads land in the card root, not in the folder shown — the printer
+            starts a file by name, not by path.
+          </span>
+          {/* Upload writes to the card and Refresh only re-reads it. Same size,
+              but only the one with a consequence reads as the primary action. */}
+          <Button size="sm" variant="primary" busy={uploading}
+                  onClick={() => fileInput.current?.click()}>
+            Upload…
+          </Button>
+          <Button size="sm" busy={loading} onClick={() => load(path)}>
+            Refresh
+          </Button>
+        </div>
       </div>
       {notice ? (
         <div className={noticeKind === "warn" ? "state-warn" : "state-ok"}>
@@ -141,7 +163,10 @@ function SdBrowser({ printer }) {
           <Button size="sm" onClick={() => load(path)}>Retry</Button>
         </div>
       ) : loading && entries.length === 0 ? (
-        <div className="empty">Reading the card…</div>
+        <EmptyState title="Reading the card…">
+          Every folder opened here is a fresh FTPS handshake with the printer,
+          so a listing takes a moment — and needs the machine powered on.
+        </EmptyState>
       ) : (
         <FileTable entries={entries}
                    onOpen={(name) => setPath(join(path, name))} />
@@ -150,15 +175,29 @@ function SdBrowser({ printer }) {
   );
 }
 
-export default function SdFiles({ printers, selected }) {
+export default function SdFiles({ printers, selected, onNavigate }) {
   const printer = printers.find((p) => p.serial === selected) ?? null;
 
   if (!printer) {
+    // With no printers at all the fix is registering one, so offer it. With
+    // printers registered the fix is one click away in the topbar switcher and
+    // does not leave this page, so naming the switcher is the whole answer.
     return (
       <PageFrame>
-        <div className="empty">
-          No printer selected — pick one on the Overview page.
-        </div>
+        <EmptyState
+          title="No printer selected"
+          action={printers.length === 0 ? (
+            <Button variant="primary" onClick={() => onNavigate("printers")}>
+              Register a printer
+            </Button>
+          ) : null}
+        >
+          {printers.length === 0
+            ? "A card listing is read off one machine over FTPS, so there is "
+              + "nothing to browse until a printer is registered."
+            : "Choose one with the printer switcher in the topbar — the card "
+              + "listed here is whichever printer is selected there."}
+        </EmptyState>
       </PageFrame>
     );
   }

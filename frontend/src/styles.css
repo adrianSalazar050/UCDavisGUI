@@ -75,9 +75,9 @@ a { color: var(--primary); }
 .topbar {
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: 20;               /* above .switcher__menu's own stacking context */
   flex: 0 0 auto;
-  height: 56px;
+  min-height: 56px;
   display: flex;
   align-items: center;
   gap: var(--sp-4);
@@ -85,8 +85,68 @@ a { color: var(--primary); }
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
-.topbar__title { font-weight: 600; color: var(--text); margin-right: auto; }
-.topbar__host { color: var(--text-muted); font-size: 12px; }
+/* The heading takes the slack, so the switcher and the server pill stay
+   pinned to the right edge on every page regardless of title length. */
+.topbar__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-right: auto;
+  min-width: 0;
+}
+.topbar__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+/* Why a page can ignore the printer switcher: Parts, Inventory and Printers
+   describe the whole lab. Saying so is what stops "I switched printer and
+   nothing changed" reading as a bug. */
+.topbar__scope {
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+/* Revealed by the narrow-screen breakpoint at the end of this file. */
+.topbar__menu {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  margin-left: calc(var(--sp-3) * -1);
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.topbar__menu:hover { background: var(--surface-2); }
+.topbar__menu:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+
+/* The page's one-line "what am I looking at", from pageRegistry. Aligned to
+   .ui-pageframe's column so it reads as the first line of the page rather
+   than as part of the chrome. */
+.pagehead {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--sp-5) var(--sp-6) 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+/* The description already spaced the page away from the topbar. */
+.pagehead + .ui-pageframe { padding-top: var(--sp-4); }
 
 .dimmed { opacity: 0.55; }
 
@@ -218,14 +278,86 @@ a { color: var(--primary); }
 .ui-btn:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
 .ui-btn:disabled { opacity: 0.55; cursor: default; }
 
+/* ================= data tables =================
+   ONE look for every table in the app.
+
+   There were three near-identical copies of this ruleset (.file-table,
+   .queue-table, .slice-table) and a fourth class -- plain `.table`, used by
+   RunTable, PieceGrid, PartList, SpoolList and RecipeEditor -- that was never
+   written at all. So the History, Parts and Inventory pages rendered with
+   browser-default tables: bold centred headers, no borders, no alignment,
+   nothing shared with the rest of the app. Folding all four into one selector
+   list fixes those three pages and removes the three-way drift at the same
+   time; the per-table blocks further down now hold only what is genuinely
+   specific to them. */
+.table, .file-table, .queue-table, .slice-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.table th, .file-table th, .queue-table th, .slice-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  font-weight: 500;
+  padding: 0 var(--sp-3) var(--sp-2);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.table td, .file-table td, .queue-table td, .slice-table td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+}
+/* No trailing rule above a card's own bottom edge. */
+.table tr:last-child td,
+.file-table tr:last-child td,
+.queue-table tr:last-child td,
+.slice-table tr:last-child td { border-bottom: 0; }
+
+/* These cells hold <select>s and buttons, so centre them on the row rather
+   than leaving them on the text baseline. */
+.table td { vertical-align: middle; }
+
+/* Only tables whose rows ARE a control get the pointer and the hover: a
+   hover highlight on a row that does nothing when clicked is a promise the
+   table doesn't keep. RunTable and PartList opt in; SpoolList, PieceGrid and
+   RecipeEditor deliberately don't. */
+.table--selectable tbody tr { cursor: pointer; }
+.table--selectable tbody tr:hover td { background: var(--surface-2); }
+.table--selectable tbody tr.selected td { background: var(--primary-soft); }
+/* The selected row gets an edge marker as well as a fill -- the fill alone is
+   too close to the hover state to tell them apart once the pointer moves on. */
+.table--selectable tbody tr.selected td:first-child {
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+/* Numeric columns line up under each other or the digits are decoration.
+   `th.table__num`/`td.table__num` rather than a bare `.table__num`: the
+   `.table th` rule above is (0,1,1) and would otherwise out-specify a plain
+   class, leaving a right-aligned column under a left-aligned header. Matching
+   its specificity and coming later in the file is what makes this win. */
+th.table__num, td.table__num,
+.file-table td:nth-child(2), .file-table th:nth-child(2),
+.queue-table__num, .slice-table__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* ================= dashboard ================= */
+/* auto-fit, not repeat(6, 1fr): this was a hardcoded six-across grid back when
+   the dashboard had exactly six tiles. Layer, progress and remaining time are
+   now the progress bar, leaving three -- which in a six-column grid would have
+   sat in half a row of empty space. Sizing from the tiles instead means the row
+   is correct for however many tiles a page has, and it reflows on its own
+   without needing a breakpoint per count. */
 .tile-row {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: var(--sp-4);
-}
-@media (max-width: 1100px) {
-  .tile-row { grid-template-columns: repeat(3, 1fr); }
 }
 
 .camera-frame {
@@ -375,27 +507,8 @@ a { color: var(--primary); }
 .crumbs__btn:disabled { color: var(--text); cursor: default; }
 .crumbs__btn:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
 
-.file-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.file-table th {
-  text-align: left;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-faint);
-  font-weight: 500;
-  padding: 0 var(--sp-3) var(--sp-2);
-  border-bottom: 1px solid var(--line);
-}
-.file-table td {
-  padding: var(--sp-2) var(--sp-3);
-  border-bottom: 1px solid var(--line);
-  color: var(--text);
-}
-.file-table td:nth-child(2), .file-table th:nth-child(2) {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-.file-table tr:last-child td { border-bottom: 0; }
+/* Base look shared with .table/.queue-table/.slice-table above; the size
+   column's right alignment is declared with it. */
 .file-table__dir {
   border: 0;
   background: transparent;
@@ -423,28 +536,7 @@ a { color: var(--primary); }
   border: 1px solid var(--line);
   border-radius: var(--r-control);
 }
-.queue-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.queue-table th {
-  text-align: left;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-faint);
-  font-weight: 500;
-  padding: 0 var(--sp-3) var(--sp-2);
-  border-bottom: 1px solid var(--line);
-}
-.queue-table td {
-  padding: var(--sp-2) var(--sp-3);
-  border-bottom: 1px solid var(--line);
-  color: var(--text);
-}
-.queue-table tr:last-child td { border-bottom: 0; }
-.queue-table__num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
+/* Base look + .queue-table__num's alignment are shared, above. */
 .queue-table__actions {
   display: flex;
   align-items: center;
@@ -520,29 +612,10 @@ a { color: var(--primary); }
   font-size: 13px;
   color: var(--text-body);
 }
-.slice-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.slice-table th {
-  text-align: left;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-faint);
-  font-weight: 500;
-  padding: 0 var(--sp-3) var(--sp-2);
-  border-bottom: 1px solid var(--line);
-}
-.slice-table td {
-  padding: var(--sp-2) var(--sp-3);
-  border-bottom: 1px solid var(--line);
-  color: var(--text);
-  vertical-align: top;
-}
-.slice-table tr:last-child td { border-bottom: 0; }
-.slice-table__num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
+/* Base look + .slice-table__num's alignment are shared, above. Only the top
+   alignment is specific: a failed job's <pre> error block can be many lines
+   tall, and the rest of that row has to stay level with its first line. */
+.slice-table td { vertical-align: top; }
 .slice-table__error {
   margin: var(--sp-2) 0 0;
   padding: var(--sp-2);
@@ -577,6 +650,27 @@ a { color: var(--primary); }
   background: var(--surface-2);
   border: 1px dashed var(--line-strong);
   border-radius: var(--r-card);
+}
+/* EmptyState's three optional parts. An empty state that names what is
+   missing, explains it, and offers the fix reads as a state of the app; one
+   line of grey text reads as a dead end. */
+.empty__title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+.empty__body {
+  max-width: 60ch;
+  margin: var(--sp-2) auto 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.empty__action {
+  display: flex;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
 }
 .state-error {
   padding: var(--sp-4);
@@ -630,9 +724,12 @@ a { color: var(--primary); }
   line-height: normal;
 }
 .roi__veil { position: absolute; background: rgb(15 23 42 / 55%); }
+/* var(--ok-dot), not var(--accent, #4f9e76): --accent was never declared in
+   :root, so the literal fallback was what actually rendered -- and #4f9e76 IS
+   --ok-dot's value. Same pixels, one fewer phantom token. */
 .roi__box {
   position: absolute;
-  border: 2px solid var(--accent, #4f9e76);
+  border: 2px solid var(--ok-dot);
   box-shadow: 0 0 0 1px rgb(255 255 255 / 55%);
   cursor: move;
 }
@@ -642,7 +739,7 @@ a { color: var(--primary); }
   width: 14px;
   height: 14px;
   margin: -7px 0 0 -7px;
-  border: 2px solid var(--accent, #4f9e76);
+  border: 2px solid var(--ok-dot);
   border-radius: 3px;
   background: #fff;
 }
@@ -784,6 +881,17 @@ a { color: var(--primary); }
   align-items: start;
 }
 .slice-layout__viewer { min-width: 0; }
+/* The form column had no rule at all. The <form> is `add-form slice-layout`,
+   and .slice-layout's `display: grid` overrides .add-form's flex column -- so
+   .add-form's `gap: var(--sp-4)` applied to the two COLUMNS and never reached
+   the controls inside this one. The result was a stack of fields with zero
+   space between them. This restores the spacing the grid took away. */
+.slice-layout__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
 .stl-viewer { border-radius: 8px; overflow: hidden; background: #0e1116; }
 .orient-controls {
   display: flex; flex-wrap: wrap; gap: var(--sp-2);
@@ -794,5 +902,382 @@ a { color: var(--primary); }
 .orient-controls__deg { width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
 @media (max-width: 800px) { .slice-layout { grid-template-columns: 1fr; } }
 
-/* Inventory: low-stock spool row highlight (2026-07-25) */
-.row-warn td { background: color-mix(in srgb, var(--warn, #e0a800) 12%, transparent); }
+/* ================= topbar printer switcher =================
+   The control that made every page printer-agnostic. Anchored to the topbar,
+   so its menu is positioned relative to this wrapper rather than the page. */
+.switcher { position: relative; flex: 0 0 auto; }
+.switcher__trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--ctl-h);
+  max-width: 260px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.switcher__trigger:hover { background: var(--surface-2); }
+.switcher__trigger:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+.switcher__dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.switcher__dot--ok { background: var(--ok-dot); }
+.switcher__dot--warn { background: var(--warn-dot); }
+.switcher__dot--danger { background: var(--danger-dot); }
+.switcher__name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.switcher__state {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.switcher__caret { color: var(--text-faint); font-size: 10px; }
+
+.switcher__menu {
+  position: absolute;
+  top: calc(100% + var(--sp-2));
+  right: 0;
+  z-index: 30;
+  min-width: 300px;
+  max-width: min(380px, calc(100vw - var(--sp-6) * 2));
+  padding: var(--sp-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-md);
+}
+.switcher__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.switcher__item:hover { background: var(--surface-2); }
+.switcher__item:focus-visible { outline: 3px solid var(--focus); outline-offset: -1px; }
+.switcher__item.is-current { background: var(--primary-soft); }
+.switcher__item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-right: auto;
+  min-width: 0;
+}
+.switcher__item-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.switcher__item-sub {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.switcher__tag {
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.switcher__none {
+  padding: var(--sp-3);
+  color: var(--text-faint);
+  font-size: 13px;
+}
+.switcher__manage {
+  display: block;
+  width: 100%;
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 var(--r-control) var(--r-control);
+  background: transparent;
+  color: var(--primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.switcher__manage:hover { background: var(--primary-soft); }
+.switcher__manage:focus-visible { outline: 3px solid var(--focus); outline-offset: -1px; }
+
+/* ================= print progress =================
+   Layer, percent and remaining time were three tiles telling one story. */
+.progress { display: flex; flex-direction: column; gap: var(--sp-2); }
+.progress__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  font-size: 13px;
+}
+.progress__label { font-weight: 600; color: var(--text); }
+.progress__right {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.progress__track {
+  height: 10px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.progress__fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: var(--r-pill);
+  /* Layer progress arrives once per report, so a step to the new width would
+     visibly jump. Not a decorative animation: it is the difference between
+     "the number changed" and "it is moving". */
+  transition: width 0.4s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress__fill { transition: none; }
+}
+
+/* ================= ledger pages: History / Parts / Inventory =================
+   These five class names were used from day one by the Phase 1-3 ledger
+   components and never existed in this file, so those pages rendered as
+   unstyled HTML. They are defined here in terms of the same tokens as the
+   rest of the app rather than as new one-off looks. */
+
+/* Vertical rhythm for a page body or a card body. The .ui-stack primitive
+   takes its gap from an inline style, which a plain className cannot, so this
+   carries the page-level gap itself. */
+.stack { display: flex; flex-direction: column; gap: var(--sp-5); }
+/* A card body's internal stack is tighter than a page's. */
+.ui-card .stack { gap: var(--sp-4); }
+
+/* A horizontal strip of controls: a label, a select, a button. Wraps, because
+   these strips hold three or four controls and live inside cards that get
+   narrow. */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+}
+/* Bare <select>s and <input>s inside these strips: the ledger components
+   predate Field.jsx and use raw controls, which would otherwise render at
+   browser-default sizes next to 36px-tall buttons. */
+.row select, .row input, .kv select {
+  height: var(--ctl-h-sm);
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.row select:focus-visible, .row input:focus-visible, .kv select:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+.table select {
+  height: var(--ctl-h-sm);
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+/* Secondary text: an em-dash cell, a "no runs yet" line, a JSON payload. */
+.muted { color: var(--text-faint); }
+p.muted { margin: 0; font-size: 13px; }
+
+/* Page-level error line. The lighter sibling of .state-error: it appears
+   above content that is still valid (a failed poll over a good table), so it
+   must not look like the page died. */
+.error {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-control);
+  border-left: 3px solid var(--danger-text);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+  font-size: 13px;
+}
+
+/* The dotless inline badge. .ui-pill (StatusPill) is the same look with a
+   status dot; these sit inside table cells and <dd>s where the dot is noise.
+   NOTE the tone names: runFormat.js emits ok / warn / BAD, not "danger", and
+   the class is built by interpolation (`pill-${outcome.tone}`), so pill-bad is
+   reachable only through that. It maps to the danger palette. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.pill-ok { background: var(--ok-bg); color: var(--ok-text); }
+.pill-warn { background: var(--warn-bg); color: var(--warn-text); }
+.pill-bad { background: var(--danger-bg); color: var(--danger-text); }
+/* Several badges in one cell need to breathe. */
+.pill + .pill { margin-left: var(--sp-2); }
+
+/* The run event log. Browser-default <ul> furniture (discs, 40px indent) made
+   a machine log look like prose. */
+.timeline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  font-size: 13px;
+  /* A run can log many events; the card must not grow without bound. */
+  max-height: 340px;
+  overflow-y: auto;
+}
+.timeline li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--line);
+}
+.timeline li:last-child { border-bottom: 0; padding-bottom: 0; }
+.timeline code {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.timeline .muted { overflow-wrap: anywhere; }
+
+/* Inventory: low-stock spool row highlight (2026-07-25).
+   var(--warn-dot), not var(--warn, #e0a800): --warn was never declared, so the
+   tint was #e0a800 -- an amber that appears nowhere else in the palette. This
+   is the same row, drawn in the warn colour the pills already use. */
+.row-warn td { background: color-mix(in srgb, var(--warn-dot) 14%, transparent); }
+
+/* ================= narrow screens =================
+   The point of `python -m server --lan` (master.md section 2.1) is that anyone
+   in the lab opens a URL -- including on a phone, standing at the printer.
+   A fixed 260px sidebar beside a 1200px page meant that view was unusable, so
+   below 900px the sidebar folds into the topbar's ☰ button and every
+   two-column layout becomes one column. */
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  /* Hidden, not removed: App keeps rendering it so the toggle only flips this
+     one declaration, and no state is lost on resize. */
+  .sidebar {
+    display: none;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--sp-4);
+  }
+  .shell--nav-open .sidebar { display: flex; }
+  .sidebar__brand { width: 100%; }
+  .ui-navgroup { flex: 1 1 140px; }
+
+  .topbar__menu { display: inline-flex; }
+  .topbar {
+    flex-wrap: wrap;
+    height: auto;
+    gap: var(--sp-2) var(--sp-3);
+    padding: var(--sp-2) var(--sp-4);
+  }
+  /* Two rows, not three: [☰ + title], then [switcher + server pill].
+     This used to be `flex: 1 1 100%`, which gives the heading a full-width
+     flex BASIS -- so it could not share a line with the ☰ that precedes it in
+     the DOM. The button got a row entirely of its own and the bar stood three
+     rows tall (four, once the switcher's own width pushed the pill off as
+     well: 158px at 390px wide). Taking exactly the rest of the ☰'s line still
+     forces the wrap before the switcher, which is all the two-row layout
+     needs. The basis subtracts one gap more than the ☰ really costs -- its
+     negative margin-left cancels the column gap -- and flex-grow hands that
+     slack straight back to the heading; keeping the slack is what holds the
+     heading on the ☰'s line if that margin is ever removed.
+     NOT `.switcher { flex: 1 1 100% }` to force the wrap instead: a 100% basis
+     fills line two on its own, so the server pill would break to a THIRD row.
+     Left at `1 1 auto` the switcher shares line two with the pill while the
+     trigger fits beside it (97px tall, down to ~420px) and takes the whole
+     line when it doesn't (129px on a 390px phone) -- the printer name is never
+     truncated just to save a row. */
+  .topbar__heading {
+    flex: 1 1 calc(100% - var(--ctl-h) - var(--sp-3));
+    min-width: 0;
+  }
+  .switcher { flex: 1 1 auto; }
+  .switcher__trigger { width: 100%; max-width: none; }
+
+  .pagehead { padding: var(--sp-4) var(--sp-4) 0; }
+  .ui-pageframe { padding: var(--sp-4); gap: var(--sp-5); }
+
+  .tile-row { grid-template-columns: repeat(2, 1fr); }
+  /* Columns.jsx sets grid-template-columns INLINE (it is data -- "3fr 2fr" is
+     the page's ratio, not a style choice), and an inline declaration beats a
+     stylesheet one. !important is the only way a breakpoint can collapse it,
+     and collapsing it is not optional: a 2fr column at 380px wide cannot hold
+     a camera view. */
+  .ui-columns { grid-template-columns: 1fr !important; }
+  .detect-roi { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kv { grid-template-columns: 110px 1fr; }
+
+  /* Tables of eight columns do not fit a phone; let the card scroll its own
+     table sideways rather than the whole page. */
+  .table, .file-table, .queue-table, .slice-table { min-width: 520px; }
+  .ui-card { overflow-x: auto; }
+  /* SdPicker's file list is a plain two-column `.table`, so that 520px floor
+     is ~200px wider than the panel holding it -- and .queue-picker is a
+     bordered, tinted box, so the table drew straight through its right edge
+     (217px past it at 390px, measured). The panel scrolls its own table, the
+     same way the card above scrolls its own. Fixed here rather than by taking
+     `.table` off the min-width list: RunTable, PartList, SpoolList, PieceGrid
+     and RecipeEditor all still need that floor. */
+  .queue-picker { overflow-x: auto; }
+}
+
+/* Very narrow: one stat tile per half-row, the switcher's menu uses the full
+   width it is anchored to, and each row of that menu stacks the printer name
+   above its tag and status pill so the name still has room to be read. */
+@media (max-width: 520px) {
+  .tile-row { grid-template-columns: 1fr; }
+  .switcher__menu { min-width: 0; width: 100%; }
+  /* Sizing the menu to its trigger (the rule above) leaves one flex line to
+     hold the printer name AND the "camera" tag AND the status pill. The tag
+     and the pill are nowrap and refuse to shrink past their text, so they take
+     the line, .switcher__item-main (min-width: 0) collapses toward zero, and
+     the name inside it ellipsises away: measured at 440px, a 60px name box for
+     106px of text -- "Bam..." where a machine's name should be, and a longer
+     machine state ("SLICING", "PREPARE") takes it to nothing. That is the
+     printer's NAME missing from its own row in the printer picker, on the
+     one screen where the picker matters most. So the name gets a line to
+     itself here and the tag and pill read as metadata beneath it. row-gap,
+     because the row would otherwise inherit the item's 12px column gap
+     vertically and grow far more than the second line needs. */
+  .switcher__item { flex-wrap: wrap; row-gap: var(--sp-1); }
+  .switcher__item-main { flex: 1 1 100%; }
+  .empty { padding: var(--sp-5); }
+}

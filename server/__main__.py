@@ -38,7 +38,7 @@ from .store import MemoryStore, PrinterStore
 
 log = logging.getLogger("server.__main__")
 
-# serial, name, mode, capture -- one of each state so the Overview grid is
+# serial, name, mode, capture -- one of each state so the Printers grid is
 # fully exercisable with no hardware.
 MOCK_SEED = [
     ("MOCK0000000001", "mock-bench", "running", True),

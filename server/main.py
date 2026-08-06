@@ -290,8 +290,10 @@ def _with_detection(printers: list[dict], detection) -> list[dict]:
     marked a capture printer yet" from "this build has no detector" -- both
     just look like a missing detection object. Reported 2026-07-23 from the
     packaged app: the Detection page told the user to mark a capture printer on
-    the Overview page, they did, and nothing changed, because marking one
-    cannot conjure a detector that was never bundled.
+    the printer-management page, they did, and nothing changed, because marking
+    one cannot conjure a detector that was never bundled. (That page was called
+    "Overview" at the time and is now "Printers"; the bug is the same either
+    way -- the advice was impossible, not misaddressed.)
     """
     available = detection is not None
     for p in printers:
@@ -1247,8 +1249,11 @@ def create_app(registry, runs_dir: pathlib.Path,
         if detection is None:
             raise HTTPException(404, "detection not enabled on this server")
         if detection.snapshot(serial) is None:
-            raise HTTPException(404, "not the capture printer")
-        path = detection.frame_path()
+            raise HTTPException(404, "not a camera printer")
+        # frame_path takes the serial: several printers can have cameras, and
+        # each detector writes its own latest.jpg. Passing it is what stops one
+        # printer's view being served under another's name.
+        path = detection.frame_path(serial)
         if path is None:
             return JSONResponse({"error": "no detector frame"}, status_code=404)
         try:

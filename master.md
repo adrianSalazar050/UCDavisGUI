@@ -47,9 +47,10 @@ telemetry for building training datasets.
    `PrinterConfig` for each, persisting to `printers.json`.
 4. `server/main.py` (FastAPI) exposes those summaries over `GET /api/printers`
    and pushes them over `WS /ws` at up to 4 Hz.
-5. Separately, `detect.py` runs as its **own process**: it grabs frames (from
-   the printer's built-in camera over TCP 6000, or a USB webcam), runs YOLO,
-   and writes `runs/_detect/latest.jpg` + `runs/_detect/status.json`.
+5. Separately, `detect.py` runs as its **own process — one per camera printer**:
+   each grabs frames (from that printer's built-in camera over TCP 6000, or a
+   USB webcam), runs YOLO, and writes
+   `runs/_detect/<serial>/{latest.jpg,status.json}`.
 6. `server/detection.py::DetectionCoordinator` polls that `status.json` on a
    background thread, feeds detections into an `AutoStopController` state
    machine, and — never the detector itself — calls `PrinterService.stop_print()`
@@ -154,23 +155,33 @@ detection dataset (§12).
 
 ## 2. Architecture: processes, and why they are separate
 
-The hard constraint that shapes everything: **on Windows a camera device can be
-opened by exactly one process at a time.** So exactly one process owns the
-camera, and it is never the server.
+The hard constraint that shapes everything: **a camera device can be opened by
+exactly one process at a time** (on Windows for a USB device; a Bambu printer's
+built-in camera likewise accepts one client). So exactly one process owns any
+given camera, and it is never the server.
+
+**The rule is one process per *device*, not one camera per lab** — a distinction
+that was blurred for a long time and cost a feature. Every printer has its own
+built-in camera on its own address, so *N* printers are *N* independent streams
+and *N* independent detector processes, none of which contend. Two USB webcams on
+different indexes are equally fine. What is impossible is two processes on **one**
+device, or showing one camera's frames under a second printer's name. See §4.6.
 
 | Process | Owns | Why separate |
 |---|---|---|
 | `python -m server` (uvicorn) | MQTT links, FTPS calls, queue/printer persistence, HTTP/WS, the auto-stop decision | Must stay responsive; never blocks on a camera or on inference |
-| `detect.py` | The camera (webcam index *or* the A1's TCP-6000 stream) + YOLO inference | Single-process-per-device rule; also keeps torch/CUDA out of the web server. Normally spawned and supervised *by* the server (`DetectorSupervisor`), but runnable standalone |
+| `detect.py` (**one per camera printer**) | One camera (a webcam index *or* one printer's TCP-6000 stream) + YOLO inference | Single-process-per-device rule; also keeps torch/CUDA out of the web server. Normally spawned and supervised *by* the server (`DetectorSupervisor`), but runnable standalone |
 | `capture.py` | A USB webcam + its own MQTT subscription, for dataset logging | Independent research tool, predates the server; writes files the server later reads |
 
 Because both `detect.py` and `capture.py` want a camera, you generally run one
 or the other against a given device — see §11.
 
-The interprocess contract is **files, not sockets**: `detect.py` writes
-`runs/_detect/{status.json,latest.jpg}` with atomic temp+`os.replace`, and the
-server reads them tolerantly (a bad read degrades to "detector down", never an
-exception).
+The interprocess contract is **files, not sockets**: each `detect.py` writes
+`runs/_detect/<serial>/{status.json,latest.jpg}` with atomic temp+`os.replace`,
+and the server reads them tolerantly (a bad read degrades to "detector down",
+never an exception). **The `<serial>` directory is what keeps several detectors
+from overwriting each other's two files**, which would show every printer
+whichever detector wrote last.
 
 ```
    ┌──────────────────────────────────────────────────────────┐
@@ -186,8 +197,8 @@ exception).
         │                   │                 └────────┬─────────┘
         ▼                   ▼                          │ atomic writes
  ┌──────────────────────────────────────┐              ▼
- │ server/printer.py  PrinterService    │      runs/_detect/status.json
- │ server/registry.py PrinterRegistry   │      runs/_detect/latest.jpg
+ │ server/printer.py  PrinterService    │      runs/_detect/<serial>/status.json
+ │ server/registry.py PrinterRegistry   │      runs/_detect/<serial>/latest.jpg
  │ server/queue.py    PrintQueue        │              │
  │ server/detection.py Coordinator ─────┼──────────────┘ (reads)
  │ server/main.py     FastAPI app       │
@@ -221,7 +232,8 @@ The app is **already a website.** FastAPI serves the built React frontend
 directly (§7), and the Electron desktop app (§8) is only a window pointed at
 that same server. For a shared lab, running **one** server and letting
 everyone open a URL beats an installer per person: no install, works on any
-OS, works from a phone, and there is exactly one place to update.
+OS, works from a phone (§7.1 collapses the shell below 900px so that claim is
+real rather than aspirational), and there is exactly one place to update.
 
 **A hosted/cloud site cannot replace this — that is an architectural
 invariant, not a current limitation.** The printer is reachable only at a
@@ -566,10 +578,13 @@ is never held across `start()`/`stop()`/disk I/O (because `summaries()` runs on
 the asyncio event loop for every WS tick and must not block); `_persist_lock`
 serializes snapshot-then-write so two concurrent `add()`/`remove()` calls can't
 race their `save()` and silently drop a printer from `printers.json`. Ordering
-is registration order. Enforces "at most one capture printer" via
-`_clear_capture()`, which mutates *both* the config and the live service's own
-`capture` attribute. Detection accessors: `capture_serial()`,
-`detection_config(serial)`, `detection_target()`, `update_detection(...)`.
+is registration order. It no longer enforces "at most one capture printer"
+(§4.6) — `_clear_capture()` is gone, and the one thing its docstring recorded
+lives on where `update()` writes `capture`: `PrinterService`/`MockPrinter` each
+keep their **own** copy of `name`/`capture`/`model_id` and `summary()` reads
+*that*, not the config, so both have to be written or the config is right while
+every summary reports the old value. Detection accessors: `capture_serials()`,
+`detection_config(serial)`, `detection_targets()`, `update_detection(...)`.
 `fetch_sd_file(serial, path)` delegates to the service so the access code never
 appears in a queue route's signature. `printer_nozzle(serial)` mirrors
 `printer_model()`: it never returns `""`, falling back to `store.DEFAULT_NOZZLE`
@@ -581,7 +596,7 @@ nothing (§6.3).
 
 | Method + path | Notes |
 |---|---|
-| `GET /api/printers` | Summaries, each with a `detection` object (null unless capture printer) |
+| `GET /api/printers` | Summaries, each with a `detection` object (null unless it is a camera printer — several may be, §4.6) |
 | `POST /api/printers` | 201; 409 on duplicate serial, 400 on bad fields |
 | `PUT /api/printers/{serial}` | Edit host/name/capture/model_id; blank `access_code` = keep current. Serial is not editable |
 | `POST /api/printers/{serial}/reconnect` | Rebuild the MQTT connection from the stored config. 200 + summary, 404 unknown. Sends no printer command |
@@ -775,14 +790,29 @@ Key semantics:
 
 ### 4.4 `DetectorSupervisor`
 
-Keeps exactly one `detect.py` subprocess matching the desired *target*
-(`{serial, camera_source, camera_index, conf, host, access_code}`). On a target
-change it terminates and respawns; on an unexpected exit it respawns after
-`backoff_s` (5 s). `build_argv()` passes `--source`, `--conf`, `--weights`,
-`--out`, `--interval`, and either `--host` (a1) or `--camera` (webcam).
+Keeps **one `detect.py` subprocess per desired *target***, keyed by serial. A
+target is `{serial, camera_source, camera_index, conf, host, access_code, roi}`,
+and `registry.detection_targets()` returns one per printer with both `capture`
+and `detect_enabled` set. `reconcile(targets)` takes the whole list and settles
+each serial independently:
+
+| Per serial | Action |
+|---|---|
+| gone from the list | terminate and drop |
+| target changed | terminate, respawn with the new settings |
+| unchanged, process dead | respawn once `backoff_s` (5 s) has elapsed |
+| unchanged, process alive | **left completely alone** |
+
+That last row is load-bearing: every restart drops a camera connection and loses
+a frame, so reconfiguring one printer must not disturb the others.
+`build_argv()` passes `--source`, `--conf`, `--weights`, `--out`, `--interval`,
+and either `--host` (built-in camera) or `--camera` (webcam) — with `--out`
+pointing at `out_dir_for(root, serial)`, i.e. `runs/_detect/<serial>/`, so two
+detectors can never overwrite each other's `status.json` and `latest.jpg`.
 
 Stopping **waits** for the old process: `terminate()` only *requests* an exit, and
-until the process is actually gone it still holds the USB camera. Respawning
+until the process is actually gone it still holds the camera (true of a USB
+device and of a printer's built-in camera, which accepts one client). Respawning
 without reaping it means the new detector finds the device busy, dies with
 `cannot open camera index N`, and gets respawned again — a flapping loop
 indistinguishable from a camera reconnecting over and over. Hence
@@ -795,27 +825,76 @@ to any process listing.
 
 A daemon thread ticking every `TICK_S = 0.5`s. Each tick:
 
-1. `runner.reconcile(registry.detection_target())`.
-2. Drop controllers for any printer that is no longer the capture printer — a
-   controller frozen mid-fault would otherwise fire immediately on the first
-   frame after the camera is pointed back, with a stale `fault_since` bypassing
-   the sustain debounce.
-3. If there is no capture printer, or no detection config, stop here.
-4. `status = reader.read()`. **Feed the controller `[]` unless
-   `status["running"]`** — a dead or stale detector must never leave a stale
-   `spaghetti` ticking toward a stop.
-5. `ctrl.configure(...)`, `ctrl.update(detections, gcode_state)`.
-6. On `"fire"`, call `svc.stop_print()` — in a `try/except`, and always from the
-   server. The detector process has no channel to command the printer.
+1. `runner.reconcile(registry.detection_targets())` — the whole list at once.
+2. Drop controllers **and** status readers for any printer that is no longer a
+   camera printer. A controller frozen mid-fault would otherwise fire
+   immediately on the first frame after the camera came back, with a stale
+   `fault_since` bypassing the sustain debounce.
+3. Then, **for each serial in `registry.capture_serials()`** (`_tick_printer`):
+   1. no detection config → skip this printer.
+   2. `status = reader_for(serial).read()`. **Feed the controller `[]` unless
+      `status["running"]`** — a dead or stale detector must never leave a stale
+      `spaghetti` ticking toward a stop.
+   3. `ctrl.configure(...)`, `ctrl.update(detections, gcode_state)`.
+   4. On `"fire"`, call that printer's `svc.stop_print()` — in a `try/except`,
+      and always from the server. The detector process has no channel to
+      command the printer.
+
+**Everything here is per printer: its own reader, its own last status, its own
+`AutoStopController`.** Arming one machine arms only that machine, and a
+sustained fault on one fires a stop on that one alone.
 
 `snapshot(serial)` merges controller + status + config into the object the API
-and WebSocket serve. `arm(serial, bool)` is runtime-only and never persisted.
-An exception in a tick is logged and the loop continues.
+and WebSocket serve — including **`roi`**, which it omitted for a long time
+(§11) even though `PUT /detection` accepted one and `PrinterConfig` stored it.
+It returns `None` unless the serial is a camera printer, and a camera printer
+whose detector hasn't written yet reads as **down** rather than borrowing
+another printer's status. `arm(serial, bool)` is runtime-only and
+never persisted. `frame_path(serial)` resolves that printer's own
+`latest.jpg`. An exception in a tick is logged and the loop continues.
 
 `MockDetectorRunner` replaces the supervisor under `--mock`: instead of spawning
-a subprocess it writes synthetic spaghetti status + annotated frames using
-`detect.mock_infer` / `detect.write_*`, so the whole arm → 10 s → stop path and
-the live camera view work with no camera and no weights.
+subprocesses it runs **one writer thread per camera printer**, writing synthetic
+spaghetti status + annotated frames into the same per-serial directories using
+`detect.mock_infer` / `detect.write_*` — so the whole arm → 10 s → stop path,
+the live camera view, *and* the multi-camera paths work with no camera and no
+weights. Mark two mock printers as camera printers and both show a live view.
+
+### 4.6 Several camera printers at once
+
+Originally there could be exactly one: `registry` cleared the `capture` flag on
+every other printer whenever one claimed it, one `detect.py` ran, and one pair
+of files carried its output. The justification was §2's one-process-per-camera
+rule — but that rule was misread. **It is one process per *device*, and each
+printer has its own camera**, on its own address, with its own TLS handshake. So
+the fleet was limited to one live view for a constraint that only ever applied
+to a single shared USB webcam.
+
+Four things had to become per-printer, and each is a place a regression would
+hide:
+
+| Was | Now |
+|---|---|
+| `capture` exclusive, enforced in `add`/`update`/`load` | a plain per-printer flag; any number may set it |
+| `capture_serial()` / `detection_target()` → first match | `capture_serials()` / `detection_targets()` → lists |
+| one `_proc`, one `_out_dir` | `{serial: proc}`, and `runs/_detect/<serial>/` |
+| `frame_path()` ignoring the serial the route passed | `frame_path(serial)` |
+
+That third row is the subtle one: with a shared output directory, two detectors
+overwrite the same `status.json` and `latest.jpg`, so **every** printer shows
+whichever detector wrote last — the same class of lie the `capture` flag exists
+to prevent, but silent, because both files would look perfectly healthy.
+
+**What this costs.** One `detect.py` process per camera printer, each holding a
+model in memory and pulling a camera stream continuously. With the ONNX backend
+(§3.1 — 44 MB installed, no GPU) several printers are comfortable; with the CUDA
+torch build they are not. `detect_enabled` is still separate from `capture` for
+exactly this reason: a printer can show a live view without paying for
+inference.
+
+**What it is still not.** Two processes on one device remains impossible, so
+while a detector holds a printer's camera, `collect_dataset.py` cannot have it
+(§3.1). And one camera still cannot appear under two printers.
 
 ---
 
@@ -842,8 +921,10 @@ already takes by disabling TLS verification on a LAN). One entry:
 }
 ```
 
-At most one entry may have `capture: true`. `registry.load()` enforces that even
-against a hand-edited file, walking entries in file order with "last one wins".
+**Any number of entries may have `capture: true`** (§4.6). This used to be at
+most one, enforced by `registry.load()` even against a hand-edited file; that
+rule assumed a single shared webcam, was wrong about the hardware, and is gone.
+A file with several camera printers is now restored exactly as written.
 
 ### 5.2 The queue
 
@@ -1358,32 +1439,135 @@ it live and keeps it grounded. Design/plan:
 React 19 + Vite 6, plain JSX, one global `styles.css` of design tokens, a
 hand-rolled UI kit, and **no router** — see `FRONTEND-STACK-GUIDE.md`.
 
-**Pages** (`src/app/pageRegistry.jsx` — add pages here and nowhere else; every
-page gets the same `{printers, selected, onSelect}` props):
+### 7.1 The shell: sidebar, topbar, and the printer switcher
 
-| Key | Page | What it does |
+`App.jsx` renders everything around a page: a dark sidebar of grouped nav
+items, a sticky topbar, and the selected page's one-line description. All three
+are derived from `pageRegistry.jsx` — nothing about the shell is hardcoded per
+page.
+
+**The sidebar is four groups, and the grouping answers a question rather than
+classifying the code.** All nine pages used to sit in one list labelled
+"Monitor", which told you nothing about which of them you needed:
+
+| Group | Question it answers | Pages |
 |---|---|---|
-| `overview` | `Overview.jsx` | Printer grid (`PrinterCard`, with inline `EditPrinterForm`) + `AddPrinterForm` |
-| `dashboard` | `Dashboard.jsx` | Stat tiles, `CameraCard`, `AutoStopCard`, `PrintInfoCard`, `HmsCard` |
-| `detection` | `Detection.jsx` | Enable/disable, camera source, webcam index, conf slider, armed-class checkboxes, detector health, and the **draggable ROI editor** (`RoiEditor`) over the live view |
-| `sdfiles` | `SdFiles.jsx` | FTPS microSD browser with breadcrumbs + upload |
-| `slice` | `Slice.jsx` | STL upload + in-browser preview/reorient (§6.9), preset radio group, filament dropdown (prefilled from detection), tree-supports checkbox, polled job list (§6) |
-| `queue` | `Queue.jsx` | Job table, reorder, remove, "Add from SD" picker, totals bar |
-| `history` | `History.jsx` | The selected printer's recorded runs (`RunTable`), one run's events + pieces (`RunDetail`, `PieceGrid`), operator corrections and badges (§13) |
-| `parts` | `Parts.jsx` | Parts catalogue: `PartList`, `PartForm`, `RecipeEditor`, per-recipe "Slice for &lt;printer&gt;" (§14) |
-| `inventory` | `Inventory.jsx` | Filament spools: `SpoolList` with derived remaining grams + low-stock highlight, `SpoolForm`, and the per-printer `LoadedSpool` control (§15) |
+| Monitor | what is this machine doing right now | Dashboard, Detection, History |
+| Print | get a job onto it — in the order the work happens | Slice → Queue → SD Files |
+| Library | fleet-wide records that outlive any one printer | Parts, Inventory |
+| Setup | registering machines, which you do once | Printers |
 
-**Two scopes, and the page list mixes them.** `overview`…`history` are
-per-printer: they read `selected` and show one machine. `parts` and
-`inventory` are **fleet-wide** — the catalogue and the spool list are not
-properties of any one printer — and touch `selected` only for their
-per-printer actions ("Slice for &lt;printer&gt;", load/unload a spool). Both
-still receive the identical `{printers, selected, onSelect}` props, so adding
-a page never means a new prop contract. `HistoryPanel` is mounted with
-`key={printer.serial}`, the same remount-don't-reset rule as `SdBrowser` and
-`QueuePanel` below.
+Group **order** is `GROUP_ORDER` in the registry, not the `pages` literal's
+insertion order: adding a page to an existing group can then never reshuffle
+the groups themselves, and a page whose `group` is misspelled renders under its
+own heading at the end instead of vanishing.
 
-**Data layer.** `src/api/printer.js` is a set of plain `fetch` wrappers —
+**The topbar carries the page title, a `Fleet-wide` badge on fleet-scoped pages
+(§7.2), the printer switcher, and one status pill about the *server*.** The
+pill deliberately no longer restates the selected printer's connection — the
+switcher sitting beside it already shows that, and two components disagreeing
+about whether a machine is stale would now be visible side by side. That is
+also why `printerStatus.js` exists: `printerTone`/`printerProgress` are the one
+place a summary becomes a tone and a label, shared by the switcher and
+`PrinterCard`.
+
+**`PrinterSwitcher` is the change that made every page printer-agnostic.**
+Before it, the printer grid was the only way to change `selected`, so "look at
+the other printer's queue" meant leaving the queue, clicking a card, and being
+navigated to the dashboard — three steps, and you lost your place, for what is
+really one choice. Two rules make it work:
+
+- **Switching printer does not navigate.** `App.jsx` keeps two handlers over
+  one piece of state: `onSelect(serial)` (a card click — select *and* jump to
+  that printer's dashboard) and the switcher's plain `setSelected` (stay
+  exactly where you are). Changing printer while reading a queue leaves you
+  looking at that printer's queue.
+- **The switcher is a view over `selected`, never a second source of truth.**
+  Auto-select-when-there-is-one and repair-when-the-selection-disappears still
+  live in `App.jsx`'s effect; the switcher only calls the setter.
+
+It is a menu rather than a `<select>` because each row carries a status pill and
+the live layer/percent line, which a native `<option>` cannot render. That
+means the keyboard behaviour a `<select>` gives free is implemented by hand —
+arrow keys, Home/End, Escape, click-outside on `pointerdown`, and a roving
+`tabIndex` so the menu is one tab stop rather than one per printer. The
+arithmetic is `moveFocus()` in `printerStatus.js`, tested (§10); the cursor is
+seeded when the menu opens rather than in an effect, because this component
+re-renders on every `/ws` push and an effect keyed on `printers` would yank the
+highlight back mid-navigation four times a second.
+
+**Below 900px the sidebar folds into a `☰` toggle in the topbar**, every
+two-column `Columns` collapses to one, and cards scroll their own wide tables
+sideways. This is not polish: §2.1's whole point is that `--lan` lets anyone in
+the lab open a URL, including on a phone while standing at the printer, and a
+fixed 260px sidebar beside a six-column tile row made that view unusable. The
+breakpoints are `max-width: 900px` and `max-width: 520px`, and they coexist
+with three older one-off queries (1100px for `.tile-row`, 800px for
+`.slice-layout`, 700px for `.add-form__row`). Collapsing `Columns` needs
+`!important`, because `Columns.jsx` sets `grid-template-columns` inline — the
+ratio is data, but an inline declaration still beats a stylesheet one.
+
+> **Departure from `FRONTEND-STACK-GUIDE.md` §3.2 rule 4**, which states the
+> shell as a fixed `260px 1fr` grid. Recorded here rather than by editing that
+> file, which documents a different project.
+
+### 7.2 Pages
+
+`src/app/pageRegistry.jsx` — add pages here and nowhere else. Every page
+receives the same four props: `{printers, selected, onSelect, onNavigate}`.
+
+| Key | Group | Page | What it does |
+|---|---|---|---|
+| `dashboard` | Monitor | `Dashboard.jsx` | Print progress bar, stat tiles, `CameraCard`, `AutoStopCard`, `PrintInfoCard`, `HmsCard` |
+| `detection` | Monitor | `Detection.jsx` | Detector health first, then camera source/webcam index, conf slider, armed-class checkboxes, and the **draggable ROI editor** (`RoiEditor`) over the live view |
+| `history` | Monitor | `History.jsx` | The selected printer's recorded runs (`RunTable`), one run's events + pieces (`RunDetail`, `PieceGrid`), operator corrections and badges (§13) |
+| `slice` | Print | `Slice.jsx` | Model upload + in-browser STL preview/reorient (§6.9), preset radio group, filament dropdown (prefilled from detection), tree-supports checkbox, polled job list (§6) |
+| `queue` | Print | `Queue.jsx` | Job table, reorder, remove, "Add from SD" picker, totals |
+| `sdfiles` | Print | `SdFiles.jsx` | FTPS microSD browser with breadcrumbs + upload |
+| `parts` | Library | `Parts.jsx` | Parts catalogue: `PartList`, `PartForm`, `RecipeEditor`, per-recipe "Slice for &lt;printer&gt;" (§14) |
+| `inventory` | Library | `Inventory.jsx` | Filament spools: `SpoolList` with derived remaining grams + low-stock highlight, `SpoolForm`, and the per-printer `LoadedSpool` control (§15) |
+| `printers` | Setup | `Printers.jsx` | Printer grid (`PrinterCard`, with inline `EditPrinterForm`) + `AddPrinterForm` behind a disclosure |
+
+The key `printers` is a registry key; the `printers` **prop** every page
+receives is the live summary list. They are unrelated.
+
+**Two scopes, recorded in the registry as `scope`.** A `printer` page shows
+whichever machine the switcher is pointed at. A `fleet` page — `parts`,
+`inventory`, `printers` — describes the whole lab and touches `selected` only
+for its per-printer actions ("Slice for &lt;printer&gt;", load/unload a spool,
+which machine the camera watches). The topbar badges the fleet ones, so
+switching printer and seeing the page not change is *explained* rather than
+surprising. Group membership is a navigation concern and is **not** the scope
+boundary — Library holds fleet pages, but Setup does too.
+
+**`onNavigate(pageKey)` moves between pages without touching the selection.**
+It exists so an empty state can offer the fix instead of naming it: five pages
+used to say *"pick one on the Overview page"*, which after this change would
+have been wrong twice over — the page was renamed, and the switcher means you
+no longer have to go anywhere. Every "nothing here yet" panel is now an
+`EmptyState` with a headline, a sentence, and where useful a button.
+
+`HistoryPanel`, `SdBrowser`, `QueuePanel` and `SlicePanel` are each mounted
+with `key={printer.serial}`, the remount-don't-reset rule detailed in §7.4.
+**That rule matters more after this change, not less:** a printer switch can
+now fire while the user is sitting on SD Files, Queue, Slice or History, which
+was previously impossible.
+
+**One stylesheet, and the class names must be reconciled with it.** The Phase
+1–3 ledger components (`RunTable`, `RunDetail`, `PieceGrid`, `PartList`,
+`SpoolList`, `RecipeEditor`) were written against bare class names — `table`,
+`pill`, `pill-ok`, `muted`, `error`, `stack`, `row`, `timeline`, `selected` —
+that had **no rules in `styles.css` at all**, so those three pages rendered as
+unstyled HTML for as long as they existed. Nothing catches this: the build
+succeeds, and a missing CSS class is not an error anywhere. They are defined
+now, in the same tokens as the rest of the app, and `.table` shares one
+selector list with `.file-table`/`.queue-table`/`.slice-table` — which had been
+three near-identical copies of one look. **Before adding a page, grep the class
+names you used against `styles.css`.**
+
+### 7.3 The data layer
+
+`src/api/printer.js` is a set of plain `fetch` wrappers —
 `addPrinter`, `updatePrinter`, `removePrinter`, `fetchFiles`, `fetchQueue`,
 `addQueueJob`, `removeQueueJob`, `reorderQueue`, `uploadFile`, `fetchLatestFrame`,
 `updateDetection`, `armDetection`, `fetchDetectionFrame`, `fetchSliceOptions`,
@@ -1424,7 +1608,10 @@ few, and a parts catalogue only when a human edits it.
 `usePrinters` reconnects with exponential backoff to 10 s, guards against
 StrictMode double-mount teardown, and keeps the last-known-good list if a frame
 fails to parse. `App.jsx` auto-selects the printer when there is exactly one and
-repairs the selection when the selected printer disappears.
+repairs the selection when the selected printer disappears — it owns `selected`,
+and the topbar switcher (§7.1) only calls its setter.
+
+### 7.4 Details that are easy to get wrong
 
 **The ROI editor.** `components/detection/RoiEditor.jsx` draws a draggable box
 (8 handles + move) over the live frame; the four `%` inputs and the box are two
@@ -1450,11 +1637,14 @@ was at drag **start** (accumulating per-move drifts once clamping engages, so
 the box stops following the cursor back), and `pointermove`/`pointerup` are
 bound to `window`, not the element, so a drag that leaves the image still ends.
 
-`SdBrowser` and `QueuePanel` are both mounted with `key={printer.serial}` so
-switching printers **remounts** rather than resetting via an Effect — see the
-long comment in `SdFiles.jsx` for why the Effect version fires a wasted FTPS
-handshake at the previous printer's path. Both also use a `requestId` ref so an
-out-of-order response can never clobber a newer one.
+**The remount rule.** `SdBrowser`, `QueuePanel`, `SlicePanel` and
+`HistoryPanel` are each mounted with `key={printer.serial}` so switching
+printers **remounts** rather than resetting via an Effect — see the long
+comment in `SdFiles.jsx` for why the Effect version fires a wasted FTPS
+handshake at the previous printer's path. All four also use a `requestId` ref so
+an out-of-order response can never clobber a newer one. Since §7.1 put a printer
+switcher on every page, this is exercised constantly rather than only on the way
+in from a card click — **do not "simplify" any of those keys away.**
 
 ---
 
@@ -1493,7 +1683,8 @@ python -m server --port 8000 --runs-dir runs --printers-file printers.json
 ```
 
 Then open <http://127.0.0.1:8000>. Printers are added **in the browser**
-(Overview → Add printer) — there are no `--serial/--access-code` flags.
+(Setup → Printers → Add a printer) — there are no `--serial/--access-code`
+flags.
 
 To serve the dashboard to the rest of the lab instead of just this machine
 (§2.1), use **`--lan`**:
@@ -1725,8 +1916,9 @@ GUI_UCDavis/
 ├─ parts/<part_id>/<file>        part model bytes, beside ledger.db, written by PartStore (§14)
 ├─ runs/                         (gitignored)
 │  ├─ _detect/
-│  │  ├─ status.json             detect.py → server: ts, fps, camera, conf, detections, error
-│  │  └─ latest.jpg              annotated frame, JPEG q85
+│  │  └─ <serial>/               ONE DIRECTORY PER CAMERA PRINTER (§4.6)
+│  │     ├─ status.json          detect.py → server: ts, fps, camera, conf, detections, error
+│  │     └─ latest.jpg           annotated frame, JPEG q85
 │  ├─ _slice/                    per-job temp dirs, deleted on every exit path (§6.5)
 │  │  └─ <job_id>/                machine.json, process.json, filament.json, sliced.gcode.3mf
 │  ├─ train/failure_detector/weights/best.pt      public-data detector ("best.pt")
@@ -1801,13 +1993,14 @@ worth knowing:
 | `test_runlog.py` | `RunRecorder`'s diff-to-rows logic: run open/close, layer progress updating a column, the deferred connection-aware reconciliation, and the once-per-run spool consumption write |
 | `test_docs.py` | The documentation itself — see below |
 
-**Frontend** (`vitest`, added 2026-07-21). Three suites, and they share one
+**Frontend** (`vitest`, added 2026-07-21). Four suites, and they share one
 rule: **the maths gets extracted into a pure module and that module gets
 tested; the React component around it does not.**
 
 | Suite | Covers |
 |---|---|
 | `roiGeometry.test.js` | The ROI drag maths — `clampRoi`, `applyHandleDrag` (§4.1, §7) |
+| `printerStatus.test.js` | The shell's shared status logic (§7.1) — that connection outranks a stale `gcode_state`, that layer 0 and 0% are real values rather than "no data", `printerPercent`'s clamp, and `moveFocus`'s wrap for the switcher's keyboard nav |
 | `runFormat.test.js` | The History page's `runOutcome` labelling (a monitor stop is not a plain failure), `pieceRollup`, and duration formatting (§13) |
 | `stlGeometry.test.js` | `addRotation`'s 360° wrap, `dropTranslation` (centre X/Y, min-Z on the plate), and `exceedsPlate` — including that an unknown bed never hard-blocks (§6.9) |
 
@@ -1921,7 +2114,8 @@ produced. See §1.1 for the complete account of both bugs and both attempts.
   "succeed" at the publish layer. This is exactly why the controller has a
   `stopping` state that watches `gcode_state` and re-sends once.
 - **A stale detector must never cause a stop.** Hence `status["running"]`
-  gating, hence dropping controllers when the capture printer changes.
+  gating, hence dropping a printer's controller when it stops being a camera
+  printer (§4.6).
 - **Arm is runtime-only.** It lives in the controller, not in `PrinterConfig`,
   and is deliberately not persisted — a server restart must not silently
   re-arm an auto-stop.
@@ -2074,6 +2268,45 @@ produced. See §1.1 for the complete account of both bugs and both attempts.
   (`printer_serial` is not in `SPOOL_WRITABLE`), and make the one legitimate
   path a clear-then-set transaction. When you add a table, decide which
   columns the free-write path may **never** touch before you write the route.
+- **A CSS class that matches no rule is not an error anywhere.** §7.2. Three
+  whole pages — History, Parts, Inventory — shipped rendering as unstyled
+  browser-default HTML, for as long as they had existed, because their
+  components were written against bare class names (`table`, `pill`, `muted`,
+  `stack`, `row`, `timeline`) while the kit ships prefixed ones (`ui-pill`,
+  `ui-stack`). Nothing catches this: Vite builds it, there is no CSS linter,
+  and the tests are over pure modules. Worse, one of the missing classes was
+  reachable **only** by interpolation (`pill-${outcome.tone}`, where the tone
+  is `bad`, not `danger`), so even a grep for literal class names misses it.
+  Two consequences: grep every class name you use against `styles.css` before
+  claiming a page is done, and when you interpolate a class name, write down
+  the full set of values it can take.
+- **A field the server accepts, stores, and never sends back is worse than a
+  field it rejects.** §4.5, §4.1. `PUT /detection` accepted a `roi`,
+  `PrinterConfig` persisted it, `detect.py` used it — and
+  `DetectionCoordinator.snapshot()` did not include it in the payload the UI
+  reads. So the Detection page seeded its four `%` inputs and its draggable box
+  from `d.roi`, got `undefined` every time, and always drew the hardcoded A1
+  default; "Use whole frame", disabled on a falsy `roi`, could never be pressed
+  at all. Nothing looked broken — the value really was saved, and the detector
+  really was using it.
+  **What made it dangerous rather than annoying:** the page tells the operator
+  that the draggable box and the outline burned into the JPEG "match once you
+  hit Apply". They visibly did not match, so the indicated fix was to press
+  Apply — writing the default over a correct region. On an A1 mini the A1
+  default crops the bed out of frame entirely, i.e. §4.1's silent false
+  negative, reached by following the UI's own instructions. Found by setting
+  two printers' regions through the API and watching both pages show the same
+  numbers. **When you add a config field, check the read path and the write
+  path are the same field**; a round-trip test is the cheap version of this.
+- **A global selection needs a global control.** §7.1. `selected` (which
+  printer every per-printer page shows) was global state whose only control
+  lived on one page, so "look at the other printer's queue" cost three
+  navigations and your place in the list. The fix was not more links between
+  pages — it was moving the control into the chrome that is always on screen,
+  and splitting the one handler into two: a card click still means "show me
+  this machine" (select **and** navigate), while the switcher means "same page,
+  other machine" (select only). When a control and the state it edits live on
+  different screens, that is the bug.
 
 ---
 
@@ -2350,7 +2583,9 @@ exactly this). A **Parts** page (fleet-wide, not per-printer) manages the
 catalogue and offers a per-recipe "Slice for &lt;printer&gt;" action.
 
 **Shipped:** the schema, `PartStore`, the helpers, the routes, the
-slice-from-part path, the frontend wrappers, and the Parts UI — all tested
+slice-from-part path, the frontend wrappers, and the Parts UI (whose bare CSS
+class names had no rules in `styles.css` until §7.2 added them, so it rendered
+as unstyled HTML at first) — all tested
 (`test_ledger.py`, `test_ledger_api.py`, `test_partstore.py`; §10), with the
 model upload/download round trip verified live.
 **Not yet verified on hardware:** a part sliced end to end into a printed,
@@ -2408,7 +2643,8 @@ list with derived remaining grams and a low-stock highlight, and carries the
 per-printer loaded-spool control.
 
 **Shipped:** the schema, helpers, the recorder consumption write, the routes,
-the frontend wrappers, and the Inventory UI — all tested (`test_ledger.py`,
+the frontend wrappers, and the Inventory UI (same unstyled-at-first caveat as
+the Parts UI — see §7.2) — all tested (`test_ledger.py`,
 `test_ledger_api.py`, `test_runlog.py`; §10), with regression tests replaying
 both hardened exploit sequences
 (`test_free_write_cannot_forge_a_second_loaded_spool`,

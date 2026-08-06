@@ -89,21 +89,17 @@ class PrinterRegistry:
         """Restore and start everything in the store. Called once at
         startup, before the app serves requests.
 
-        Also enforces the single-capture invariant across the restored set:
-        store.py's load() is deliberately tolerant of a hand-edited
-        printers.json, so a file with *two* `capture: true` entries is
-        possible on disk. That is not store.py's invariant to police -- it
-        is registry's (design decision #4) -- so this walks entries in file
-        order and clears any earlier capture flag when a later one also
-        claims it, same "last one wins" rule add() uses.
+        A hand-edited printers.json with several `capture: true` entries is
+        now simply restored as written. This used to walk the entries in file
+        order and clear every earlier capture flag ("last one wins"), because
+        the camera was assumed to be one shared USB webcam; every printer has
+        its own built-in camera, so that invariant was wrong and is gone.
         """
         to_start = []
         for cfg in self._store.load():
             with self._lock:
                 if cfg.serial in self._services:
                     continue
-                if cfg.capture:
-                    self._clear_capture()
                 svc = self._factory(cfg)
                 self._configs[cfg.serial] = cfg
                 self._services[cfg.serial] = svc
@@ -162,8 +158,6 @@ class PrinterRegistry:
         with self._lock:
             if cfg.serial in self._services:
                 raise DuplicateSerial(cfg.serial)
-            if cfg.capture:
-                self._clear_capture()
             # Factory is called under the lock -- it only builds an in-memory
             # object (see module docstring) -- but start() is not: start()
             # can spawn a thread or otherwise block, and summaries() must
@@ -260,8 +254,9 @@ class PrinterRegistry:
             if nozzle is not None:
                 cfg.nozzle = nozzle if nozzle in NOZZLES else DEFAULT_NOZZLE
             if capture is not None:
-                if capture:
-                    self._clear_capture()
+                # No longer exclusive: marking this printer a camera printer
+                # leaves every other one alone (see the note where
+                # _clear_capture used to live).
                 cfg.capture = bool(capture)
             old_svc = None
             if reconnect:
@@ -274,10 +269,12 @@ class PrinterRegistry:
                 self._services[serial] = svc
             else:
                 # PrinterService/MockPrinter each keep their own
-                # name/capture/model_id copy independent of cfg (see
-                # _clear_capture()'s docstring), so the live service must be
-                # told explicitly. Miss one and the config is right while
-                # every summary keeps reporting the old value.
+                # name/capture/model_id copy independent of cfg, and summary()
+                # reads THOSE, not the config object -- so the live service has
+                # to be told explicitly. Miss one and the config is right while
+                # every summary keeps reporting the old value. (This is the
+                # rule _clear_capture's docstring used to carry; it is the only
+                # place that still needs it.)
                 svc = self._services[serial]
                 svc.name = cfg.name
                 svc.capture = cfg.capture
@@ -407,12 +404,16 @@ class PrinterRegistry:
 
     # ---------------- detection accessors ----------------
 
-    def capture_serial(self):
+    def capture_serials(self) -> list:
+        """Every printer marked as a camera printer, in registration order.
+
+        Plural since 2026-08-05: each printer has its own built-in camera, so
+        any number of them can be watched at once. Returns a list rather than a
+        set so the order is stable for logs and for the UI.
+        """
         with self._lock:
-            for serial, cfg in self._configs.items():
-                if cfg.capture:
-                    return serial
-        return None
+            return [serial for serial, cfg in self._configs.items()
+                    if cfg.capture]
 
     def detection_config(self, serial):
         with self._lock:
@@ -425,15 +426,22 @@ class PrinterRegistry:
                     "detect_enabled": cfg.detect_enabled,
                     "roi": list(cfg.roi) if cfg.roi else None}
 
-    def detection_target(self):
+    def detection_targets(self) -> list:
+        """One target dict per printer that should have a detector running.
+
+        A printer qualifies only with BOTH `capture` and `detect_enabled`, the
+        same rule as before -- `capture` says a camera watches this machine,
+        `detect_enabled` says to actually run inference on it. Keeping them
+        separate is what lets an operator leave the camera view up on four
+        printers while paying for YOLO on one.
+        """
         with self._lock:
-            for serial, cfg in self._configs.items():
-                if cfg.capture and cfg.detect_enabled:
-                    return {"serial": serial, "camera_source": cfg.camera_source,
-                            "camera_index": cfg.camera_index, "conf": cfg.conf,
-                            "host": cfg.host, "access_code": cfg.access_code,
-                            "roi": list(cfg.roi) if cfg.roi else None}
-        return None
+            return [{"serial": serial, "camera_source": cfg.camera_source,
+                     "camera_index": cfg.camera_index, "conf": cfg.conf,
+                     "host": cfg.host, "access_code": cfg.access_code,
+                     "roi": list(cfg.roi) if cfg.roi else None}
+                    for serial, cfg in self._configs.items()
+                    if cfg.capture and cfg.detect_enabled]
 
     def update_detection(self, serial, *, camera_source=None, camera_index=None,
                          conf=None, armed_classes=None, detect_enabled=None,
@@ -463,25 +471,20 @@ class PrinterRegistry:
 
     # ---------------- internals ----------------
 
-    def _clear_capture(self) -> None:
-        """One webcam -> at most one capture printer. Must be called with
-        self._lock already held.
-
-        Mutates the config (the persisted source of truth) AND the live
-        service's own `capture` attribute. That second part is load-bearing:
-        PrinterService/MockPrinter each keep their own `capture` copy and
-        read *that* in summary(), not the config object (unlike this
-        module's tests' FakeService, which happens to read straight off
-        cfg). Clearing only cfg.capture here would silently leave a real
-        service's summary() still reporting capture=True for the old
-        printer.
-        """
-        for serial, cfg in self._configs.items():
-            if cfg.capture:
-                cfg.capture = False
-                svc = self._services.get(serial)
-                if svc is not None:
-                    svc.capture = False
+    # There is no _clear_capture() any more, and its absence is the feature.
+    #
+    # It used to enforce "at most one capture printer", on the assumption that
+    # the camera was a single USB webcam. That assumption was never true of the
+    # cameras this rig actually uses: every printer has its OWN built-in camera
+    # on its own address (TCP 6000), so N printers are N independent streams,
+    # and even two USB webcams sit on different indexes. The real constraint is
+    # one *process per device* (section 2), not one device per lab -- so
+    # `capture` is now a plain per-printer flag and any number may set it.
+    #
+    # What is still load-bearing is the thing that docstring recorded, now
+    # commented at its only remaining use in update(): PrinterService and
+    # MockPrinter each keep their own `capture` copy and read THAT in
+    # summary(), not the config object, so both have to be written.
 
     def _persist(self) -> None:
         """Serialized through `_persist_lock`, a lock separate from

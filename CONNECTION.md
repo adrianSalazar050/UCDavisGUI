@@ -122,7 +122,8 @@ The dashboard no longer takes the printer on the command line. Start it:
 python -m server
 ```
 
-Then open http://localhost:8000, go to **Overview → Add printer**, and type:
+Then open http://localhost:8000, go to **Setup → Printers → Add a printer**,
+and type:
 
 | Field | Value |
 |---|---|
@@ -130,11 +131,13 @@ Then open http://localhost:8000, go to **Overview → Add printer**, and type:
 | Serial | `03919D531805572` |
 | LAN access code | `<your 8-digit code>` |
 | Name (optional) | anything, e.g. `A1-bench` |
-| Camera checkbox | tick it if the webcam points at this printer |
+| Camera checkbox | tick it to get a live view from this printer's own built-in camera. Tick it on as many printers as you want to watch at once — it is not exclusive |
 
 The printer is saved to `printers.json` (gitignored — it holds the access code
 in plaintext) and reconnects automatically on every restart. Add up to a
-handful of printers this way; the Overview page shows all of them at once.
+handful of printers this way; the Printers page shows all of them at once, and
+the printer picker in the header is how you choose which one any other page is
+showing — from that page, without leaving it.
 
 If a printer sits on red **Offline**, the card tells you which failure it is:
 "Unreachable" means the IP is wrong or LAN-only Mode is off; "No response"

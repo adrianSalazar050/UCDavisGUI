@@ -107,20 +107,30 @@ def test_summaries_keep_registration_order():
     assert [s["serial"] for s in r.summaries()] == ["S1", "S2", "S3"]
 
 
-def test_capture_is_single_occupancy():
+def test_capture_is_not_exclusive_between_printers():
+    # `capture` is a plain per-printer flag: every Bambu printer has its OWN
+    # built-in camera on its own address, so N camera printers are N
+    # independent streams and adding a second one must leave the first one's
+    # flag alone. This test used to assert the opposite ("last one wins"),
+    # which was only ever right for a single shared USB webcam -- it stays,
+    # inverted, because a future "cleanup" could just as easily reintroduce
+    # the exclusivity as remove it.
     r = reg()
     r.add(host="1.1.1.1", serial="S1", access_code="c", capture=True)
     r.add(host="2.2.2.2", serial="S2", access_code="c", capture=True)
     caps = {s["serial"]: s["capture"] for s in r.summaries()}
-    assert caps == {"S1": False, "S2": True}
+    assert caps == {"S1": True, "S2": True}
 
 
-def test_capture_cleared_in_store_too():
+def test_capture_kept_on_the_other_printer_in_the_store_too():
+    # Same non-exclusivity, on the persisted side: printers.json has to come
+    # back out with both flags set, or a restart would silently stop watching
+    # every camera but the last-added one.
     store = MemoryStore()
     r = reg(store)
     r.add(host="1.1.1.1", serial="S1", access_code="c", capture=True)
     r.add(host="2.2.2.2", serial="S2", access_code="c", capture=True)
-    assert {c.serial: c.capture for c in store.load()} == {"S1": False,
+    assert {c.serial: c.capture for c in store.load()} == {"S1": True,
                                                            "S2": True}
 
 
@@ -158,10 +168,10 @@ class CaptureOnServiceFake:
     """Like FakeService, but summary() reads `capture` off the *service*
     instance, not off cfg. This is what real PrinterService/MockPrinter
     actually do (each owns its own `capture` attribute independent of any
-    config object) -- FakeService's summary() reading straight off `self.cfg`
-    would pass even a _clear_capture() that forgot to touch the live service,
-    since cfg is the same object shared with the registry's _configs dict.
-    This fake would catch that bug.
+    config object) -- a summary() reading straight off `self.cfg` would pass
+    even a registry that reached into ANOTHER printer's live service and
+    cleared its capture copy, since cfg is the same object shared with the
+    registry's _configs dict. This fake would catch that bug.
     """
 
     def __init__(self, cfg: PrinterConfig):
@@ -180,19 +190,28 @@ class CaptureOnServiceFake:
         return {"serial": self.cfg.serial, "capture": self.capture}
 
 
-def test_capture_cleared_on_live_service_not_just_config():
+def test_capture_kept_on_live_service_not_just_config():
+    # The subtle half nobody thinks about: PrinterService/MockPrinter keep
+    # their own `capture` copy and summary() reads THAT, not the config
+    # object. So "adding a camera printer doesn't clear the others" has to
+    # hold on the live service objects too -- a registry that stopped
+    # rewriting cfg.capture but still poked the other printer's service would
+    # report capture=False for a printer that is very much still being
+    # watched, and the UI would drop its camera tile.
     r = PrinterRegistry(MemoryStore(), CaptureOnServiceFake)
     r.add(host="1.1.1.1", serial="S1", access_code="c", capture=True)
     r.add(host="2.2.2.2", serial="S2", access_code="c", capture=True)
     caps = {s["serial"]: s["capture"] for s in r.summaries()}
-    assert caps == {"S1": False, "S2": True}
+    assert caps == {"S1": True, "S2": True}
 
 
-def test_load_enforces_single_capture_even_if_store_has_two():
+def test_load_restores_two_capture_printers_as_written():
     # A hand-edited printers.json (store.py explicitly tolerates malformed
-    # hand-edited files) could have two capture=True entries. store.py's
-    # load() has no opinion on that -- registry owns the single-capture
-    # invariant -- so load() must enforce it too, not just add().
+    # hand-edited files) can have two capture=True entries, and that is now an
+    # ordinary lab rather than a corrupt file: two printers, two built-in
+    # cameras. load() used to walk the entries in file order clearing every
+    # earlier flag ("last one wins"); it must now restore the file exactly as
+    # written, or a restart would silently unwatch every camera but the last.
     store = MemoryStore()
     store.save([
         PrinterConfig(serial="S1", host="1.1.1.1", access_code="c",
@@ -203,7 +222,7 @@ def test_load_enforces_single_capture_even_if_store_has_two():
     r = reg(store)
     r.load()
     caps = {s["serial"]: s["capture"] for s in r.summaries()}
-    assert caps == {"S1": False, "S2": True}
+    assert caps == {"S1": True, "S2": True}
 
 
 def test_whitespace_only_host_rejected():
@@ -311,28 +330,106 @@ def test_persist_survives_concurrent_add_without_losing_a_printer():
 # ---------------------------------------------------------------------------
 
 
-def test_capture_serial_returns_the_capture_printer():
+def test_capture_serials_returns_the_capture_printers():
     r = reg()
     r.add(host="1.1.1.1", serial="A", access_code="c")
     r.add(host="2.2.2.2", serial="B", access_code="c", capture=True)
-    assert r.capture_serial() == "B"
+    assert r.capture_serials() == ["B"]
 
 
-def test_capture_serial_none_when_no_capture():
+def test_capture_serials_empty_when_no_capture():
     r = reg()
     r.add(host="1.1.1.1", serial="A", access_code="c")
-    assert r.capture_serial() is None
+    assert r.capture_serials() == []
 
 
-def test_detection_target_requires_detect_enabled():
+def test_capture_serials_lists_every_camera_printer_in_registration_order():
+    # Plural, and ordered. The coordinator ticks one printer per entry and
+    # logs by serial, so a set (or file order, or "whichever the dict felt
+    # like") would make both jump around between calls -- same reason
+    # summaries() is registration order and nothing else.
+    r = reg()
+    r.add(host="1.1.1.1", serial="A", access_code="c", capture=True)
+    r.add(host="2.2.2.2", serial="B", access_code="c")
+    r.add(host="3.3.3.3", serial="C", access_code="c", capture=True)
+    assert r.capture_serials() == ["A", "C"]
+
+
+def test_detection_targets_require_detect_enabled():
     r = reg()
     r.add(host="1.1.1.1", serial="B", access_code="c", capture=True)
-    assert r.detection_target() is None
+    assert r.detection_targets() == []
     r.update_detection("B", detect_enabled=True)
-    assert r.detection_target() == {"serial": "B", "camera_source": "a1",
-                                    "camera_index": 0, "conf": 0.25,
-                                    "host": "1.1.1.1", "access_code": "c",
-                                    "roi": None}
+    assert r.detection_targets() == [{"serial": "B", "camera_source": "a1",
+                                      "camera_index": 0, "conf": 0.25,
+                                      "host": "1.1.1.1", "access_code": "c",
+                                      "roi": None}]
+
+
+def test_detection_targets_skip_a_camera_printer_with_detection_off():
+    # BOTH flags, decided PER PRINTER -- that combination is the whole point
+    # of keeping them separate: an operator can leave the camera view up on
+    # four printers while paying for YOLO on one. Asserting it with a second,
+    # fully-enabled printer present is what proves the filter is per-printer
+    # rather than a global "is anybody detecting?" check that would sweep the
+    # half-configured printer in alongside it.
+    r = reg()
+    r.add(host="1.1.1.1", serial="A", access_code="c", capture=True)
+    r.add(host="2.2.2.2", serial="B", access_code="c", capture=True)
+    r.update_detection("B", detect_enabled=True)
+    assert [t["serial"] for t in r.detection_targets()] == ["B"]
+    # ...and the mirror image: detection armed but no camera on the printer is
+    # equally not a target, however many real targets exist beside it.
+    r.add(host="3.3.3.3", serial="C", access_code="c")
+    r.update_detection("C", detect_enabled=True)
+    assert [t["serial"] for t in r.detection_targets()] == ["B"]
+
+
+def test_detection_targets_carry_each_printers_own_settings():
+    # Two camera printers are two independent streams, so nothing may bleed
+    # between their target dicts: a supervisor that spawned B's detector with
+    # A's host and access code would point two processes at one machine and
+    # leave the other printer unwatched while the UI claimed otherwise.
+    r = reg()
+    r.add(host="1.1.1.1", serial="A", access_code="code-a", capture=True)
+    r.add(host="2.2.2.2", serial="B", access_code="code-b", capture=True)
+    r.update_detection("A", detect_enabled=True, conf=0.3,
+                       roi=[0.0, 0.0, 0.5, 0.5])
+    r.update_detection("B", detect_enabled=True, camera_source="webcam",
+                       camera_index=2, conf=0.7)
+    a, b = r.detection_targets()
+    assert a == {"serial": "A", "camera_source": "a1", "camera_index": 0,
+                 "conf": 0.3, "host": "1.1.1.1", "access_code": "code-a",
+                 "roi": [0.0, 0.0, 0.5, 0.5]}
+    assert b == {"serial": "B", "camera_source": "webcam", "camera_index": 2,
+                 "conf": 0.7, "host": "2.2.2.2", "access_code": "code-b",
+                 "roi": None}
+
+
+def test_editing_one_printer_leaves_the_other_target_untouched():
+    # DetectorSupervisor respawns exactly those detectors whose target dict
+    # CHANGED, because every restart drops a camera connection on a printer
+    # that may be mid-print. That comparison is only meaningful if editing one
+    # printer leaves every other target dict identical -- otherwise one
+    # settings save would bounce every detector in the lab.
+    r = reg()
+    r.add(host="1.1.1.1", serial="A", access_code="code-a", capture=True)
+    r.add(host="2.2.2.2", serial="B", access_code="code-b", capture=True)
+    r.update_detection("A", detect_enabled=True)
+    r.update_detection("B", detect_enabled=True)
+    before = {t["serial"]: t for t in r.detection_targets()}
+
+    r.update_detection("B", conf=0.9, camera_index=3)
+    after = {t["serial"]: t for t in r.detection_targets()}
+    assert after["A"] == before["A"]
+    assert after["B"]["conf"] == 0.9 and after["B"]["camera_index"] == 3
+
+    # A connection edit is the same story: it must move B's target and only
+    # B's, even though update() rebuilds a service.
+    r.update("B", host="9.9.9.9")
+    final = {t["serial"]: t for t in r.detection_targets()}
+    assert final["A"] == before["A"]
+    assert final["B"]["host"] == "9.9.9.9"
 
 
 def test_update_detection_persists_and_clamps():
@@ -356,11 +453,11 @@ def test_update_detection_unknown_serial_false():
 # ---------------------------------------------------------------------------
 
 
-def test_detection_target_includes_source_host_and_code():
+def test_detection_targets_include_source_host_and_code():
     r = reg()
     r.add(host="1.2.3.4", serial="B", access_code="SEKRET", capture=True)
     r.update_detection("B", detect_enabled=True)
-    t = r.detection_target()
+    t, = r.detection_targets()
     assert t["camera_source"] == "a1"
     assert t["host"] == "1.2.3.4"
     assert t["access_code"] == "SEKRET"
@@ -466,7 +563,8 @@ def test_update_without_model_id_keeps_the_current_one():
 
 def test_update_model_id_reaches_the_live_service_summary():
     # PrinterService keeps its OWN copy of the identity fields (same as
-    # name/capture, see _clear_capture), so setting cfg.model_id alone leaves
+    # name/capture, see update()'s no-reconnect branch), so setting
+    # cfg.model_id alone leaves
     # the running service — and therefore every summary and the Edit form —
     # reporting the old value. Caught by a smoke test against --mock, where
     # the PUT returned model_id "" right after setting it to N2S.
@@ -633,10 +731,9 @@ def test_reconnect_keeps_host_access_code_name_and_capture():
           capture=True)
     r.update_detection("S1", detect_enabled=True)
     r.reconnect("S1")
-    # detection_target() needs BOTH capture and detect_enabled, so this also
-    # proves the reconnect didn't silently disarm the detector.
-    cfg = r.detection_target()
-    assert cfg is not None
+    # A target needs BOTH capture and detect_enabled, so this also proves the
+    # reconnect didn't silently disarm the detector.
+    cfg, = r.detection_targets()
     assert cfg["serial"] == "S1"
     assert cfg["access_code"] == "code"
     svc = r.get("S1")
@@ -674,24 +771,28 @@ def test_reconnect_persists_nothing_new_but_keeps_the_printer():
 def test_update_blank_access_code_keeps_old_code():
     # A blank access_code means "keep the current one" -- it's a secret the
     # client never receives back, so it can't round-trip it in an edit form.
-    # Inspect via detection_target(), the one existing accessor that exposes
+    # Inspect via detection_targets(), the one existing accessor that exposes
     # access_code, rather than asserting anything about summary().
     r = reg()
     r.add(host="1.2.3.4", serial="S1", access_code="original-code",
           capture=True)
     r.update_detection("S1", detect_enabled=True)
     r.update("S1", access_code="")
-    target = r.detection_target()
+    target, = r.detection_targets()
     assert target["access_code"] == "original-code"
 
 
-def test_update_capture_true_clears_other_printers():
+def test_update_capture_true_leaves_other_printers_alone():
+    # add()'s non-exclusivity has to hold on the edit path too, and this is
+    # the one that bites hardest: ticking "camera" on a second printer from
+    # the Edit form used to switch the first printer's camera OFF, killing a
+    # detector mid-print. Both printers keep the flag now.
     r = reg()
     r.add(host="1.1.1.1", serial="S1", access_code="c", capture=True)
     r.add(host="2.2.2.2", serial="S2", access_code="c")
     r.update("S2", capture=True)
     caps = {s["serial"]: s["capture"] for s in r.summaries()}
-    assert caps == {"S1": False, "S2": True}
+    assert caps == {"S1": True, "S2": True}
 
 
 def test_update_unknown_serial_returns_none():

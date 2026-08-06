@@ -49,8 +49,10 @@ unprotected. Windows also needs the port opened once, from an admin shell:
 New-NetFirewallRule -DisplayName "Bambu Monitor" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
 ```
 
-**In the browser** — go to **Overview → Add printer** and enter the IP, serial,
-and access code. Printers are added here, not on the command line.
+**In the browser** — go to **Setup → Printers → Add a printer** and enter the
+IP, serial, and access code. Printers are added here, not on the command line.
+Once one is registered, the printer picker in the header switches which machine
+every page is showing.
 
 ## Where to read more
 

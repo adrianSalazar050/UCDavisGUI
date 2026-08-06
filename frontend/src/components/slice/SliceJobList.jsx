@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { cancelSliceJob, fetchSliceJobs } from "../../api/printer.js";
 import { formatDuration, formatGrams } from "../queue/format.js";
 import Button from "../ui/Button.jsx";
+import EmptyState from "../ui/EmptyState.jsx";
 import StatusPill from "../ui/StatusPill.jsx";
 
 const POLL_MS = 2000;
@@ -84,15 +85,25 @@ export default function SliceJobList({ serial, refreshSignal }) {
         </div>
       )}
       {!initialLoaded ? (
-        <div className="empty">Loading slice jobs…</div>
+        <EmptyState title="Loading slice jobs…" />
       ) : jobs.length === 0 ? (
-        <div className="empty">No slice jobs yet — submit a model above.</div>
+        <EmptyState title="No slice jobs yet">
+          Slice a model above and it appears here while it slices and uploads,
+          then stays as a record of what was made.
+        </EmptyState>
       ) : (
+        // Still .slice-table, not .table: only .slice-table top-aligns its
+        // cells, which is what keeps a row level with the first line of a
+        // failed job's error block.
         <table className="slice-table">
           <thead>
             <tr>
-              <th>Name</th><th>Preset</th><th>Material</th><th>Supports</th>
-              <th>State</th><th>Time</th><th>Filament</th><th></th>
+              {/* job.name is the .gcode.3mf the slicer writes to the card
+                  (server/slicejobs.py output_name), not the model that went
+                  in -- so the column says so rather than "Name". */}
+              <th>Output file</th><th>Preset</th><th>Material</th><th>Supports</th>
+              <th>State</th><th className="table__num">Print time</th>
+              <th className="table__num">Filament used</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -106,16 +117,20 @@ export default function SliceJobList({ serial, refreshSignal }) {
                 </td>
                 <td>{job.preset_label}</td>
                 <td>{job.material}</td>
-                <td>{job.supports ? "Yes" : "No"}</td>
+                {/* "No" is the common answer and the one nobody reads, so it
+                    steps back and lets "Yes" stand out down the column. */}
+                <td>
+                  {job.supports ? "Yes" : <span className="muted">No</span>}
+                </td>
                 <td>
                   <StatusPill status={PILL_STATUS[job.state] ?? "warn"}>
                     {job.state}
                   </StatusPill>
                 </td>
-                <td className="slice-table__num">
+                <td className="table__num">
                   {job.state === "done" ? formatDuration(job.seconds) : "—"}
                 </td>
-                <td className="slice-table__num">
+                <td className="table__num">
                   {job.state === "done" ? formatGrams(job.grams) : "—"}
                 </td>
                 <td>

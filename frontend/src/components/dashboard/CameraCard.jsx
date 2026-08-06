@@ -20,7 +20,10 @@ export default function CameraCard({ serial = null, live = false }) {
         </>
       ) : (
         <div className="camera-placeholder">
-          {live ? "Waiting for detector frames…" : "No active capture run — start capture.py"}
+          {live
+            ? "Waiting for detector frames…"
+            : "No frames yet — start capture.py and the newest layer photo "
+              + "shows up here"}
         </div>
       )}
     </Card>

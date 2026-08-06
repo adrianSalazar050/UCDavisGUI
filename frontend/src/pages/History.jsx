@@ -3,13 +3,18 @@ import { bulkPieces, fetchRun, fetchRuns, patchPiece, patchRun }
   from "../api/printer.js";
 import RunDetail from "../components/history/RunDetail.jsx";
 import RunTable from "../components/history/RunTable.jsx";
+import Button from "../components/ui/Button.jsx";
 import Card from "../components/ui/Card.jsx";
+import EmptyState from "../components/ui/EmptyState.jsx";
 import PageFrame from "../components/ui/PageFrame.jsx";
 
 const POLL_MS = 5000;
 
 // One printer's history. Mounted with key={serial} by History below, the same
-// remount-instead-of-Effect-reset pattern SdFiles and Queue use.
+// remount-instead-of-Effect-reset pattern SdFiles and Queue use. Now that the
+// topbar switcher changes printer without leaving the page, that remount is
+// also what drops the previous printer's selected run and its loaded detail —
+// state that would otherwise still be on screen under the new printer's name.
 function HistoryPanel({ printer }) {
   const [runs, setRuns] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -68,8 +73,15 @@ function HistoryPanel({ printer }) {
 
   return (
     <div className="stack">
-      {err && <p className="error">{err}</p>}
-      <Card title={`Runs — ${printer.name || printer.serial}`}>
+      {/* .error, the lighter line, not .state-error: the table underneath is
+          still the last good listing and the poll retries by itself every few
+          seconds, so a failed request must not read as a dead page — and must
+          not offer a Retry button for work already in hand. */}
+      {err && <p className="error" role="alert">{err}</p>}
+      {/* Not "Runs — <printer>": the topbar already names the page and the
+          printer. What it cannot say is the order, which is what tells you the
+          top row is the most recent print. */}
+      <Card title="Recorded runs — newest first">
         <RunTable runs={runs} selectedId={selectedId}
                   onSelect={setSelectedId} />
       </Card>
@@ -87,13 +99,39 @@ function HistoryPanel({ printer }) {
   );
 }
 
-export default function History({ printers, selected }) {
+export default function History({ printers, selected, onNavigate }) {
   const printer = printers.find((p) => p.serial === selected);
+
+  // Two different nothings: an empty lab, which the user can fix from here,
+  // and a lab with nothing pointed at — fixed with the topbar switcher, so
+  // this says where the control is instead of sending anyone to another page.
+  if (!printer) {
+    return (
+      <PageFrame>
+        {printers.length === 0 ? (
+          <EmptyState
+            title="No printers registered"
+            action={<Button variant="primary"
+                            onClick={() => onNavigate("printers")}>
+                      Add a printer
+                    </Button>}>
+            History is kept per machine, so there is nothing to show yet.
+            Register a printer and every print it runs from then on is recorded
+            for you.
+          </EmptyState>
+        ) : (
+          <EmptyState title="No printer selected">
+            Choose a printer with the switcher at the top of the window to read
+            its runs, its per-piece verdicts and the filament each print used.
+          </EmptyState>
+        )}
+      </PageFrame>
+    );
+  }
+
   return (
     <PageFrame>
-      {printer
-        ? <HistoryPanel key={printer.serial} printer={printer} />
-        : <p className="muted">Select a printer.</p>}
+      <HistoryPanel key={printer.serial} printer={printer} />
     </PageFrame>
   );
 }

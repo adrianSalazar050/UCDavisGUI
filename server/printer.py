@@ -278,8 +278,8 @@ class MockPrinter:
     mode="stale":   reports once, long ago, then never again -> "stale".
     mode="offline": never connects -> "disconnected" + last_error.
 
-    The three modes exist so --mock can seed an Overview grid that actually
-    shows all three states.
+    The three modes exist so --mock can seed a Printers grid -- and a topbar
+    printer switcher -- that actually shows all three states.
     """
 
     LAYERS = 30

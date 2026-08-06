@@ -34,7 +34,9 @@ export default function PartForm({ onCreated }) {
         <Field label="Part number" value={form.part_number}
                onChange={set("part_number")} placeholder="BRK-100" />
         <Field label="Revision" value={form.revision}
-               onChange={set("revision")} placeholder="A" />
+               onChange={set("revision")} placeholder="A"
+               help={"A new revision is a new catalogue entry, so runs "
+                     + "already recorded against the old one stay put."} />
       </div>
       <Field label="Name (optional)" value={form.name} onChange={set("name")}
              placeholder="Bracket" />

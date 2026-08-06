@@ -36,7 +36,8 @@ export default function SpoolForm({ onCreated }) {
       <div className="add-form__row">
         <Field label="Spool code" value={form.spool_code}
                onChange={set("spool_code")} placeholder="PLA-BLK-001"
-               help="Unique — scan or type it" />
+               help={"Unique across the lab — scan it, or type what is on "
+                     + "the reel's label"} />
         <Field label="Material">
           <select value={form.material} onChange={set("material")}>
             {MATERIALS.map((m) => <option key={m} value={m}>{m}</option>)}
@@ -49,9 +50,15 @@ export default function SpoolForm({ onCreated }) {
         <Field label="Brand (optional)" value={form.brand}
                onChange={set("brand")} placeholder="Bambu" />
       </div>
+      {/* The number every "remaining" figure on the page is derived from, so
+          the help says what happens when it is left out: the server reports
+          remaining as unknown rather than inventing one. */}
       <Field label="Initial weight (g)" type="number" min="0"
              value={form.initial_grams} onChange={set("initial_grams")}
-             help="Net filament weight — a 1 kg spool is 1000" />
+             help={"Net filament weight, not the weight with the reel — a 1 kg "
+                   + "spool is 1000. Leave it blank if you don't know: "
+                   + "remaining then reads as unknown, never as a number that "
+                   + "isn't true."} />
       {err && <div className="add-form__error">{err}</div>}
       <div className="add-form__actions">
         <Button type="submit" variant="primary" busy={busy}
