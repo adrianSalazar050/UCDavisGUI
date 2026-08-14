@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   cancelRobotCommand,
+  configureRobotCamera,
+  fetchRobotCameras,
   sendRobotCommand,
 } from "../api/robot.js";
 import Button from "../components/ui/Button.jsx";
@@ -74,6 +76,11 @@ export default function Robot({ robot, wsUp }) {
   const [scrapeId, setScrapeId] = useState("1");
   const [jogStepMm, setJogStepMm] = useState("5");
   const [pendingJog, setPendingJog] = useState({ x: 0, y: 0, z: 0 });
+  const [cameraDevices, setCameraDevices] = useState([]);
+  const [cameraIndex, setCameraIndex] = useState("");
+  const [cameraFrameKey, setCameraFrameKey] = useState(0);
+  const [scanPosition, setScanPosition] = useState(["0.30", "0.00", "0.30"]);
+  const [scanEuler, setScanEuler] = useState(["0", "0", "0"]);
   const jogDispatching = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState(null);
@@ -204,6 +211,51 @@ export default function Robot({ robot, wsUp }) {
 
   const last = robot?.last_command;
   const pose = robot?.eef_pose?.xyz_rpy ?? [];
+
+  const loadCameras = () => {
+    fetchRobotCameras()
+      .then((payload) => setCameraDevices(payload.devices ?? []))
+      .catch((err) => setError(err.message));
+  };
+
+  useEffect(() => {
+    loadCameras();
+  }, []);
+
+  useEffect(() => {
+    if (robot?.camera?.color_age_s == null) return undefined;
+    const timer = window.setInterval(
+      () => setCameraFrameKey((value) => value + 1), 500);
+    return () => window.clearInterval(timer);
+  }, [robot?.camera?.color_age_s == null]);
+
+  const applyCamera = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await configureRobotCamera(cameraIndex === "" ? null : Number(cameraIndex));
+      setNotice(cameraIndex === "" ? "Robot camera disabled" :
+        `Camera /dev/video${cameraIndex} selected; robot backend restarting`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const scanEstimatedLocation = async () => {
+    try {
+      const position = parseVector(scanPosition, ["X", "Y", "Z"]);
+      const eulerDeg = parseVector(scanEuler, ["Roll", "Pitch", "Yaw"]);
+      await run("scan_location", {
+        position,
+        euler: eulerDeg.map((value) => value * RAD),
+        viewing_distance: Number(viewingDistance),
+      });
+    } catch (err) {
+      setError(err.message);
+    }
+  };
 
   return (
     <PageFrame>
@@ -423,17 +475,48 @@ export default function Robot({ robot, wsUp }) {
           </Card>
 
           <Card title="Known markers">
-            {robot?.markers && Object.keys(robot.markers).length > 0 ? (
+            {Array.isArray(robot?.markers) && robot.markers.length > 0 ? (
               <div className="robot-marker-list">
-                {Object.entries(robot.markers).map(([id, data]) => (
-                  <div key={id}>
-                    <strong>ArUco {id}</strong>
+                {robot.markers.map((data) => (
+                  <div key={`${data?.dict_name}-${data?.id}`}>
+                    <strong>ArUco {data?.id}</strong>
                     <span>{data?.estimated ? "Estimated" : "Detected"}</span>
                   </div>
                 ))}
               </div>
             ) : (
               <p className="robot-help">No markers have been registered yet.</p>
+            )}
+          </Card>
+          <Card title="ArUco detector">
+            <div className="robot-readout">
+              <div>
+                <span>Color stream</span>
+                <strong>{robot?.camera?.color_age_s == null ? "No frames" :
+                  `${formatNumber(robot.camera.color_age_s, 2)} s ago`}</strong>
+              </div>
+              <div>
+                <span>Calibration</span>
+                <strong>{robot?.camera?.calibrated ? "Ready" : "Missing"}</strong>
+              </div>
+              <div>
+                <span>Camera frame</span>
+                <strong>{robot?.camera?.camera_frame ?? "—"}</strong>
+              </div>
+              <div>
+                <span>Visible / known</span>
+                <strong>{robot?.camera ?
+                  `${robot.camera.visible_marker_count} / ${robot.camera.known_marker_count}` : "—"}</strong>
+              </div>
+            </div>
+            {robot?.camera?.last_error && (
+              <div className="state-error robot-notice">{robot.camera.last_error}</div>
+            )}
+            {robot?.camera && (
+              <p className="robot-help">
+                Dictionaries: {(robot.camera.marker_dictionaries ?? []).join(", ")} ·
+                Sizes: {(robot.camera.marker_sizes_m ?? []).join(", ")} m
+              </p>
             )}
           </Card>
         </div>
@@ -472,6 +555,72 @@ export default function Robot({ robot, wsUp }) {
             </dl>
           </Card>
         )}
+      </Section>
+
+      <Section title="Vision and ArUco commissioning">
+        <div className="robot-grid">
+          <Card title="USB camera">
+            <div className="robot-camera-config">
+              <select value={cameraIndex}
+                      onChange={(event) => setCameraIndex(event.target.value)}>
+                <option value="">Disabled (movement only)</option>
+                {cameraDevices.map((device) => (
+                  <option key={device.index} value={device.index}>
+                    {device.path} · {device.name}
+                  </option>
+                ))}
+              </select>
+              <Button onClick={loadCameras}>Refresh cameras</Button>
+              <Button onClick={applyCamera} busy={submitting}>Apply camera</Button>
+            </div>
+            <div className="robot-camera-preview">
+              {robot?.camera?.color_age_s == null ? (
+                <span>No camera frames</span>
+              ) : (
+                <img src={`/api/robot/camera/frame?v=${cameraFrameKey}`}
+                     alt="Robot camera with ArUco overlay" />
+              )}
+            </div>
+          </Card>
+
+          <Card title="Manual guidance">
+            <p className="robot-help">
+              Support the arm and keep the emergency stop accessible before
+              enabling UFACTORY teach mode.
+            </p>
+            <div className="robot-form__actions">
+              <Button disabled={!robot?.available || busy || submitting}
+                      onClick={() => run("teach_enable")}>Enter teach mode</Button>
+              <Button variant="primary"
+                      disabled={!robot?.available || busy || submitting}
+                      onClick={() => run("teach_disable")}>Return to MoveIt</Button>
+            </div>
+          </Card>
+
+          <Card title="Scan estimated location">
+            <VectorFields values={scanPosition} setValues={setScanPosition}
+                          labels={["X m", "Y m", "Z m"]} step="0.01" />
+            <VectorFields values={scanEuler} setValues={setScanEuler}
+                          labels={["Roll°", "Pitch°", "Yaw°"]} step="1" />
+            <div className="robot-form__actions">
+              <Button variant="primary" disabled={!controlsEnabled || submitting}
+                      onClick={scanEstimatedLocation}>
+                Scan location for ArUcos
+              </Button>
+            </div>
+          </Card>
+
+          <Card title="ChArUco hand-eye calibration">
+            <p className="robot-help">
+              Keep the board fixed. Capture 15–25 varied wrist poses before
+              solving camera-to-robot mapping. Calibration remains unavailable
+              until a valid USB camera is selected.
+            </p>
+            <div className="state-warn robot-notice">
+              Guided browser capture will be enabled after camera preview is verified.
+            </div>
+          </Card>
+        </div>
       </Section>
     </PageFrame>
   );

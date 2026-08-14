@@ -35,3 +35,19 @@ export async function cancelRobotCommand(commandId) {
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }
+
+export async function fetchRobotCameras() {
+  const res = await fetch("/api/robot/cameras", { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function configureRobotCamera(index) {
+  const res = await fetch("/api/robot/camera", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ index }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}

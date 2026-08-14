@@ -147,11 +147,22 @@ def main() -> int:
     if a.robot_mode == "mock":
         robot = RobotManager(MockRobotBackend)
     elif a.robot_mode == "ros":
+        initial_mode = os.environ.get("XARM_CAMERA_MODE", "webcam").lower()
+        initial_index = os.environ.get("XARM_CAMERA_INDEX", "").strip()
+        robot_camera = {
+            "mode": initial_mode,
+            "index": int(initial_index) if initial_index else None,
+        }
+        if robot_camera["mode"] == "webcam" and robot_camera["index"] is None:
+            robot_camera["mode"] = "disabled"
         robot = RobotManager(
             lambda: RosRobotBackend(
                 repo_path=a.robot_repo,
                 robot=a.robot_type,
-                sim=a.robot_sim))
+                sim=a.robot_sim,
+                camera_mode=robot_camera["mode"],
+                camera_index=robot_camera["index"]),
+            camera_config=robot_camera)
 
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
     app = create_app(registry, runs_dir, dist, detection=coordinator,

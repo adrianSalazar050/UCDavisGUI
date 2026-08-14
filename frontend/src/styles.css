@@ -895,6 +895,36 @@ a { color: var(--primary); }
 }
 .robot-marker-list strong { color: var(--text); font-size: 13px; }
 .robot-marker-list span { color: var(--text-muted); font-size: 11px; }
+.robot-camera-config {
+  display: flex;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.robot-camera-config select {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 var(--sp-3);
+}
+.robot-camera-preview {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  background: #05070a;
+  color: var(--text-faint);
+}
+.robot-camera-preview img {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+}
 @media (max-width: 850px) {
   .robot-grid { grid-template-columns: 1fr; }
 }

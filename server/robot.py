@@ -30,6 +30,9 @@ ACTIONS = {
     "scrape",
     "gripper_open",
     "gripper_close",
+    "scan_location",
+    "teach_enable",
+    "teach_disable",
 }
 
 
@@ -95,6 +98,19 @@ def normalize_command(action: str, parameters: dict | None) -> tuple[str, dict]:
                 f"delta for {axis} must be non-zero and at most "
                 f"{limit:g} {unit}")
         return action, {"axis": axis, "delta": delta}
+    if action == "scan_location":
+        try:
+            viewing_distance = float(p.get("viewing_distance", 0.15))
+        except (TypeError, ValueError):
+            raise RobotCommandError("viewing_distance must be a number") from None
+        if not 0.05 <= viewing_distance <= 0.50:
+            raise RobotCommandError(
+                "viewing_distance must be between 0.05 and 0.50 metres")
+        return action, {
+            "position": _number_list(p.get("position"), "position", 3),
+            "euler": _number_list(p.get("euler"), "euler", 3),
+            "viewing_distance": viewing_distance,
+        }
     if action in {"scan_marker", "pickup", "place"}:
         out = {"marker_id": _integer(p, "marker_id")}
         if action == "scan_marker":
@@ -137,7 +153,7 @@ def _jsonable(value: Any) -> Any:
 class RobotManager:
     """Own one backend and serialize all potentially dangerous motion."""
 
-    def __init__(self, backend_factory: Callable[[], Any]):
+    def __init__(self, backend_factory: Callable[[], Any], camera_config=None):
         self._backend_factory = backend_factory
         self._backend = None
         self._lock = threading.Lock()
@@ -149,6 +165,27 @@ class RobotManager:
         self._active: dict | None = None
         self._last: dict | None = None
         self._cancel_requested = False
+        self.camera_config = camera_config
+
+    def configure_camera(self, index: int | None) -> None:
+        if self.camera_config is None:
+            raise RobotUnavailable("camera reconfiguration is unavailable")
+        if index is not None and (isinstance(index, bool) or index < 0):
+            raise RobotCommandError("camera index must be a non-negative integer")
+        with self._lock:
+            backend = self._backend
+            if self._active is not None:
+                raise RobotBusy("cannot change camera while a command is active")
+        if backend is None:
+            raise RobotUnavailable("robot backend is not ready")
+        backend.configure_camera(index)
+        self.camera_config["mode"] = "disabled" if index is None else "webcam"
+        self.camera_config["index"] = index
+
+    def camera_frame(self) -> bytes | None:
+        with self._lock:
+            backend = self._backend
+        return None if backend is None else backend.camera_frame()
 
     def start(self) -> None:
         with self._lock:
@@ -340,7 +377,7 @@ class RosRobotBackend:
     """Adapter from the command contract to printerAutomation methods."""
 
     def __init__(self, repo_path: pathlib.Path, robot: str = "ar4",
-                 sim: bool = False):
+                 sim: bool = False, camera_mode=None, camera_index=None):
         repo_path = repo_path.expanduser().resolve()
         if not (repo_path / "ar4_automation").is_dir():
             raise RuntimeError(
@@ -361,8 +398,15 @@ class RosRobotBackend:
             rclpy.init(
                 args=None,
                 signal_handler_options=SignalHandlerOptions.NO)
+        overrides = {}
+        if not sim and robot == "xarm6" and camera_mode is not None:
+            if camera_mode == "disabled":
+                overrides["stream_source"] = "ros"
+            elif camera_mode == "webcam":
+                overrides.update(stream_source="webcam",
+                                 camera_index=int(camera_index))
         self.node = start_node(
-            sim=sim, robot=robot, joint_state_timeout=2.0)
+            sim=sim, robot=robot, joint_state_timeout=2.0, **overrides)
         self.robot = robot
         self.sim = sim
         self.sim_setup_state = None
@@ -412,10 +456,23 @@ class RosRobotBackend:
 
     def execute(self, action: str, p: dict) -> Any:
         node = self.node
+        if action == "teach_enable":
+            if self.sim:
+                raise RobotCommandError("teach mode is physical-only")
+            return node.set_xarm_mode(2)
+        if action == "teach_disable":
+            if self.sim:
+                raise RobotCommandError("teach mode is physical-only")
+            return node.set_xarm_mode(1)
         # The automation package owns the authoritative interlocks.  Checking
         # here gives the GUI an immediate, readable failure before any MoveIt
         # goal is submitted; every low-level move checks again.
         node.assert_motion_safe()
+        if action == "scan_location":
+            self._require_camera_ready(action)
+            return node.scanLocationForMarkers(
+                estimated_pos=p["position"], estimated_orient=p["euler"],
+                viewing_distance=p["viewing_distance"])
         if action == "home":
             return node.go_home()
         if action == "move_joints":
@@ -452,6 +509,7 @@ class RosRobotBackend:
             return node.move_to_pose(
                 target[:3], target[3:], max_retries=0, timeout=6.0)
         if action == "scan_marker":
+            self._require_camera_ready(action)
             move_ok, spotted = node.scanToMarker(
                 marker_id=p["marker_id"],
                 viewing_distance=p["viewing_distance"])
@@ -459,17 +517,21 @@ class RosRobotBackend:
                 return False
             return {"move_ok": bool(move_ok), "marker_spotted": bool(spotted)}
         if action == "pickup":
+            self._require_camera_ready(action)
             self._require_manipulation_hardware(action)
             return node.pickupPlate(markerID=p["marker_id"])
         if action == "place":
+            self._require_camera_ready(action)
             self._require_manipulation_hardware(action)
             return node.placePlate(markerID=p["marker_id"])
         if action == "transfer":
+            self._require_camera_ready(action)
             self._require_manipulation_hardware(action)
             return node.transferPlate(
                 source_id=p["source_id"], dest_id=p["dest_id"],
                 rescan_id=p["rescan_id"])
         if action == "scrape":
+            self._require_camera_ready(action)
             self._require_manipulation_hardware(action)
             return node.scrapePlate(
                 source_id=p["source_id"], scrape_id=p["scrape_id"])
@@ -489,6 +551,27 @@ class RosRobotBackend:
             raise RobotCommandError(
                 f"{action} requires a configured physical {self.robot} gripper; "
                 "motion was blocked before the first waypoint")
+
+    def _require_camera_ready(self, action: str) -> None:
+        """Block vision-dependent physical motion on stale camera input."""
+        if self.sim:
+            return
+        camera = self.node.stream.diagnostics()
+        problems = []
+        if camera.get("color_age_s") is None:
+            problems.append("no color frames received")
+        elif camera["color_age_s"] > 1.0:
+            problems.append(
+                f"color frame is stale ({camera['color_age_s']:.2f}s)")
+        if not camera.get("calibrated"):
+            problems.append("camera_info calibration not received")
+        if not camera.get("camera_frame"):
+            problems.append("camera optical frame is unknown")
+        if camera.get("last_error"):
+            problems.append(camera["last_error"])
+        if problems:
+            raise RobotCommandError(
+                f"{action} blocked by camera preflight: " + "; ".join(problems))
 
     def cancel(self) -> None:
         from std_msgs.msg import String
@@ -510,8 +593,28 @@ class RosRobotBackend:
                 "frame": self.node.frame,
             },
             "markers": _jsonable(self.node.marker_poses),
+            "camera": _jsonable(self.node.stream.diagnostics()),
             "safety": _jsonable(self.node.safety_snapshot()),
         }
+
+    def camera_frame(self) -> bytes | None:
+        import cv2
+        stream = self.node.stream
+        with stream.lock:
+            if stream.frame is None:
+                return None
+            frame = stream.frame.copy()
+        ok, encoded = cv2.imencode('.jpg', frame,
+                                   [cv2.IMWRITE_JPEG_QUALITY, 75])
+        return encoded.tobytes() if ok else None
+
+    def configure_camera(self, index: int | None) -> None:
+        if self.sim:
+            raise RobotCommandError("Gazebo camera selection is fixed by ROS topics")
+        if index is None:
+            self.node.stream.disable_webcam()
+        else:
+            self.node.stream.configure_webcam(index)
 
     def close(self) -> None:
         try:
@@ -519,3 +622,20 @@ class RosRobotBackend:
         finally:
             if self._rclpy.ok():
                 self._rclpy.shutdown()
+
+
+def list_video_devices() -> list[dict]:
+    """Enumerate Linux V4L2 nodes without opening/locking the cameras."""
+    root = pathlib.Path('/sys/class/video4linux')
+    devices = []
+    if not root.is_dir():
+        return devices
+    for path in sorted(root.glob('video*'), key=lambda p: int(p.name[5:])):
+        try:
+            name = (path / 'name').read_text().strip()
+            index = int(path.name[5:])
+        except (OSError, ValueError):
+            continue
+        devices.append({"index": index, "name": name,
+                        "path": f"/dev/{path.name}"})
+    return devices

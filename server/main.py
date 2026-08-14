@@ -23,7 +23,8 @@ from .printer import PrinterBusy
 from .registry import DuplicateSerial
 from .sdcard import SdError
 from .store import CAMERA_SOURCES, model_mismatch
-from .robot import (RobotBusy, RobotCommandError, RobotUnavailable)
+from .robot import (RobotBusy, RobotCommandError, RobotUnavailable,
+                    list_video_devices)
 
 # How long to wait for a started print to show up in gcode_state before
 # reporting it as not-started. The A1 goes FAILED/IDLE -> PREPARE within a
@@ -122,6 +123,10 @@ class ReorderQueueJobs(BaseModel):
 class RobotCommandBody(BaseModel):
     action: str
     parameters: dict = {}
+
+
+class RobotCameraBody(BaseModel):
+    index: int | None = None
 
 
 def _comparable(printers: list[dict]) -> list[dict]:
@@ -495,6 +500,31 @@ def create_app(registry, runs_dir: pathlib.Path,
     @app.get("/api/robot/status")
     def robot_status():
         return _require_robot().snapshot()
+
+    @app.get("/api/robot/cameras")
+    def robot_cameras():
+        return {"devices": list_video_devices()}
+
+    @app.put("/api/robot/camera")
+    def configure_robot_camera(body: RobotCameraBody):
+        controller = _require_robot()
+        try:
+            controller.configure_camera(body.index)
+        except RobotCommandError as exc:
+            raise HTTPException(400, str(exc))
+        except RobotUnavailable as exc:
+            raise HTTPException(503, str(exc))
+        except RobotBusy as exc:
+            raise HTTPException(409, str(exc))
+        return controller.snapshot()
+
+    @app.get("/api/robot/camera/frame")
+    def robot_camera_frame():
+        data = _require_robot().camera_frame()
+        if data is None:
+            raise HTTPException(404, "no robot camera frame available")
+        return Response(content=data, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
 
     @app.post("/api/robot/commands", status_code=202)
     def robot_command(body: RobotCommandBody):

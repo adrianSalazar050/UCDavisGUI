@@ -57,6 +57,25 @@ def test_normalize_jog_pose_and_bounds():
         normalize_command("jog_pose", {"axis": "yaw", "delta": 0})
 
 
+def test_normalize_scan_location():
+    action, params = normalize_command("scan_location", {
+        "position": [0.3, 0.0, 0.2],
+        "euler": [0, 0, 1.57],
+        "viewing_distance": "0.15",
+    })
+    assert action == "scan_location"
+    assert params == {
+        "position": [0.3, 0.0, 0.2],
+        "euler": [0.0, 0.0, 1.57],
+        "viewing_distance": 0.15,
+    }
+    with pytest.raises(RobotCommandError, match="viewing_distance"):
+        normalize_command("scan_location", {
+            "position": [0, 0, 0], "euler": [0, 0, 0],
+            "viewing_distance": 0.9,
+        })
+
+
 def test_manager_executes_one_command_and_reports_telemetry():
     manager = RobotManager(lambda: MockRobotBackend(delay_s=0.01))
     manager.start()
