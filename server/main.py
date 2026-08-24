@@ -24,6 +24,8 @@ from .printer import PrinterBusy
 from .registry import DuplicateSerial
 from .sdcard import SdError
 from .ledger import END_STATES, PIECE_STATUSES
+from .robot import (RobotBusy, RobotCommandError, RobotUnavailable,
+                    list_video_devices)
 from .store import CAMERA_SOURCES, model_mismatch
 
 # How long to wait for a started print to show up in gcode_state before
@@ -271,6 +273,15 @@ class ReorderQueueJobs(BaseModel):
     ids: list[str]
 
 
+class RobotCommandBody(BaseModel):
+    action: str
+    parameters: dict = {}
+
+
+class RobotCameraBody(BaseModel):
+    index: int | None = None
+
+
 def _comparable(printers: list[dict]) -> list[dict]:
     """report_age_s ticks every sample; ignore it when deciding whether the
     state meaningfully changed."""
@@ -350,7 +361,8 @@ class LoginBody(BaseModel):
 def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
                detection=None, queue=None, slicer=None, auth=None,
-               ledger=None, recorder=None, partstore=None) -> FastAPI:
+               ledger=None, recorder=None, partstore=None,
+               robot=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake). `queue` is
     anything with add(serial, job), remove(serial, id) -> bool,
@@ -364,6 +376,12 @@ def create_app(registry, runs_dir: pathlib.Path,
     traceability route, the same "None means inert" convention as `queue`,
     `detection`, and `slicer`. `partstore` stores model bytes; None disables
     model up/download (part metadata still works).
+
+    `robot` is a server.robot.RobotManager (or a test fake) exposing start(),
+    stop(), snapshot(), submit(action, parameters) and cancel(command_id);
+    None disables every /api/robot route -- the same "None means inert"
+    convention again, and the DEFAULT, so a deployment that has no arm is
+    unaffected by this feature existing. See master.md section 16.
     """
 
     @asynccontextmanager
@@ -384,6 +402,9 @@ def create_app(registry, runs_dir: pathlib.Path,
             if recorder is not None:
                 recorder.start()
                 started.append(recorder)
+            if robot is not None:
+                robot.start()
+                started.append(robot)
             yield
         finally:
             for component in reversed(started):
@@ -1263,6 +1284,88 @@ def create_app(registry, runs_dir: pathlib.Path,
         return Response(content=data, media_type="image/jpeg",
                         headers={"Cache-Control": "no-store"})
 
+    # --- robot control ----------------------------------------------------
+    # Every route here sits under /api/, so the _require_session middleware
+    # above already gates them when auth is enabled -- including the MJPEG
+    # frame route. Nothing extra to do; see master.md section 16.
+
+    def _require_robot():
+        if robot is None:
+            raise HTTPException(404, "robot control is not enabled")
+        return robot
+
+    @app.get("/api/robot/status")
+    def robot_status():
+        return _require_robot().snapshot()
+
+    @app.get("/api/robot/cameras")
+    def robot_cameras():
+        # Reads /sys/class/video4linux, so this is [] on Windows/macOS rather
+        # than an error: the camera picker then offers only "Disabled".
+        return {"devices": list_video_devices()}
+
+    @app.put("/api/robot/camera")
+    def configure_robot_camera(body: RobotCameraBody):
+        controller = _require_robot()
+        try:
+            controller.configure_camera(body.index)
+        except RobotCommandError as exc:
+            raise HTTPException(400, str(exc))
+        except RobotUnavailable as exc:
+            raise HTTPException(503, str(exc))
+        except RobotBusy as exc:
+            raise HTTPException(409, str(exc))
+        return controller.snapshot()
+
+    @app.get("/api/robot/camera/frame")
+    def robot_camera_frame():
+        data = _require_robot().camera_frame()
+        if data is None:
+            raise HTTPException(404, "no robot camera frame available")
+        return Response(content=data, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/robot/commands", status_code=202)
+    def robot_command(body: RobotCommandBody):
+        controller = _require_robot()
+        try:
+            return controller.submit(body.action, body.parameters)
+        except RobotCommandError as exc:
+            raise HTTPException(400, str(exc))
+        except RobotBusy as exc:
+            raise HTTPException(409, str(exc))
+        except RobotUnavailable as exc:
+            raise HTTPException(503, str(exc))
+
+    @app.post("/api/robot/commands/{command_id}/cancel")
+    def cancel_robot_command(command_id: str):
+        controller = _require_robot()
+        if not controller.cancel(command_id):
+            raise HTTPException(404, "robot command is not active")
+        return controller.snapshot()
+
+    def _live_payload():
+        """The /ws frame. `robot` is present ONLY when this server has an arm
+        configured, which is what lets the browser tell "no robot on this
+        server" (key absent) from "robot present but unavailable" (key
+        present, available false). Those need different messages."""
+        printers = _with_detection(
+            _with_nozzle(_with_bed_type(registry.summaries(), registry),
+                         registry), detection)
+        payload = {"printers": printers}
+        if robot is not None:
+            payload["robot"] = robot.snapshot()
+        return payload
+
+    def _live_comparable(payload):
+        """Change detection over the whole frame, still ignoring the
+        per-sample report_age_s churn _comparable exists to drop -- otherwise
+        every poll would look changed and defeat the heartbeat throttling."""
+        value = {"printers": _comparable(payload["printers"])}
+        if "robot" in payload:
+            value["robot"] = payload["robot"]
+        return value
+
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
         # Checked HERE, not in the HTTP middleware above: that middleware only
@@ -1274,25 +1377,24 @@ def create_app(registry, runs_dir: pathlib.Path,
             return
         try:
             await sock.accept()
-            printers = _with_detection(
-                _with_nozzle(_with_bed_type(registry.summaries(), registry),
-                            registry), detection)
-            await sock.send_text(json.dumps({"printers": printers}))
-            last_sent, last_time = printers, time.monotonic()
+            payload = _live_payload()
+            await sock.send_text(json.dumps(payload))
+            last_sent, last_time = payload, time.monotonic()
             while True:
                 await asyncio.sleep(WS_POLL_S)
                 now = time.monotonic()
                 # summaries()/printer_bed_type/printer_nozzle must stay
                 # non-blocking: this runs on the event loop and a stall here
                 # would freeze every connected client. All are quick,
-                # lock-guarded dict reads.
-                printers = _with_detection(
-                    _with_nozzle(_with_bed_type(registry.summaries(), registry),
-                                registry), detection)
-                changed = _comparable(printers) != _comparable(last_sent)
+                # lock-guarded dict reads. RobotManager.snapshot() is the same
+                # -- it copies state under its lock and calls telemetry()
+                # outside it, so a wedged arm cannot stall the event loop.
+                payload = _live_payload()
+                changed = (
+                    _live_comparable(payload) != _live_comparable(last_sent))
                 if changed or now - last_time >= WS_HEARTBEAT_S:
-                    await sock.send_text(json.dumps({"printers": printers}))
-                    last_sent, last_time = printers, now
+                    await sock.send_text(json.dumps(payload))
+                    last_sent, last_time = payload, now
         except WebSocketDisconnect:
             pass
 

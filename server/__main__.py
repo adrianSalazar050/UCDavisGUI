@@ -32,6 +32,7 @@ from .printer import MockPrinter, PrinterService
 from .runlog import RunRecorder
 from .queue import MemoryQueueStore, PrintQueue, QueueStore
 from .registry import PrinterRegistry
+from .robot import MockRobotBackend, RobotManager, RosRobotBackend
 from . import slicer as slicer_mod
 from .slicejobs import SliceCoordinator
 from .store import MemoryStore, PrinterStore
@@ -274,6 +275,27 @@ def main() -> int:
                         "%(default)s)")
     p.add_argument("--no-slicer", action="store_true",
                    help="disable slicing even if Bambu Studio is installed")
+    p.add_argument("--robot-mode", choices=("disabled", "mock", "ros"),
+                   default="disabled",
+                   help="robot control backend. 'mock' needs no hardware and "
+                        "is how the Robot page is developed; 'ros' needs ROS 2 "
+                        "plus the automation repo and only runs on Linux "
+                        "(default: %(default)s)")
+    p.add_argument("--robot-type", choices=("xarm6", "ar4", "lite6"),
+                   default="xarm6",
+                   help="robot configuration used by the ROS backend "
+                        "(default: %(default)s)")
+    p.add_argument("--robot-sim", action="store_true",
+                   help="connect robot control to Gazebo/sim topics instead "
+                        "of a physical arm")
+    default_robot_repo = pathlib.Path(os.environ.get(
+        "AR4_AUTOMATION_REPO",
+        pathlib.Path.home() / "ar4Automating3DPrinter"))
+    p.add_argument("--robot-repo", type=pathlib.Path,
+                   default=default_robot_repo,
+                   help="path to ar4Automating3DPrinter (or set "
+                        "AR4_AUTOMATION_REPO). Only read under "
+                        "--robot-mode ros")
     a = p.parse_args()
 
     logging.basicConfig(
@@ -358,6 +380,41 @@ def main() -> int:
                 slicer = SliceCoordinator(
                     registry, queue, exe, index, work_dir=runs_dir / "_slice")
 
+    # The arm. Default disabled, the same "None means inert" convention the
+    # queue/slicer/ledger use -- a deployment with no robot is unaffected.
+    #
+    # RosRobotBackend is constructed LAZILY, inside RobotManager's worker
+    # thread, by this lambda. That matters twice over: rclpy is imported only
+    # when the ROS backend is actually asked for (so `import server.robot`
+    # stays clean on Windows), and rclpy.init() must not run on the main
+    # thread, which uvicorn owns for signal handling. See master.md section 16.
+    robot = None
+    if a.robot_mode == "mock":
+        log.info("robot control enabled (mock backend, no hardware)")
+        robot = RobotManager(MockRobotBackend)
+    elif a.robot_mode == "ros":
+        # A camera mode of "webcam" with no index is a misconfiguration, not a
+        # fatal one: degrade to disabled so the server still starts and the
+        # Robot page can offer the picker, rather than dying at boot.
+        initial_mode = os.environ.get("XARM_CAMERA_MODE", "webcam").lower()
+        initial_index = os.environ.get("XARM_CAMERA_INDEX", "").strip()
+        robot_camera = {
+            "mode": initial_mode,
+            "index": int(initial_index) if initial_index else None,
+        }
+        if robot_camera["mode"] == "webcam" and robot_camera["index"] is None:
+            robot_camera["mode"] = "disabled"
+        log.info("robot control enabled (ROS backend, %s%s, repo %s)",
+                 a.robot_type, ", sim" if a.robot_sim else "", a.robot_repo)
+        robot = RobotManager(
+            lambda: RosRobotBackend(
+                repo_path=a.robot_repo,
+                robot=a.robot_type,
+                sim=a.robot_sim,
+                camera_mode=robot_camera["mode"],
+                camera_index=robot_camera["index"]),
+            camera_config=robot_camera)
+
     host = resolve_host(a.host, a.lan)
     env_password = os.environ.get("BAMBU_PASSWORD")
     password = resolve_password(env_password, lan=a.lan)
@@ -390,7 +447,7 @@ def main() -> int:
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
     app = create_app(registry, runs_dir, dist, detection=coordinator,
                      queue=queue, slicer=slicer, auth=auth, ledger=ledger,
-                     recorder=recorder, partstore=partstore)
+                     recorder=recorder, partstore=partstore, robot=robot)
     # uvicorn re-raises the signal it caught using whatever handler was
     # installed beforehand. SIGBREAK's OS default kills the process outright
     # (skipping `finally`), so map it to KeyboardInterrupt like SIGINT gets.

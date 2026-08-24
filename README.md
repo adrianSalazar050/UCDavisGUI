@@ -2,8 +2,9 @@
 
 A web dashboard for a fleet of Bambu Lab A1 / A1 mini printers: live status,
 a camera view, a YOLO failure detector that can stop a print by itself,
-automatic slicing, a print queue, and a traceability ledger that records every
-part made and every gram of filament used.
+automatic slicing, a print queue, a traceability ledger that records every
+part made and every gram of filament used, and control of an xArm 6 that
+takes finished plates off the machines.
 
 ## Install
 
@@ -25,9 +26,13 @@ install on their side.
 Other ways to start it:
 
 ```bash
-python -m server           # this machine only, no password
-python -m server --mock    # no hardware: three fake printers, for a demo
+python -m server                    # this machine only, no password
+python -m server --mock             # no hardware: three fake printers, for a demo
+python -m server --robot-mode mock  # adds the Robot page, no arm required
 ```
+
+The robot arm is **off by default**. Driving a real one needs ROS 2 on Linux —
+see [`master.md` §16](master.md).
 
 ## First-time setup
 

@@ -3,10 +3,19 @@ import { useEffect, useState } from "react";
 const MAX_BACKOFF_MS = 10000;
 
 // Live list of every registered printer over /ws with auto-reconnect.
-// Returns { printers, wsUp }: printers is the last received list (empty until
-// the first message), wsUp is whether the socket is currently open.
+// Returns { printers, robot, wsUp }: printers is the last received list (empty
+// until the first message), wsUp is whether the socket is currently open.
+//
+// `robot` stays null on a server with no arm configured, because the server
+// omits the key entirely in that case (see main.py's _live_payload). That is
+// the distinction the Robot page needs: a null robot means "this build has no
+// arm, start the server with --robot-mode", while a non-null one that reports
+// available:false means "there IS an arm and it is in trouble". Merging those
+// two into one falsy value would make the page give the wrong advice -- the
+// same mistake `detection_available` exists to prevent for the detector.
 export function usePrinters() {
   const [printers, setPrinters] = useState([]);
+  const [robot, setRobot] = useState(null);
   const [wsUp, setWsUp] = useState(false);
 
   useEffect(() => {
@@ -29,7 +38,9 @@ export function usePrinters() {
         // exception; it would NOT close the connection or crash React, but
         // dropping the update silently would be worse than noting it).
         try {
-          setPrinters(JSON.parse(e.data).printers ?? []);
+          const payload = JSON.parse(e.data);
+          setPrinters(payload.printers ?? []);
+          if ("robot" in payload) setRobot(payload.robot);
         } catch (err) {
           console.error("usePrinters: malformed WS message", err);
         }
@@ -53,5 +64,5 @@ export function usePrinters() {
     };
   }, []);
 
-  return { printers, wsUp };
+  return { printers, robot, wsUp };
 }

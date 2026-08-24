@@ -42,7 +42,7 @@ function Shell() {
   // Narrow screens only: the sidebar folds away and this reveals it. Always
   // false on a desktop width, where CSS keeps the sidebar shown regardless.
   const [navOpen, setNavOpen] = useState(false);
-  const { printers, wsUp } = usePrinters();
+  const { printers, robot, wsUp } = usePrinters();
 
   // Never make the user pick before showing them anything, and repair the
   // selection when the selected printer is removed.
@@ -145,7 +145,8 @@ function Shell() {
             <p className="pagehead">{page.description}</p>
           )}
           <Page printers={printers} selected={selected}
-                onSelect={select} onNavigate={go} />
+                onSelect={select} onNavigate={go}
+                robot={robot} wsUp={wsUp} />
         </div>
       </div>
     </div>

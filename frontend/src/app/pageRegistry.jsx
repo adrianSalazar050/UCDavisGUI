@@ -5,6 +5,7 @@ import Inventory from "../pages/Inventory.jsx";
 import Parts from "../pages/Parts.jsx";
 import Printers from "../pages/Printers.jsx";
 import Queue from "../pages/Queue.jsx";
+import Robot from "../pages/Robot.jsx";
 import SdFiles from "../pages/SdFiles.jsx";
 import Slice from "../pages/Slice.jsx";
 
@@ -13,10 +14,15 @@ import Slice from "../pages/Slice.jsx";
 // from this -- add future pages here and nowhere else.
 //
 // Every page receives the same props: { printers, selected, onSelect,
-// onNavigate }. `onSelect(serial)` selects a printer AND jumps to its
-// dashboard (what clicking a card on the Printers page means); `onNavigate(key)`
-// goes to another page without touching the selection, which is what lets an
-// empty state offer the fix rather than just naming it.
+// onNavigate, robot, wsUp }. `onSelect(serial)` selects a printer AND jumps to
+// its dashboard (what clicking a card on the Printers page means);
+// `onNavigate(key)` goes to another page without touching the selection, which
+// is what lets an empty state offer the fix rather than just naming it.
+// `robot` is the live arm snapshot off the same WebSocket that carries
+// `printers` (null when this server has no arm), and `wsUp` says whether that
+// socket is currently open -- the Robot page needs both to decide whether it
+// is safe to enable a motion control, so they ride the uniform contract rather
+// than being threaded to one page specially.
 //
 // GROUPS ARE THE ANSWER TO A QUESTION, not a taxonomy of the code. All nine
 // pages used to sit in one list called "Monitor", which said nothing about
@@ -27,6 +33,10 @@ import Slice from "../pages/Slice.jsx";
 //               slice a model -> queue it -> the card it lives on
 //   Library  -- fleet-wide records that outlive any one printer
 //   Setup    -- registering machines, which you do once
+//   Control  -- driving hardware that is not a printer: the arm that moves
+//               plates between them. Its own group because it answers its own
+//               question; folding it into "Print" would file a robot under a
+//               heading about print jobs.
 //
 // `scope` records the distinction master.md section 7 already drew: a
 // "printer" page shows the printer the topbar switcher is pointed at, a
@@ -104,6 +114,19 @@ export const pages = {
     component: Inventory,
   },
 
+  // ---- Control: hardware that is not a printer -------------------------
+  robot: {
+    title: "Robot",
+    description: "Drive the plate-handling arm: home it, jog it, and run "
+                 + "pick, place and transfer against an ArUco marker.",
+    group: "Control",
+    // "fleet", not "printer": one arm serves the whole lab and none of its
+    // controls are addressed to the printer the topbar switcher points at, so
+    // switching printer must not look like it re-aims the robot.
+    scope: "fleet",
+    component: Robot,
+  },
+
   // ---- Setup: done once ------------------------------------------------
   printers: {
     title: "Printers",
@@ -119,7 +142,8 @@ export const pages = {
 // that adding a page to an existing group can never reshuffle the groups
 // themselves, and so a page whose group is misspelled is visible as its own
 // heading at the end instead of vanishing.
-export const GROUP_ORDER = ["Monitor", "Print", "Library", "Setup"];
+export const GROUP_ORDER = ["Monitor", "Print", "Library", "Setup",
+                            "Control"];
 
 // The page the app opens on. The dashboard, not the printer list: with one
 // printer -- the common case -- App auto-selects it, so this lands on

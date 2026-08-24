@@ -532,7 +532,7 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 | `store.py` | `printers.json` persistence + the `PrinterConfig` dataclass | `PrinterConfig`, `PrinterStore`, `MemoryStore`, `DETECTION_CLASSES`, `CAMERA_SOURCES`, `MODEL_NAMES`, `guess_model_id`, `model_mismatch`, `NOZZLES`, `DEFAULT_NOZZLE` |
 | `printer.py` | One live printer's state | `PrinterService`, `MockPrinter`, `build_summary`, `SUMMARY_FIELDS`, `STALE_S` |
 | `registry.py` | The set of printers, keyed by serial | `PrinterRegistry`, `DuplicateSerial`, `.reconnect()`, `.printer_model()`, `.printer_nozzle()` |
-| `main.py` | The FastAPI app + all routes | `create_app`, `AddPrinter`, `EditPrinter`, `DetectionUpdate`, `ArmBody`, `AddQueueJob`, `ReorderQueueJobs` |
+| `main.py` | The FastAPI app + all routes | `create_app`, `AddPrinter`, `EditPrinter`, `DetectionUpdate`, `ArmBody`, `AddQueueJob`, `ReorderQueueJobs`, `RobotCommandBody`, `RobotCameraBody` |
 | `detection.py` | Reading detector status, deciding, actuating | `StatusReader`, `AutoStopController`, `DetectorSupervisor`, `DetectionCoordinator`, `MockDetectorRunner` |
 | `queue.py` | Per-printer job list + `queues.json` | `PrintQueue`, `QueueStore`, `MemoryQueueStore` |
 | `sdcard.py` | microSD over FTPS (read + upload) | `list_dir`, `fetch_file`, `upload_file`, `normalize_path`, `ImplicitFTP_TLS`, `SdError`, `parse_mlsd`, `parse_list_lines` |
@@ -543,6 +543,7 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 | `runs.py` | Finding the newest captured frame | `find_active_run`, `newest_frame`, `ACTIVE_WINDOW_S` |
 | `ledger.py` | `ledger.db` only — schema, forward-only migrations, row helpers (§13–§15) | `Ledger`, `MIGRATIONS`, `SCHEMA_VERSION`, `END_STATES`, `PIECE_STATUSES`, `RUN_WRITABLE`, `SPOOL_WRITABLE`, `SPOOL_FREE_STATUSES`, `set_default_recipe`, `set_loaded_spool`, `unload_spool`, `add_consumption` |
 | `runlog.py` | Turning `registry.summaries()` diffs into run/event rows (§13) | `RunRecorder`, `RECONCILE_DEADLINE_S` |
+| `robot.py` | Serialized robot motion; mock + ROS backends (§16) | `RobotManager`, `MockRobotBackend`, `RosRobotBackend`, `normalize_command`, `list_video_devices`, `ACTIONS`, `RobotBusy`, `RobotUnavailable`, `RobotCommandError` |
 | `partstore.py` | Part model bytes on disk, pure of the DB (§14) | `PartStore` |
 | `auth.py` | Shared-password auth for LAN serving (§2.1) | `Auth`, `is_loopback`, `LOOPBACK_HOSTS` — `build_auth` (the fail-closed rule) lives in `__main__.py`, not here |
 | `__main__.py` | CLI entry, wiring, `--mock` seeding, `--host`/`--lan`/`build_auth` (§2.1, §8) | `main`, `real_factory`, `mock_factory`, `MOCK_SEED`, `build_auth`, `resolve_host`, `resolve_password`, `read_password_file`, `local_ipv4s`, `lan_url_lines`, `DEFAULT_HOST`, `LAN_HOST`, `PASSWORD_FILE` |
@@ -1446,7 +1447,7 @@ items, a sticky topbar, and the selected page's one-line description. All three
 are derived from `pageRegistry.jsx` — nothing about the shell is hardcoded per
 page.
 
-**The sidebar is four groups, and the grouping answers a question rather than
+**The sidebar is five groups, and the grouping answers a question rather than
 classifying the code.** All nine pages used to sit in one list labelled
 "Monitor", which told you nothing about which of them you needed:
 
@@ -1456,6 +1457,12 @@ classifying the code.** All nine pages used to sit in one list labelled
 | Print | get a job onto it — in the order the work happens | Slice → Queue → SD Files |
 | Library | fleet-wide records that outlive any one printer | Parts, Inventory |
 | Setup | registering machines, which you do once | Printers |
+| Control | driving hardware that is **not** a printer | Robot (§16) |
+
+Control is last and is its own heading rather than an entry under Print. The
+arm is a second machine, not a step in a print job: filing it under a heading
+about getting gcode onto a printer would answer the wrong question. It is also
+the group that will grow if the lab gains more non-printer hardware.
 
 Group **order** is `GROUP_ORDER` in the registry, not the `pages` literal's
 insertion order: adding a page to an existing group can then never reshuffle
@@ -1514,7 +1521,12 @@ ratio is data, but an inline declaration still beats a stylesheet one.
 ### 7.2 Pages
 
 `src/app/pageRegistry.jsx` — add pages here and nowhere else. Every page
-receives the same four props: `{printers, selected, onSelect, onNavigate}`.
+receives the same six props: `{printers, selected, onSelect, onNavigate,
+robot, wsUp}`. The last two ride the uniform contract rather than being
+threaded to one page specially: `robot` is the live arm snapshot carried on the
+same WebSocket as `printers` (`null` when this server has no arm — see §16),
+and `wsUp` says whether that socket is open, which the Robot page needs before
+it will enable a control that moves hardware.
 
 | Key | Group | Page | What it does |
 |---|---|---|---|
@@ -1527,13 +1539,14 @@ receives the same four props: `{printers, selected, onSelect, onNavigate}`.
 | `parts` | Library | `Parts.jsx` | Parts catalogue: `PartList`, `PartForm`, `RecipeEditor`, per-recipe "Slice for &lt;printer&gt;" (§14) |
 | `inventory` | Library | `Inventory.jsx` | Filament spools: `SpoolList` with derived remaining grams + low-stock highlight, `SpoolForm`, and the per-printer `LoadedSpool` control (§15) |
 | `printers` | Setup | `Printers.jsx` | Printer grid (`PrinterCard`, with inline `EditPrinterForm`) + `AddPrinterForm` behind a disclosure |
+| `robot` | Control | `Robot.jsx` | The plate-handling arm (§16): arm-to-enable interlock, home/stop, joint and Cartesian goals, jog pad, ArUco pick/place/transfer/scrape, gripper, live joint + pose readouts, camera selection and preview |
 
 The key `printers` is a registry key; the `printers` **prop** every page
 receives is the live summary list. They are unrelated.
 
 **Two scopes, recorded in the registry as `scope`.** A `printer` page shows
 whichever machine the switcher is pointed at. A `fleet` page — `parts`,
-`inventory`, `printers` — describes the whole lab and touches `selected` only
+`inventory`, `printers`, `robot` — describes the whole lab and touches `selected` only
 for its per-printer actions ("Slice for &lt;printer&gt;", load/unload a spool,
 which machine the camera watches). The topbar badges the fleet ones, so
 switching printer and seeing the page not change is *explained* rather than
@@ -1583,6 +1596,17 @@ helper flattens FastAPI's `{"detail": ...}` — which is a *list* of validation
 objects for a 422 — so no caller can ever surface `[object Object]`. The two
 frame fetchers return an object URL the caller must revoke, or `null`.
 
+`src/api/robot.js` is a second, separate wrapper set — `fetchRobotStatus`,
+`sendRobotCommand`, `cancelRobotCommand`, `fetchRobotCameras`,
+`configureRobotCamera` (§16). It carries its own copy of the same `detail(res)`
+shape rather than importing one: the two files have no other reason to depend
+on each other, and the robot half is the part that can be deleted wholesale if
+the arm ever leaves.
+
+The robot's **live** state does not go through either file — it rides `/ws`
+alongside the printer summaries (see the table below), so the page re-renders
+from telemetry instead of polling `fetchRobotStatus` in a loop.
+
 `startSliceBlob` exists because of §6.9: a *reoriented* STL is baked in the
 browser and uploaded as a `Blob` with the original filename, while an
 unrotated one still goes through `startSlice` with its original `File` — same
@@ -1600,6 +1624,8 @@ route either way, and the no-rotation path stays byte-identical.
 | Slice jobs | Polling `fetchSliceJobs`, plus an immediate refetch on submit | 2 s |
 | Run history (list) | Polling `fetchRuns` + refetch after every correction; the open run's *detail* is fetched on selection, not polled | 5 s |
 | Parts / spools | Polling `fetchParts` / `fetchSpools` + refetch after every mutation | 8 s |
+| Robot state (joints, pose, markers, camera health, active/last command) | WebSocket `/ws`, same frame as the printers (§16.3) | Pushed on change, same cadence |
+| Robot camera preview | Polling `/api/robot/camera/frame`, and only while telemetry says a frame exists | 500 ms |
 
 The cadences are ordered by how fast the underlying thing actually moves, not
 by preference: slice jobs change state in seconds, a run's layer count every
@@ -1671,6 +1697,10 @@ pip install -r requirements.txt
 # GPU training needs a CUDA torch build:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
+# ONLY on the Linux machine that drives the arm (§16). Pins numpy<2 for ROS
+# Humble's cv_bridge, so do not install it on the training/dev box.
+#   pip install -r requirements-robot.txt
+
 cd frontend && npm install && npm run build && cd ..
 ```
 
@@ -1680,6 +1710,11 @@ cd frontend && npm install && npm run build && cd ..
 python -m server                       # real printers, restored from printers.json
 python -m server --mock                # three fake printers, in-memory stores
 python -m server --port 8000 --runs-dir runs --printers-file printers.json
+
+# with the plate-handling arm (§16). Default is --robot-mode disabled.
+python -m server --robot-mode mock                    # no hardware, no ROS
+python -m server --robot-mode ros --robot-sim         # Gazebo
+python -m server --robot-mode ros                     # the physical xArm 6
 ```
 
 Then open <http://127.0.0.1:8000>. Printers are added **in the browser**
@@ -1959,10 +1994,11 @@ finishes or is cancelled (§6.5) — nothing here is meant to outlive its job.
 
 ```bash
 python -m pytest              # server + root modules, from the repo root
-cd frontend && npm test       # ROI drag maths (vitest)
+cd frontend && npm test       # ROI drag maths, API wrappers (vitest)
 ```
 
-Neither suite uses a socket, a camera, or a printer.
+Neither suite uses a socket, a camera, a printer, or a robot — `test_robot.py`
+runs entirely against `MockRobotBackend` and never imports `rclpy`.
 
 **Per-test counts are deliberately not written down here.** They were restated
 in two documents and went stale three times in a single afternoon's work; the
@@ -1986,6 +2022,7 @@ worth knowing:
 | `test_slicer.py` | Profile flattening + cycle detection, `ProfileIndex`, `find_slicer`, `build_argv`, `run_slice` against an injected fake subprocess |
 | `test_slicepresets.py` | Tier resolution (the `A1`/`A1M` token split, the anchored regex, the decoy-name trap), filament detection off a fake MQTT state |
 | `test_slicejobs.py` | The full `SliceCoordinator` state machine against a fake registry/queue and an injected fake `run_slice` — success chains to upload+queue, each failure step latches and leaves the queue untouched, the finished-job cap |
+| `test_robot.py` | `normalize_command`'s whole validation surface, `RobotManager` serialization (one command at a time, busy refusal, cancel, last-command record), the optional-camera contract, and the robot routes via `TestClient` including 404-when-disabled (§16) |
 | `test_auth.py` | `Auth` (hashing, `compare_digest`, session tokens), `is_loopback`, `build_auth`'s fail-closed rule (§2.1), and `--lan`'s resolution helpers — including `test_lan_cannot_open_a_hole`, which asserts the shortcut still refuses to start with no password anywhere (§8) |
 | `test_ledger.py` | The schema and every row helper: forward-only migration v1→v2→v3 on a real file, the write allowlists, `close_run`'s single-transition return, derived `remaining_grams`, the loaded-spool clear-then-set, badge auto-vs-human, corrupt-file quarantine (§13–§15) |
 | `test_ledger_api.py` | Every `/api/runs`, `/api/pieces`, `/api/badges`, `/api/parts`, and `/api/spools` route, including the 409s, the 400 guards, and that all of them 404 when `ledger=None` |
@@ -2655,3 +2692,144 @@ real print decrementing a real loaded spool end to end — the recorder path is
 unit-tested (`test_finish_records_filament_consumption...`) but no hardware run
 has charged a spool yet. See
 `docs/superpowers/plans/2026-07-25-erp-traceability-phase3-spools.md`.
+
+---
+
+## 16. Robot control: the plate-handling arm
+
+A six-axis arm that takes finished plates off the printers. Ported from the
+branch `integration/robot-control` (three commits by fer4036) onto this branch,
+2026-08-24 — see
+`docs/superpowers/specs/2026-08-24-robot-control-port-design.md`.
+
+**Default off.** `create_app(robot=None)` disables every `/api/robot` route,
+and `--robot-mode` defaults to `disabled`. This is the same "None means inert"
+convention `queue`, `detection`, `slicer`, `ledger` and `auth` already use, so
+a deployment with no arm is unaffected by the feature existing.
+
+### 16.1 One backend, one thread, one command at a time
+
+`RobotManager` owns a single backend and a single worker thread fed by a
+1-deep queue. **Motion is serialized:** while a command is running, a second
+`submit()` raises `RobotBusy` and the route answers **409**. This is the whole
+safety story at the API level — nothing else in the system can put two
+concurrent goals into MoveIt.
+
+The manager holds its lock over its own state (`_state`, `_active`, `_last`,
+`_error`) and **never across a backend call**. `snapshot()` copies state under
+the lock and calls `telemetry()` outside it, which is what lets `/ws` poll a
+wedged arm without stalling the event loop.
+
+Backends are **duck-typed**, not a class hierarchy. Required:
+`execute(action, params)`, `cancel()`, `telemetry()`, `close()`. Optional:
+`camera_frame()`, `configure_camera(index)` — only the ROS backend has a
+camera, and `RobotManager` checks with `hasattr` before reaching for either.
+Calling through unconditionally made `GET /api/robot/camera/frame` raise
+`AttributeError` — a **500** — under `--robot-mode mock`, which is the mode the
+page is developed in. "No camera on this backend" and "no frame captured yet"
+are the same answer to a browser, and that answer is **404**.
+
+| Backend | Needs | Used for |
+|---|---|---|
+| `MockRobotBackend` | nothing | the test suite and all GUI work |
+| `RosRobotBackend` | ROS 2 Humble, MoveIt, `rclpy`, and the `ar4Automating3DPrinter` repo | Gazebo (`--robot-sim`) and the physical arm |
+
+`RosRobotBackend` **adapts** the command contract onto `printerAutomation`
+methods; it deliberately does not reimplement retries, TF checks, marker
+handling or gripper sequencing. The automation package stays the single source
+of truth for those.
+
+**Every ROS import is lazy**, inside `RosRobotBackend.__init__`, and the
+backend is constructed by the *worker thread*, not at startup. Two reasons, both
+load-bearing: `import server.robot` then works on Windows with no ROS at all,
+and `rclpy.init()` is called off the main thread — which uvicorn owns for
+signal handling, and where Python forbids installing signal handlers (hence
+`SignalHandlerOptions.NO`).
+
+### 16.2 `normalize_command` is the validation boundary
+
+A pure function, so the entire validation surface is testable with no hardware.
+It rejects an unknown action, a wrong-length vector, a non-numeric field, a
+`viewing_distance` outside 0.05–0.50 m, a bad jog axis, a zero jog, and a jog
+over 0.05 m (or 0.2618 rad) — **before a MoveIt goal exists**. A rejected
+command is a **400** that never reaches the arm.
+
+The ROS backend then checks again at dispatch: `assert_motion_safe()` for every
+motion, `_require_camera_ready()` before anything vision-dependent (stale
+colour frame, missing calibration, unknown optical frame), and
+`_require_manipulation_hardware()` before any gripper motion. That last one
+exists so a physical pick can never report success through a no-op gripper.
+These are early, readable failures for the GUI; the automation package checks
+again at every low-level move.
+
+### 16.3 Routes and the live payload
+
+All six sit under `/api/`, so the `_require_session` middleware (§2.1) already
+gates them when a password is configured — including the MJPEG frame route.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/robot/status` | state, active/last command, telemetry |
+| POST | `/api/robot/commands` | **202** accepted; 400 invalid, 409 busy, 503 unavailable |
+| POST | `/api/robot/commands/{id}/cancel` | 404 when that command is not active |
+| GET | `/api/robot/cameras` | V4L2 devices; `[]` on Windows/macOS, not an error |
+| PUT | `/api/robot/camera` | select or disable the webcam |
+| GET | `/api/robot/camera/frame` | JPEG, `no-store`; 404 when there is none |
+
+`/ws` carries `{"printers": [...], "robot": {...}}`. **The `robot` key is
+present only when a robot is configured**, which is what lets the browser tell
+"this server has no arm" (key absent, so `robot` stays `null`) from "there is an
+arm and it is in trouble" (key present, `available: false`). Those need
+different messages — the same distinction `detection_available` exists to draw
+for the detector (§3.2).
+
+### 16.4 The page, and two races worth knowing about
+
+`Robot.jsx` (Control group, `scope: "fleet"` — one arm serves the whole lab, so
+it must not appear to follow the printer switcher).
+
+**Nothing moves until the operator arms it.** A checkbox — *"I have verified
+the workspace is clear"* — gates every motion control, on top of `wsUp`,
+`available`, and the backend's own safety preflight.
+
+**Jog dispatch holds its slot until the server confirms completion.** Two bugs
+lived here, both found by clicking the pad fast during the port:
+
+1. `busy` and `submitting` are *state*, so they stay stale for a whole render.
+   Several clicks in one tick all passed the guard; the first got a 202 and the
+   rest a 409. A **ref** claimed synchronously fixes that.
+2. Even then, `run()` resolves at **202 — accepted, not completed** — and
+   `busy` is telemetry that lags by up to one WebSocket poll. Releasing on
+   either signal dispatches the next jog into an arm that has not stopped.
+
+The slot is therefore released only when **our command id** appears as
+`last_command` with no `active_command` — the only signal that actually means
+"that jog is over". Clicks made meanwhile coalesce, capped at 50 mm per axis.
+Verified in a browser: three rapid clicks at a 5 mm step apply exactly 15 mm,
+with no 409 and no error banner.
+
+### 16.5 What is verified, and what is not
+
+Following §1.1's rule that "verified" must say *on what*:
+
+**Verified on the Windows dev box (2026-08-24), `--robot-mode mock`:** the
+module imports with no ROS present; all six routes over a real uvicorn
+(202/400/404/409/503 each as documented); the `/ws` frame carrying both keys;
+the page rendering in the Control group with the Fleet-wide badge; the
+arm-to-enable interlock disabling and enabling every motion control; a joint
+goal round-tripping degrees → radians → telemetry; `home`; and jog coalescing.
+Plus `python -m pytest -q` and `npm test`.
+
+**Ported but NOT verified anywhere — no ROS on this machine:** everything
+`RosRobotBackend` does. Backend startup, MoveIt planning, ArUco detection,
+camera preflight, gripper actuation, xArm teach mode, and plate
+pickup/place/transfer/scrape on the physical arm. The `--robot-mode ros` path
+has never been executed since the port. Treat §16.1–16.3's description of it as
+*what the code says*, not as a hardware claim.
+
+**Not built, deliberately.** The page is standalone: marker IDs are typed by
+hand, and **nothing connects a finished print to an automatic plate pickup** —
+no queue hook, no run-completion trigger, no printer→marker mapping. That
+wiring (queue → print finishes → arm clears the plate → next job starts) is the
+obvious next feature and exists on no branch. It needs its own requirements
+pass, not an extrapolation from this one.

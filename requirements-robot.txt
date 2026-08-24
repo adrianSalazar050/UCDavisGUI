@@ -1,0 +1,32 @@
+# Extra dependencies for the ROS robot backend (`--robot-mode ros`).
+#
+# ONLY needed on the Linux machine that drives the arm. The dashboard itself,
+# `--robot-mode mock`, and the whole test suite need nothing from this file --
+# server/robot.py imports rclpy lazily, inside RosRobotBackend.__init__, so it
+# is never touched unless you actually ask for the ROS backend.
+#
+# This is a SEPARATE file rather than tighter pins in requirements.txt for the
+# same reason requirements-desktop.txt is separate: the constraints below are
+# real, but they are real only here. Folding `numpy<2` into the base file would
+# force a downgrade on every install -- including the Windows dev box and the
+# ultralytics training stack -- to satisfy a rule that only binds on the ROS
+# machine.
+#
+# You also need ROS 2 Humble, MoveIt, and the automation repo itself
+# (ar4Automating3DPrinter, found via AR4_AUTOMATION_REPO or --robot-repo).
+# Those are apt/colcon installs, not pip ones, so they are not listed here.
+# See master.md section 16.
+-r requirements.txt
+
+# ROS 2 Humble's cv_bridge and transforms3d are built against the NumPy 1.x
+# C API. NumPy 2.x fails at import before the robot backend can start.
+numpy>=1.26,<2
+
+# Kept in step with the NumPy 1.x pin above: the 4.12+ wheels are built
+# against NumPy 2.
+opencv-python>=4.9,<4.12
+
+# Ubuntu's packaged transforms3d still references np.float, removed in NumPy
+# 1.24; tf_transformations imports this package during robot startup, so pin a
+# version that does not.
+transforms3d>=0.4.2
