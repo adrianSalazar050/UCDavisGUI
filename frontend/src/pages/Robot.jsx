@@ -17,6 +17,11 @@ import StatusPill from "../components/ui/StatusPill.jsx";
 const DEFAULT_JOINTS_DEG = ["0", "-15", "20", "0", "0", "0"];
 const EMPTY_POSE = ["", "", "", "", "", ""];
 const RAD = Math.PI / 180;
+// Mirrors MARKER_ROLES in server/robot.py; the server rejects anything else.
+const MARKER_ROLES = ["printer", "box", "scrape", "other"];
+// The thresholds VisionCommissioning.solve() applies before it will write
+// calibration/<robot>_hand_eye.json. Shown so a rejected solve explains itself.
+const SOLVE_LIMITS = { translationM: 0.01, rotationDeg: 3.0 };
 
 
 function parseVector(values, labels) {
@@ -65,6 +70,91 @@ function formatNumber(value, digits = 3) {
 }
 
 
+function gripperLabel(gripper) {
+  if (!gripper?.kind) return "Not configured";
+  if (gripper.kind === "cgpio") {
+    return `Controller output ${gripper.output ?? "CO0"}`;
+  }
+  if (gripper.kind === "lite6_service") return "Lite 6 built-in";
+  if (gripper.kind === "moveit_action") return "MoveIt gripper action";
+  return gripper.kind;
+}
+
+
+function RoleSelect({ label, value, onChange }) {
+  return (
+    <Field label={label}>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {MARKER_ROLES.map((role) => (
+          <option key={role} value={role}>{role}</option>
+        ))}
+      </select>
+    </Field>
+  );
+}
+
+
+// The detector no longer stacks a pose panel onto the video frame -- it made
+// the camera image small in a browser preview. Marker detail comes off the
+// telemetry instead and is rendered here, beside the feed.
+function MarkerDetail({ marker, role }) {
+  const orient = marker?.orientInWorld ?? {};
+  const position = marker?.positionInWorld ?? [];
+  return (
+    <div className="robot-marker">
+      <div className="robot-marker__head">
+        <strong>ArUco {marker?.id}</strong>
+        <StatusPill status={marker?.estimated ? "warn" : "ok"}>
+          {marker?.estimated ? "Estimated" : "Detected"}
+        </StatusPill>
+      </div>
+      <div className="robot-marker__meta">
+        {marker?.dict_name ?? "unknown"}
+        {role ? ` · ${role}` : ""}
+        {Number(marker?.distanceFromCamera) > 0
+          ? ` · ${formatNumber(marker.distanceFromCamera, 3)} m from camera`
+          : ""}
+      </div>
+      <div className="robot-marker__pose">
+        <span>X {formatNumber(position[0])}</span>
+        <span>Y {formatNumber(position[1])}</span>
+        <span>Z {formatNumber(position[2])}</span>
+        <span>R {formatNumber(orient.roll, 1)}°</span>
+        <span>P {formatNumber(orient.pitch, 1)}°</span>
+        <span>Y {formatNumber(orient.yaw, 1)}°</span>
+      </div>
+    </div>
+  );
+}
+
+
+function SolveReadout({ title, solve }) {
+  if (!solve) return null;
+  const metrics = solve.metrics ?? {};
+  const translation = solve.translation_m ?? [];
+  return (
+    <div className={solve.quality_passed ? "state-ok robot-notice"
+                                         : "state-warn robot-notice"}>
+      <strong>
+        {title} · {solve.method ?? "—"} · {solve.sample_count ?? 0} samples ·{" "}
+        {solve.quality_passed ? "accepted" : "rejected"}
+      </strong>
+      <div>
+        Translation RMSE {formatNumber(metrics.translation_rmse_m, 4)} m
+        (limit {SOLVE_LIMITS.translationM.toFixed(4)}) · rotation RMSE{" "}
+        {formatNumber(metrics.rotation_rmse_deg, 2)}°
+        (limit {SOLVE_LIMITS.rotationDeg.toFixed(2)})
+      </div>
+      <div>
+        Camera offset from the gripper: X {formatNumber(translation[0], 4)} ·
+        Y {formatNumber(translation[1], 4)} ·
+        Z {formatNumber(translation[2], 4)} m
+      </div>
+    </div>
+  );
+}
+
+
 export default function Robot({ robot, wsUp }) {
   const [armed, setArmed] = useState(false);
   const [jointValues, setJointValues] = useState(DEFAULT_JOINTS_DEG);
@@ -81,6 +171,10 @@ export default function Robot({ robot, wsUp }) {
   const [cameraFrameKey, setCameraFrameKey] = useState(0);
   const [scanPosition, setScanPosition] = useState(["0.30", "0.00", "0.30"]);
   const [scanEuler, setScanEuler] = useState(["0", "0", "0"]);
+  const [observationName, setObservationName] = useState("");
+  const [observationMarkerId, setObservationMarkerId] = useState("");
+  const [observationRole, setObservationRole] = useState("printer");
+  const [confirmRole, setConfirmRole] = useState("printer");
   const jogDispatching = useRef(false);
   // The id of the jog the server has accepted but not yet reported finished.
   // See the release effect below for why 202 is not good enough.
@@ -200,6 +294,22 @@ export default function Robot({ robot, wsUp }) {
   const destination = Number(destinationId);
   const scraper = Number(scrapeId);
   const goalDisabled = !controlsEnabled || submitting;
+  const gripper = robot?.gripper;
+  // Only disable on a POSITIVE "no gripper here". An older backend sends no
+  // gripper key at all, and greying the controls out on a missing key would
+  // hide a working gripper behind a telemetry gap.
+  const gripperMissing = Boolean(
+    gripper && (!gripper.kind || gripper.disabled));
+  const vision = robot?.vision;
+  // Commissioning reads the camera and the current TF but never plans a goal,
+  // so it deliberately does NOT require the movement interlock: the operator
+  // captures samples while hand-guiding the wrist in teach mode, which is
+  // exactly when the safety preflight is (correctly) refusing motion.
+  const visionDisabled = Boolean(
+    !wsUp || !robot?.available || !vision?.available || busy || submitting);
+  const samples = Number(vision?.sample_count ?? 0);
+  const markerRoles = vision?.marker_roles ?? {};
+  const observations = vision?.observation_poses ?? [];
   const jogEnabled = Boolean(
     wsUp && robot?.available && safetyReady && armed &&
     (!busy || robot?.active_command?.action === "jog_pose"),
@@ -276,13 +386,30 @@ export default function Robot({ robot, wsUp }) {
     setError(null);
     try {
       await configureRobotCamera(cameraIndex === "" ? null : Number(cameraIndex));
+      // configure_camera reopens the capture in place -- it does NOT restart
+      // the backend, and saying so sent operators looking for a reconnect
+      // that never happens.
       setNotice(cameraIndex === "" ? "Robot camera disabled" :
-        `Camera /dev/video${cameraIndex} selected; robot backend restarting`);
+        `Camera /dev/video${cameraIndex} selected`);
     } catch (err) {
       setError(err.message);
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const saveObservation = async () => {
+    const name = observationName.trim();
+    if (!name) {
+      setError("Name the observation pose before saving it");
+      return;
+    }
+    const command = await run("save_observation", {
+      name,
+      role: observationRole,
+      marker_id: observationMarkerId === "" ? null : Number(observationMarkerId),
+    });
+    if (command) setObservationName("");
   };
 
   const scanEstimatedLocation = async () => {
@@ -504,11 +631,41 @@ export default function Robot({ robot, wsUp }) {
 
           <Card title="Gripper">
             <div className="robot-goal-buttons">
-              <Button disabled={goalDisabled}
+              <Button disabled={goalDisabled || gripperMissing}
                       onClick={goal("gripper_open")}>Open gripper</Button>
-              <Button disabled={goalDisabled}
+              <Button variant={gripper?.command === "close" ? "primary"
+                                                            : "secondary"}
+                      disabled={goalDisabled || gripperMissing}
                       onClick={goal("gripper_close")}>Close gripper</Button>
             </div>
+            {gripper && (
+              <div className="robot-readout">
+                <div>
+                  <span>Hardware</span>
+                  <strong>{gripperLabel(gripper)}</strong>
+                </div>
+                <div>
+                  <span>Last commanded</span>
+                  <strong>{gripper.command === "close" ? "Closed"
+                         : gripper.command === "open" ? "Open" : "Unknown"}</strong>
+                </div>
+              </div>
+            )}
+            {gripperMissing && (
+              <div className="state-warn robot-notice">
+                No gripper is configured for this arm, so pick, place, transfer
+                and scrape are blocked before their first waypoint rather than
+                reporting a grasp that never happened.
+              </div>
+            )}
+            {gripper && !gripper.sensed && !gripperMissing && (
+              <p className="robot-help">
+                “Last commanded” is what was asked for, not what the jaws did —
+                this gripper has no feedback line. The output latches, so it
+                survives a backend restart, and an emergency stop drops it
+                without reporting anything: “Unknown” means unknown, not open.
+              </p>
+            )}
             {robot?.sim && (
               <p className="robot-help">
                 Gripper actuation is disabled by the automation package in simulation.
@@ -520,15 +677,19 @@ export default function Robot({ robot, wsUp }) {
             {Array.isArray(robot?.markers) && robot.markers.length > 0 ? (
               <div className="robot-marker-list">
                 {robot.markers.map((data) => (
-                  <div key={`${data?.dict_name}-${data?.id}`}>
-                    <strong>ArUco {data?.id}</strong>
-                    <span>{data?.estimated ? "Estimated" : "Detected"}</span>
-                  </div>
+                  <MarkerDetail key={`${data?.dict_name}-${data?.id}`}
+                                marker={data}
+                                role={markerRoles[String(data?.id)]} />
                 ))}
               </div>
             ) : (
               <p className="robot-help">No markers have been registered yet.</p>
             )}
+            <p className="robot-help">
+              Positions are in the automation “good” frame; orientation is XYZ
+              Euler in degrees. An estimated marker has never been measured by
+              the camera — scan it before picking from it.
+            </p>
           </Card>
           <Card title="ArUco detector">
             <div className="robot-readout">
@@ -549,6 +710,11 @@ export default function Robot({ robot, wsUp }) {
                 <span>Visible / known</span>
                 <strong>{robot?.camera ?
                   `${robot.camera.visible_marker_count} / ${robot.camera.known_marker_count}` : "—"}</strong>
+              </div>
+              <div>
+                <span>In view now</span>
+                <strong>{(robot?.camera?.visible_marker_ids ?? []).length > 0
+                  ? robot.camera.visible_marker_ids.join(", ") : "None"}</strong>
               </div>
             </div>
             {robot?.camera?.last_error && (
@@ -628,7 +794,10 @@ export default function Robot({ robot, wsUp }) {
           <Card title="Manual guidance">
             <p className="robot-help">
               Support the arm and keep the emergency stop accessible before
-              enabling UFACTORY teach mode.
+              enabling UFACTORY teach mode. Entering teach mode hands the
+              trajectory controller back from MoveIt, so the safety preflight
+              below will show <code>trajectory_controller</code> red and refuse
+              motion until you return to MoveIt. That is expected.
             </p>
             <div className="robot-form__actions">
               <Button disabled={!robot?.available || busy || submitting}
@@ -637,6 +806,12 @@ export default function Robot({ robot, wsUp }) {
                       disabled={!robot?.available || busy || submitting}
                       onClick={() => run("teach_disable")}>Return to MoveIt</Button>
             </div>
+            {robot?.sim && (
+              <p className="robot-help">
+                Teach mode is physical-only; the automation package refuses it
+                against Gazebo.
+              </p>
+            )}
           </Card>
 
           <Card title="Scan estimated location">
@@ -653,14 +828,175 @@ export default function Robot({ robot, wsUp }) {
           </Card>
 
           <Card title="ChArUco hand-eye calibration">
+            {!vision?.available ? (
+              <div className="state-warn robot-notice">
+                {vision?.error ??
+                  "This backend has no vision commissioning module."}
+              </div>
+            ) : (
+              <>
+                <p className="robot-help">
+                  Keep the board fixed and in view. Hand-guide the wrist with
+                  teach mode and capture {vision.recommended_sample_count ?? 15}
+                  {" "}varied poses — each must differ from the last by at
+                  least 10 mm or 5°, and the arm must be stationary. A solve
+                  that passes is written to the automation repo and applied
+                  immediately, with no restart.
+                </p>
+                <div className="robot-readout">
+                  <div>
+                    <span>Session</span>
+                    <strong>{vision.session_active ? "Active" : "Stopped"}</strong>
+                  </div>
+                  <div>
+                    <span>Samples</span>
+                    <strong>
+                      {samples} / {vision.recommended_sample_count ?? 15}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Board in view</span>
+                    <strong>{vision.last_detection?.valid
+                      ? `${vision.last_detection.corner_count} corners`
+                      : "Not detected"}</strong>
+                  </div>
+                </div>
+                {vision.session_active && vision.last_detection?.error && (
+                  <div className="state-warn robot-notice">
+                    {vision.last_detection.error}
+                  </div>
+                )}
+                <div className="robot-goal-buttons">
+                  {vision.session_active ? (
+                    <>
+                      <Button variant="primary" disabled={visionDisabled}
+                              onClick={goal("calibration_capture")}>
+                        Capture sample
+                      </Button>
+                      <Button disabled={visionDisabled || samples === 0}
+                              onClick={goal("calibration_discard")}>
+                        Discard last
+                      </Button>
+                      <Button disabled={visionDisabled || samples < 8}
+                              onClick={goal("calibration_solve")}>
+                        Solve hand-eye
+                      </Button>
+                      <Button disabled={visionDisabled}
+                              onClick={goal("calibration_stop")}>
+                        End session
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button variant="primary" disabled={visionDisabled}
+                              onClick={goal("calibration_start", { clear: false })}>
+                        {samples > 0 ? "Resume session" : "Start session"}
+                      </Button>
+                      <Button disabled={visionDisabled || samples === 0}
+                              onClick={goal("calibration_start", { clear: true })}>
+                        Start over
+                      </Button>
+                    </>
+                  )}
+                </div>
+                {vision.session_active && samples < 8 && (
+                  <p className="robot-help">
+                    Solving needs at least 8 samples, spanning 50 mm of travel
+                    and 20° of rotation.
+                  </p>
+                )}
+                <SolveReadout title="Last solve" solve={vision.last_solve} />
+                {vision.hand_eye ? (
+                  <SolveReadout title="Active calibration"
+                                solve={vision.hand_eye} />
+                ) : (
+                  <p className="robot-help">
+                    No accepted calibration yet — marker poses fall back to the
+                    URDF TF chain.
+                  </p>
+                )}
+              </>
+            )}
+          </Card>
+
+          <Card title="Observation poses">
             <p className="robot-help">
-              Keep the board fixed. Capture 15–25 varied wrist poses before
-              solving camera-to-robot mapping. Calibration remains unavailable
-              until a valid USB camera is selected.
+              Saves the arm's current configuration under a name so a scan can
+              be repeated exactly. Saving reads the current TF and works in
+              teach mode; replaying one moves the arm and needs the movement
+              interlock above.
             </p>
-            <div className="state-warn robot-notice">
-              Guided browser capture will be enabled after camera preview is verified.
+            <div className="robot-goal-fields robot-goal-fields--three">
+              <Field label="Name" value={observationName} maxLength="64"
+                     onChange={(event) => setObservationName(event.target.value)} />
+              <Field label="Marker ID (optional)" type="number" min="0" step="1"
+                     value={observationMarkerId}
+                     onChange={(event) => setObservationMarkerId(event.target.value)} />
+              <RoleSelect label="Role" value={observationRole}
+                          onChange={setObservationRole} />
             </div>
+            <div className="robot-form__actions">
+              <Button variant="primary" disabled={visionDisabled}
+                      onClick={saveObservation}>
+                Save current pose
+              </Button>
+            </div>
+            {observations.length > 0 ? (
+              <div className="robot-observation-list">
+                {observations.map((item) => (
+                  <div key={item.name} className="robot-observation">
+                    <div>
+                      <strong>{item.name}</strong>
+                      <span className="robot-observation__meta">
+                        {item.role}
+                        {item.marker_id == null ? "" : ` · ArUco ${item.marker_id}`}
+                      </span>
+                    </div>
+                    <Button size="sm" disabled={goalDisabled}
+                            onClick={goal("goto_observation", { name: item.name })}>
+                      Go
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="robot-help">No observation poses saved yet.</p>
+            )}
+          </Card>
+
+          <Card title="Marker roles">
+            <p className="robot-help">
+              Records what a marker is for, once the camera has actually
+              measured it. An estimated marker is refused: confirming one would
+              record a guess as ground truth.
+            </p>
+            <div className="robot-goal-fields">
+              <Field label="Marker ID" type="number" min="0" step="1"
+                     value={markerId}
+                     onChange={(event) => setMarkerId(event.target.value)} />
+              <RoleSelect label="Role" value={confirmRole}
+                          onChange={setConfirmRole} />
+            </div>
+            <div className="robot-form__actions">
+              <Button variant="primary" disabled={visionDisabled}
+                      onClick={goal("confirm_marker", {
+                        marker_id: marker, role: confirmRole,
+                      })}>
+                Confirm marker {Number.isFinite(marker) ? marker : ""}
+              </Button>
+            </div>
+            {Object.keys(markerRoles).length > 0 ? (
+              <div className="robot-readout">
+                {Object.entries(markerRoles).map(([id, role]) => (
+                  <div key={id}>
+                    <span>ArUco {id}</span>
+                    <strong>{role}</strong>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="robot-help">No markers confirmed yet.</p>
+            )}
           </Card>
         </div>
       </Section>

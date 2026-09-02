@@ -30,3 +30,10 @@ opencv-python>=4.9,<4.12
 # 1.24; tf_transformations imports this package during robot startup, so pin a
 # version that does not.
 transforms3d>=0.4.2
+
+# SciPy's Rotation is used directly by server/robot.py's jog path and by the
+# automation package's vision commissioning (master.md section 16.5). ROS
+# Humble ships it as a system package on the arm machine, but a venv there
+# will not see it, and the failure surfaces only when the first jog is
+# dispatched -- long after the backend reports itself ready.
+scipy>=1.10

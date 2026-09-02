@@ -27,7 +27,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 HISTORICAL = "superpowers"
 
 MAINTAINED = ("README.md", "master.md", "CONNECTION.md",
-              "FAILURE_DETECTOR_REPORT.md", "FRONTEND-STACK-GUIDE.md")
+              "FAILURE_DETECTOR_REPORT.md", "FRONTEND-STACK-GUIDE.md",
+              "RUNNING-UBUNTU.md")
 
 # [text](target) and [text](target#anchor); the anchor is not verified.
 LINK = re.compile(r"\[[^\]]*\]\(([^)#]+?)(?:#[^)]*)?\)")

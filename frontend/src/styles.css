@@ -1469,9 +1469,11 @@ p.muted { margin: 0; font-size: 13px; }
   color: var(--text);
   font: inherit;
 }
+/* One marker per row: since the detector stopped drawing its pose panel onto
+   the video frame, this list is where an operator reads marker poses. */
 .robot-marker-list {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--sp-2);
 }
 .robot-marker-list > div {
@@ -1484,12 +1486,49 @@ p.muted { margin: 0; font-size: 13px; }
 }
 .robot-marker-list strong { color: var(--text); font-size: 13px; }
 .robot-marker-list span { color: var(--text-muted); font-size: 11px; }
+.robot-marker__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.robot-marker__meta { color: var(--text-muted); font-size: 11px; }
+.robot-marker__pose {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 2px var(--sp-2);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.robot-marker__pose span { color: var(--text); font-size: 11px; }
+.robot-observation-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.robot-observation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-control);
+  background: var(--surface-2);
+}
+.robot-observation strong { color: var(--text); font-size: 13px; }
+.robot-observation__meta {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+}
 @media (max-width: 850px) {
   .robot-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   .robot-vector,
   .robot-readout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .robot-marker__pose { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .robot-form__actions { align-items: flex-start; flex-direction: column; }
   .robot-goal-fields--three { grid-template-columns: 1fr; }
   .jog-layout { gap: var(--sp-3); }

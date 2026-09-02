@@ -6,13 +6,14 @@ existing specialist docs rather than restating them.
 | Doc | What it covers |
 |---|---|
 | `README.md` | Deliberately minimal front door: install, `python -m server --lan`, first-time printer setup, and the detector's exit criterion. Everything else points here |
+| `RUNNING-UBUNTU.md` | Terminal-by-terminal bring-up on Ubuntu: one-time setup, the five run scenarios, environment variables, troubleshooting, shutdown order |
 | `CONNECTION.md` | Verified LAN/MQTT connection parameters (A1 and A1 mini), TLS specifics, prerequisites, troubleshooting |
 | `FAILURE_DETECTOR_REPORT.md` | YOLO training run, test metrics, webcam-resolution robustness study, and §8 the A1-camera domain adaptation |
 | `desktop/README.md`, `desktop/LINUX-BUILD.md` | Building the Electron installer (Windows) and the AppImage (Mint) — §8 |
 | `docs/superpowers/` | Per-feature design specs and implementation plans — **historical records, not maintained**. [Index + what's stale in them](docs/superpowers/README.md) |
 | `FRONTEND-STACK-GUIDE.md` | ⚠ describes a *different* project (VERA/HORUS) whose conventions `frontend/` copied. Read for conventions, not facts |
 
-Only `master.md` and the four other root-level docs are **maintained**;
+Only `master.md` and the five other root-level docs are **maintained**;
 `docs/superpowers/` is a historical record by design, and `test_docs.py` (§10)
 enforces the difference.
 
@@ -543,7 +544,7 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 | `runs.py` | Finding the newest captured frame | `find_active_run`, `newest_frame`, `ACTIVE_WINDOW_S` |
 | `ledger.py` | `ledger.db` only — schema, forward-only migrations, row helpers (§13–§15) | `Ledger`, `MIGRATIONS`, `SCHEMA_VERSION`, `END_STATES`, `PIECE_STATUSES`, `RUN_WRITABLE`, `SPOOL_WRITABLE`, `SPOOL_FREE_STATUSES`, `set_default_recipe`, `set_loaded_spool`, `unload_spool`, `add_consumption` |
 | `runlog.py` | Turning `registry.summaries()` diffs into run/event rows (§13) | `RunRecorder`, `RECONCILE_DEADLINE_S` |
-| `robot.py` | Serialized robot motion; mock + ROS backends (§16) | `RobotManager`, `MockRobotBackend`, `RosRobotBackend`, `normalize_command`, `list_video_devices`, `ACTIONS`, `RobotBusy`, `RobotUnavailable`, `RobotCommandError` |
+| `robot.py` | Serialized robot motion and vision commissioning; mock + ROS backends (§16) | `RobotManager`, `MockRobotBackend`, `RosRobotBackend`, `normalize_command`, `list_video_devices`, `ACTIONS`, `VISION_STATE_ACTIONS`, `PHYSICAL_ONLY_ACTIONS`, `MARKER_ROLES`, `RobotBusy`, `RobotUnavailable`, `RobotCommandError` |
 | `partstore.py` | Part model bytes on disk, pure of the DB (§14) | `PartStore` |
 | `auth.py` | Shared-password auth for LAN serving (§2.1) | `Auth`, `is_loopback`, `LOOPBACK_HOSTS` — `build_auth` (the fail-closed rule) lives in `__main__.py`, not here |
 | `__main__.py` | CLI entry, wiring, `--mock` seeding, `--host`/`--lan`/`build_auth` (§2.1, §8) | `main`, `real_factory`, `mock_factory`, `MOCK_SEED`, `build_auth`, `resolve_host`, `resolve_password`, `read_password_file`, `local_ipv4s`, `lan_url_lines`, `DEFAULT_HOST`, `LAN_HOST`, `PASSWORD_FILE` |
@@ -1539,7 +1540,7 @@ it will enable a control that moves hardware.
 | `parts` | Library | `Parts.jsx` | Parts catalogue: `PartList`, `PartForm`, `RecipeEditor`, per-recipe "Slice for &lt;printer&gt;" (§14) |
 | `inventory` | Library | `Inventory.jsx` | Filament spools: `SpoolList` with derived remaining grams + low-stock highlight, `SpoolForm`, and the per-printer `LoadedSpool` control (§15) |
 | `printers` | Setup | `Printers.jsx` | Printer grid (`PrinterCard`, with inline `EditPrinterForm`) + `AddPrinterForm` behind a disclosure |
-| `robot` | Control | `Robot.jsx` | The plate-handling arm (§16): arm-to-enable interlock, home/stop, joint and Cartesian goals, jog pad, ArUco pick/place/transfer/scrape, gripper, live joint + pose readouts, camera selection and preview |
+| `robot` | Control | `Robot.jsx` | The plate-handling arm (§16): arm-to-enable interlock, home/stop, joint and Cartesian goals, jog pad, ArUco pick/place/transfer/scrape, gripper, live joint + pose readouts, per-marker pose detail, camera selection and preview, teach mode, and the ChArUco hand-eye / observation-pose / marker-role commissioning workflow (§16.5) |
 
 The key `printers` is a registry key; the `printers` **prop** every page
 receives is the live summary list. They are unrelated.
@@ -1624,7 +1625,7 @@ route either way, and the no-rotation path stays byte-identical.
 | Slice jobs | Polling `fetchSliceJobs`, plus an immediate refetch on submit | 2 s |
 | Run history (list) | Polling `fetchRuns` + refetch after every correction; the open run's *detail* is fetched on selection, not polled | 5 s |
 | Parts / spools | Polling `fetchParts` / `fetchSpools` + refetch after every mutation | 8 s |
-| Robot state (joints, pose, markers, camera health, active/last command) | WebSocket `/ws`, same frame as the printers (§16.3) | Pushed on change, same cadence |
+| Robot state (joints, pose, markers, camera health, safety interlocks, commissioning session, active/last command) | WebSocket `/ws`, same frame as the printers (§16.3) | Pushed on change, same cadence |
 | Robot camera preview | Polling `/api/robot/camera/frame`, and only while telemetry says a frame exists | 500 ms |
 
 The cadences are ordered by how fast the underlying thing actually moves, not
@@ -2022,7 +2023,7 @@ worth knowing:
 | `test_slicer.py` | Profile flattening + cycle detection, `ProfileIndex`, `find_slicer`, `build_argv`, `run_slice` against an injected fake subprocess |
 | `test_slicepresets.py` | Tier resolution (the `A1`/`A1M` token split, the anchored regex, the decoy-name trap), filament detection off a fake MQTT state |
 | `test_slicejobs.py` | The full `SliceCoordinator` state machine against a fake registry/queue and an injected fake `run_slice` — success chains to upload+queue, each failure step latches and leaves the queue untouched, the finished-job cap |
-| `test_robot.py` | `normalize_command`'s whole validation surface, `RobotManager` serialization (one command at a time, busy refusal, cancel, last-command record), the optional-camera contract, and the robot routes via `TestClient` including 404-when-disabled (§16) |
+| `test_robot.py` | `normalize_command`'s whole validation surface, `RobotManager` serialization (one command at a time, busy refusal, cancel, last-command record), the optional-camera contract, the vision-commissioning contract against the mock backend (session lifecycle, sample thresholds, observation-pose round trip, refusing an unmeasured marker), the gripper telemetry contract including the older-automation-checkout fallback (§16.6), and the robot routes via `TestClient` including 404-when-disabled (§16) |
 | `test_auth.py` | `Auth` (hashing, `compare_digest`, session tokens), `is_loopback`, `build_auth`'s fail-closed rule (§2.1), and `--lan`'s resolution helpers — including `test_lan_cannot_open_a_hole`, which asserts the shortcut still refuses to start with no password anywhere (§8) |
 | `test_ledger.py` | The schema and every row helper: forward-only migration v1→v2→v3 on a real file, the write allowlists, `close_run`'s single-transition return, derived `remaining_grams`, the loaded-spool clear-then-set, badge auto-vs-human, corrupt-file quarantine (§13–§15) |
 | `test_ledger_api.py` | Every `/api/runs`, `/api/pieces`, `/api/badges`, `/api/parts`, and `/api/spools` route, including the 409s, the 400 guards, and that all of them 404 when `ledger=None` |
@@ -2736,8 +2737,14 @@ are the same answer to a browser, and that answer is **404**.
 
 `RosRobotBackend` **adapts** the command contract onto `printerAutomation`
 methods; it deliberately does not reimplement retries, TF checks, marker
-handling or gripper sequencing. The automation package stays the single source
-of truth for those.
+handling, gripper sequencing, teach-mode controller handover or hand-eye
+solving. The automation package stays the single source of truth for those.
+
+It also owns one `VisionCommissioning` (§16.5), built from the same repo path.
+That construction is wrapped in a `try`: the module pulls `cv2.aruco`'s ChArUco
+surface and the automation repo's `calibration/` package, and neither is worth
+losing plate handling over. A failure leaves `vision = None`, and the reason
+travels to the browser in telemetry rather than raising.
 
 **Every ROS import is lazy**, inside `RosRobotBackend.__init__`, and the
 backend is constructed by the *worker thread*, not at startup. Two reasons, both
@@ -2750,17 +2757,37 @@ signal handling, and where Python forbids installing signal handlers (hence
 
 A pure function, so the entire validation surface is testable with no hardware.
 It rejects an unknown action, a wrong-length vector, a non-numeric field, a
-`viewing_distance` outside 0.05–0.50 m, a bad jog axis, a zero jog, and a jog
-over 0.05 m (or 0.2618 rad) — **before a MoveIt goal exists**. A rejected
-command is a **400** that never reaches the arm.
+`viewing_distance` outside 0.05–0.50 m, a bad jog axis, a zero jog, a jog
+over 0.05 m (or 0.2618 rad), an empty or over-long observation-pose name, a
+marker role outside `MARKER_ROLES`, and a non-boolean flag — **before a MoveIt
+goal exists**. A rejected command is a **400** that never reaches the arm.
 
 The ROS backend then checks again at dispatch: `assert_motion_safe()` for every
 motion, `_require_camera_ready()` before anything vision-dependent (stale
 colour frame, missing calibration, unknown optical frame), and
 `_require_manipulation_hardware()` before any gripper motion. That last one
-exists so a physical pick can never report success through a no-op gripper.
+exists so a physical pick can never report success through a no-op gripper —
+it tests `node.gripper is None`, which is exactly what an uncommissioned arm
+reports, so the guard opens by itself the moment a real tool is configured
+upstream (§16.6).
 These are early, readable failures for the GUI; the automation package checks
 again at every low-level move.
+
+**Three action sets carve out the exceptions**, and they are the reason the
+dispatch order in `execute` is what it is:
+
+- `PHYSICAL_ONLY_ACTIONS` — teach mode and every `calibration_*` step. The
+  automation package refuses `set_xarm_mode` against Gazebo anyway, and a
+  Gazebo camera is mounted perfectly by construction, so solving there would
+  overwrite a real measurement with a meaningless one.
+- `VISION_STATE_ACTIONS` — the commissioning steps that read the camera and the
+  current TF but never plan a goal. They run **before** `assert_motion_safe()`,
+  because the operator captures samples while hand-guiding the wrist in teach
+  mode, which is exactly when the preflight is correctly refusing motion.
+  Routing them through the guard would make the feature unusable in the only
+  posture it is used in.
+- Everything else, `goto_observation` included, is motion and clears the guard
+  first.
 
 ### 16.3 Routes and the live payload
 
@@ -2782,6 +2809,14 @@ present only when a robot is configured**, which is what lets the browser tell
 arm and it is in trouble" (key present, `available: false`). Those need
 different messages — the same distinction `detection_available` exists to draw
 for the detector (§3.2).
+
+**Every commissioning step is a command, not a route.** `calibration_*`,
+`save_observation`, `goto_observation` and `confirm_marker` all go through
+`POST /api/robot/commands`, and their state comes back in the `vision` block of
+the same telemetry. That is not route-count thrift: the command queue is
+already the thing that guarantees one operation at a time, so a capture cannot
+land mid-jog and a multi-second `solve()` cannot overlap a plate pickup. New
+routes would have needed their own serialization, and would have got it wrong.
 
 ### 16.4 The page, and two races worth knowing about
 
@@ -2808,7 +2843,89 @@ The slot is therefore released only when **our command id** appears as
 Verified in a browser: three rapid clicks at a 5 mm step apply exactly 15 mm,
 with no 409 and no error banner.
 
-### 16.5 What is verified, and what is not
+### 16.5 Vision commissioning: hand-eye calibration from the browser
+
+Ported from `ar4Automating3DPrinter` commits `45a3c4c` and `9b3f666`
+(2026-09-01), which the 2026-08-24 port predates. `ar4_automation/vision_commissioning.py`
+exists in that repo purely to be driven by this GUI — nothing in the automation
+package imports it — and until this change the page carried a placeholder card
+promising the workflow "after camera preview is verified".
+
+**What the arm gained upstream, and what it costs here.**
+
+| Upstream change | What this repo had to do |
+|---|---|
+| `enter_teach_mode()` / `exit_teach_mode()` on `PoseReader` | Call them instead of `set_xarm_mode(2)` / `set_xarm_mode(1)`. The old calls left the ros2_control trajectory controller **active** while the operator hand-guided the wrist — MoveIt and the human owning the arm at once |
+| `set_trajectory_controller_active()`, plus a `trajectory_controller` entry in `safety_snapshot()` | Nothing: telemetry forwards `safety_snapshot()` wholesale and the page already renders every check. The page does explain that teach mode turns this one red *on purpose* |
+| `visible_marker_ids` in `stream.diagnostics()` | Surfaced as "In view now" beside the visible/known counts |
+| The detector stopped stacking its pose panel onto the video frame | The panel's content moved into the "Known markers" card: position, orientation, distance from camera, dictionary, and the confirmed role — one marker per row |
+| `stream.raw_frame`, an unannotated copy kept beside `frame` | Nothing directly; `VisionCommissioning` reads it so ChArUco estimation never sees the ArUco drawings |
+| OpenCV 4.7/4.11 compatibility shims for `detectMarkers` and `estimatePoseSingleMarkers` | Nothing — internal to the automation package |
+
+**The workflow.** Fix the ChArUco board (11×8, 15 mm squares, 11 mm markers,
+`DICT_4X4_50`) in view. Enter teach mode, hand-guide the wrist, capture ~15
+poses, solve. `capture_sample()` refuses a sample if the arm moved more than
+1 mm or 1° during a 0.15 s settle, or if the new pose is within 10 mm and 5° of
+the previous one — pose diversity is what the solve actually needs, and a
+rejected sample is cheaper than a rejected solve. `solve()` runs five OpenCV
+hand-eye methods and keeps the best by translation RMSE.
+
+**A rejected solve is still a successful command.** Its metrics are the feedback
+that tells the operator which poses to add, so the page renders them either way
+and only a passing result (≤ 10 mm and ≤ 3° RMSE) is written to
+`calibration/<robot>_hand_eye.json` and applied to the live node. The page
+shows "Last solve" and "Active calibration" as separate readouts for exactly
+this reason.
+
+**Observation poses and marker roles** are the other half. A named pose stores
+the joint vector plus the Cartesian pose; `goto_observation` replays the
+**joints**, because the operator saved that arm configuration and a Cartesian
+round-trip could pick a different IK branch. `confirm_marker` refuses a marker
+whose entry is still `estimated` — recording a seeded guess as a confirmed role
+is precisely the error the check exists to prevent.
+
+Both halves persist to `data/vision_commissioning.json` in the **automation**
+repo, not this one, so the arm's calibration travels with the arm.
+
+### 16.6 The gripper
+
+The xArm 6's tool is a third-party gripper on **controller output CO0**: high
+grips, low releases, and the controller latches the output between commands.
+
+**The driver lives in the automation package, not here.** `robot_config.py`
+gained a `cgpio` gripper type alongside the AR4's MoveIt action and the Lite
+6's built-in services, and `printerAutomation.open_gripper()` /
+`close_gripper()` dispatch on it. That placement is the whole reason this side
+needed no new action, route or command: the GUI already sent `gripper_open` /
+`gripper_close`, the waypoint sequences already emitted
+`{'gripper': 'open'|'close'}`, and both now actuate. Putting the service call
+in `RosRobotBackend` instead would have made the browser's gripper work while
+`pickupPlate` still did nothing.
+
+It also un-blocks itself. `_require_manipulation_hardware()` (§16.2) tests
+`node.gripper is None`, which is precisely what `'gripper': None` — the
+xArm 6's previous, uncommissioned state — reports. Configuring the tool
+upstream opens the guard with no change on this side.
+
+**What the page can honestly show.** Telemetry carries a `gripper` block:
+`kind` (`cgpio` / `lite6_service` / `moveit_action` / `null`), the `output`
+label, and `command` — *the last action asked for*. None of the three grippers
+has a feedback line, so `sensed` is always `false` and the card says so. A
+latched CO output outlives the backend process and an emergency stop drops it
+without telling anyone, so `command: null` renders as **Unknown**, never as
+"Open". Presenting a commanded state as a measured one is the same error
+`_require_manipulation_hardware` exists to prevent, one layer up.
+
+`_gripper_snapshot()` falls back when `gripper_status()` is missing from an
+older automation checkout, reporting what is still knowable from
+`node.gripper`. Dropping the key instead would make the page grey out the
+controls of a gripper that works.
+
+**Inverted wiring is configuration.** A normally-closed valve or an active-low
+relay board is a `closed_value` / `open_value` swap in `robot_config.py`. The
+service call itself never hard-codes a polarity.
+
+### 16.7 What is verified, and what is not
 
 Following §1.1's rule that "verified" must say *on what*:
 
@@ -2820,12 +2937,46 @@ arm-to-enable interlock disabling and enabling every motion control; a joint
 goal round-tripping degrees → radians → telemetry; `home`; and jog coalescing.
 Plus `python -m pytest -q` and `npm test`.
 
+**Verified on the Windows dev box (2026-09-02), `--robot-mode mock`, for the
+§16.5 commissioning port:** every new action rejected at the validation
+boundary with a **400** carrying a readable reason (bad role, blank name,
+non-boolean flag); a full session driven over HTTP — start, 15 captures, solve
+accepted, `hand_eye` written; an observation pose saved, `home`, then
+`goto_observation` restoring the exact joint vector; `confirm_marker` refusing
+the estimated marker and accepting the measured one. Then the same flow **from
+a browser**: the calibration card's buttons swapping between the running and
+stopped sets, two "Discard last" and one "Capture sample" click moving the
+server's sample count 15 → 13 → 14, "End session" landing as
+`calibration_stop succeeded`, marker poses and roles rendering in the Known
+markers card, and no console errors.
+
+**Verified for the §16.6 gripper, without ROS.** `printer_automation.py` cannot
+be imported on Windows (`web_video_server` pulls `fcntl`), so the four gripper
+methods were lifted out of the real source by AST and run against a fake
+service client. That covers the one thing that drops a plate if it is wrong:
+`close_gripper()` puts **1** on CO0 and `open_gripper()` puts **0**; a
+non-zero `ret` raises instead of reporting success; a missing service raises
+with the `xarm_user_params.yaml` fix in the message; `gripper_disabled`
+short-circuits before touching the client; a failed close leaves `command`
+unset rather than claiming a grasp; and swapping `closed_value`/`open_value`
+inverts the output with no code change. Then in a browser against
+`--robot-mode mock`: the buttons disabled until the workspace-clear interlock
+is ticked, and Close → Open landing as `gripper_close succeeded` /
+`gripper_open succeeded` with the card following.
+
 **Ported but NOT verified anywhere — no ROS on this machine:** everything
 `RosRobotBackend` does. Backend startup, MoveIt planning, ArUco detection,
-camera preflight, gripper actuation, xArm teach mode, and plate
-pickup/place/transfer/scrape on the physical arm. The `--robot-mode ros` path
-has never been executed since the port. Treat §16.1–16.3's description of it as
-*what the code says*, not as a hardware claim.
+camera preflight, xArm teach mode, plate pickup/place/transfer/scrape on the
+physical arm, the trajectory-controller handover, ChArUco detection against a
+real board, the hand-eye solve, and writing `<robot>_hand_eye.json`. For the
+gripper specifically: the harness above proves the *logic*, and nothing at all
+about the wiring — that CO0 is the right output, that the service exists after
+the `xarm_user_params.yaml` rebuild, or that high really grips. That is what
+the `ros2 service call` polarity check in the automation repo's
+`docs/lite6_safety_commissioning.md` is for, with the jaws empty. The
+`--robot-mode ros` path has never been executed since the port. Treat
+§16.1–16.3's, §16.5's and §16.6's description of it as *what the code says*,
+not as a hardware claim.
 
 **Not built, deliberately.** The page is standalone: marker IDs are typed by
 hand, and **nothing connects a finished print to an automatic plate pickup** —

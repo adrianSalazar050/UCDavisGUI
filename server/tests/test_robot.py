@@ -5,7 +5,8 @@ from fastapi.testclient import TestClient
 
 from server.main import create_app
 from server.robot import (MockRobotBackend, RobotBusy, RobotCommandError,
-                          RobotManager, RobotUnavailable, normalize_command)
+                          RobotManager, RobotUnavailable, RosRobotBackend,
+                          normalize_command)
 
 
 class Registry:
@@ -227,3 +228,199 @@ def test_configure_camera_on_a_backend_without_a_camera_is_not_attributeerror():
             manager.configure_camera(0)
     finally:
         manager.stop()
+
+
+def run_command(manager, action, parameters=None):
+    """Submit and wait for the worker to finish, -> the command record."""
+    command = manager.submit(action, parameters)
+    snapshot = wait_for(manager, "idle")
+    assert snapshot["last_command"]["id"] == command["id"]
+    return snapshot["last_command"]
+
+
+def test_normalize_vision_commissioning_commands():
+    assert normalize_command("calibration_start", {}) == (
+        "calibration_start", {"clear": False})
+    assert normalize_command("calibration_capture", {"stray": 1}) == (
+        "calibration_capture", {})
+    # A name-only observation pose is legitimate: the operator may not have
+    # picked a marker for that viewpoint yet.
+    assert normalize_command("save_observation", {"name": "  printer 1  "}) == (
+        "save_observation", {"name": "printer 1", "role": "other",
+                             "marker_id": None})
+    assert normalize_command(
+        "save_observation",
+        {"name": "bed", "marker_id": "2", "role": "printer"}) == (
+        "save_observation", {"name": "bed", "role": "printer",
+                             "marker_id": 2})
+    assert normalize_command("confirm_marker", {"marker_id": 0}) == (
+        "confirm_marker", {"marker_id": 0, "role": "other"})
+
+
+def test_normalize_rejects_bad_observation_name_role_and_flag():
+    with pytest.raises(RobotCommandError, match="non-empty string"):
+        normalize_command("goto_observation", {"name": "   "})
+    with pytest.raises(RobotCommandError, match="at most 64 characters"):
+        normalize_command("save_observation", {"name": "x" * 65})
+    with pytest.raises(RobotCommandError, match="role must be one of"):
+        normalize_command("confirm_marker", {"marker_id": 0, "role": "boxx"})
+    with pytest.raises(RobotCommandError, match="must be true or false"):
+        normalize_command("calibration_start", {"clear": "yes"})
+
+
+def test_mock_calibration_session_reaches_a_passing_solve():
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.001))
+    manager.start()
+    wait_for(manager, "idle")
+
+    assert run_command(manager, "calibration_capture")["state"] == "failed"
+    run_command(manager, "calibration_start", {"clear": True})
+    assert manager.snapshot()["vision"]["session_active"] is True
+
+    for _ in range(8):
+        run_command(manager, "calibration_capture")
+    rejected = run_command(manager, "calibration_solve")
+    assert rejected["result"]["quality_passed"] is False
+    assert manager.snapshot()["vision"]["hand_eye"] is None
+
+    for _ in range(7):
+        run_command(manager, "calibration_capture")
+    accepted = run_command(manager, "calibration_solve")
+    assert accepted["state"] == "succeeded"
+    assert accepted["result"]["quality_passed"] is True
+
+    snapshot = manager.snapshot()
+    assert snapshot["vision"]["sample_count"] == 15
+    assert snapshot["vision"]["hand_eye"]["quality_passed"] is True
+    manager.stop()
+
+
+def test_mock_solve_below_the_minimum_sample_count_fails():
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.001))
+    manager.start()
+    wait_for(manager, "idle")
+    run_command(manager, "calibration_start", {"clear": True})
+    run_command(manager, "calibration_capture")
+    failed = run_command(manager, "calibration_solve")
+    assert failed["state"] == "failed"
+    assert "At least 8 captures" in failed["error"]
+    manager.stop()
+
+
+def test_mock_observation_pose_round_trip():
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.001))
+    manager.start()
+    wait_for(manager, "idle")
+    run_command(manager, "move_joints", {"joints": [0.1, 0.2, 0, 0, 0, 0]})
+    run_command(manager, "save_observation",
+                {"name": "printer 1", "marker_id": 0, "role": "printer"})
+    run_command(manager, "home")
+    assert manager.snapshot()["joints"] == [0.0] * 6
+
+    run_command(manager, "goto_observation", {"name": "printer 1"})
+    assert manager.snapshot()["joints"] == [0.1, 0.2, 0, 0, 0, 0]
+
+    missing = run_command(manager, "goto_observation", {"name": "nowhere"})
+    assert missing["state"] == "failed"
+    assert "no observation pose named" in missing["error"]
+    manager.stop()
+
+
+def test_mock_confirm_marker_refuses_an_unmeasured_marker():
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.001))
+    manager.start()
+    wait_for(manager, "idle")
+    # Marker 2 is registered from an estimate, never seen by the camera.
+    estimated = run_command(manager, "confirm_marker",
+                            {"marker_id": 2, "role": "printer"})
+    assert estimated["state"] == "failed"
+    assert "has not been measured" in estimated["error"]
+
+    measured = run_command(manager, "confirm_marker",
+                           {"marker_id": 0, "role": "printer"})
+    assert measured["state"] == "succeeded"
+    assert manager.snapshot()["vision"]["marker_roles"] == {"0": "printer"}
+    manager.stop()
+
+
+def test_vision_commands_over_http(tmp_path):
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.001))
+    app = create_app(Registry(), tmp_path, robot=manager)
+    with TestClient(app) as client:
+        wait_for(manager, "idle")
+        accepted = client.post("/api/robot/commands", json={
+            "action": "save_observation",
+            "parameters": {"name": "scrape bay", "role": "scrape"}})
+        assert accepted.status_code == 202
+        assert accepted.json()["action"] == "save_observation"
+
+        rejected = client.post("/api/robot/commands", json={
+            "action": "confirm_marker",
+            "parameters": {"marker_id": 0, "role": "not-a-role"}})
+        assert rejected.status_code == 400
+        assert "role must be one of" in rejected.json()["detail"]
+
+        wait_for(manager, "idle")
+        vision = client.get("/api/robot/status").json()["vision"]
+        assert vision["available"] is True
+        assert [x["name"] for x in vision["observation_poses"]] == ["scrape bay"]
+
+
+class GripperNode:
+    """Stand-in for the automation node, for the gripper telemetry contract."""
+
+    def __init__(self, gripper, disabled=False, status=None):
+        self.gripper = gripper
+        self.gripper_disabled = disabled
+        if status is not None:
+            self.gripper_status = status
+
+
+class NodeHolder:
+    def __init__(self, node):
+        self.node = node
+
+
+def test_mock_gripper_reports_the_last_commanded_action():
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.001))
+    manager.start()
+    wait_for(manager, "idle")
+    # Nothing has been asked for yet, and a latching output that nobody has
+    # driven is unknown -- not open.
+    assert manager.snapshot()["gripper"]["command"] is None
+
+    run_command(manager, "gripper_close")
+    assert manager.snapshot()["gripper"]["command"] == "close"
+
+    run_command(manager, "gripper_open")
+    snapshot = manager.snapshot()
+    assert snapshot["gripper"]["command"] == "open"
+    # The page must never present a commanded action as a measured one.
+    assert snapshot["gripper"]["sensed"] is False
+    manager.stop()
+
+
+def test_gripper_snapshot_prefers_the_automation_packages_status():
+    node = GripperNode("cgpio", status=lambda: {
+        "kind": "cgpio", "output": "CO0", "command": "close",
+        "sensed": False, "disabled": False})
+    snapshot = RosRobotBackend._gripper_snapshot(NodeHolder(node))
+    assert snapshot["output"] == "CO0"
+    assert snapshot["command"] == "close"
+
+
+def test_gripper_snapshot_falls_back_on_an_older_automation_checkout():
+    """A missing gripper_status() must not read as "no gripper".
+
+    Dropping the key would grey out controls on an arm whose gripper works
+    perfectly well; reporting what is still knowable keeps them live.
+    """
+    moveit = RosRobotBackend._gripper_snapshot(
+        NodeHolder(GripperNode(object())))
+    assert moveit == {"kind": "moveit_action", "command": None,
+                      "sensed": False, "disabled": False}
+
+    none = RosRobotBackend._gripper_snapshot(
+        NodeHolder(GripperNode(None, disabled=True)))
+    assert none["kind"] is None
+    assert none["disabled"] is True

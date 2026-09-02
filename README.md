@@ -32,7 +32,8 @@ python -m server --robot-mode mock  # adds the Robot page, no arm required
 ```
 
 The robot arm is **off by default**. Driving a real one needs ROS 2 on Linux —
-see [`master.md` §16](master.md).
+[`RUNNING-UBUNTU.md`](RUNNING-UBUNTU.md) has the terminal-by-terminal bring-up,
+and [`master.md` §16](master.md) explains how it works.
 
 ## First-time setup
 
@@ -68,6 +69,7 @@ cost real time. Start there for anything beyond running it.
 | | |
 |---|---|
 | [`master.md`](master.md) | **The full documentation.** Start here |
+| [`RUNNING-UBUNTU.md`](RUNNING-UBUNTU.md) | Bringing the whole system up on Ubuntu, terminal by terminal, including the arm |
 | [`CONNECTION.md`](CONNECTION.md) | Connection details, TLS specifics, troubleshooting |
 | [`FAILURE_DETECTOR_REPORT.md`](FAILURE_DETECTOR_REPORT.md) | What the failure detector actually scores |
 | [`desktop/README.md`](desktop/README.md) | Packaging it as an installable app |
