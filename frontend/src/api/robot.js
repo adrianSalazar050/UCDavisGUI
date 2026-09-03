@@ -51,3 +51,13 @@ export async function configureRobotCamera(index) {
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }
+
+export async function configureRobotGripper(output) {
+  const res = await fetch("/api/robot/gripper", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ output }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}

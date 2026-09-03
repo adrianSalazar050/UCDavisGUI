@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelRobotCommand,
   configureRobotCamera,
+  configureRobotGripper,
   fetchRobotCameras,
   sendRobotCommand,
 } from "../api/robot.js";
@@ -175,6 +176,7 @@ export default function Robot({ robot, wsUp }) {
   const [observationMarkerId, setObservationMarkerId] = useState("");
   const [observationRole, setObservationRole] = useState("printer");
   const [confirmRole, setConfirmRole] = useState("printer");
+  const [gripperOutput, setGripperOutput] = useState("");
   const jogDispatching = useRef(false);
   // The id of the jog the server has accepted but not yet reported finished.
   // See the release effect below for why 202 is not good enough.
@@ -361,6 +363,14 @@ export default function Robot({ robot, wsUp }) {
     }
   }, [robot]);
 
+  // Seed the picker from telemetry once. Re-syncing on every frame would
+  // yank the dropdown back under an operator part-way through choosing.
+  useEffect(() => {
+    if (gripperOutput === "" && gripper?.ionum != null) {
+      setGripperOutput(String(gripper.ionum));
+    }
+  }, [gripper?.ionum, gripperOutput]);
+
   const last = robot?.last_command;
   const pose = robot?.eef_pose?.xyz_rpy ?? [];
 
@@ -410,6 +420,20 @@ export default function Robot({ robot, wsUp }) {
       marker_id: observationMarkerId === "" ? null : Number(observationMarkerId),
     });
     if (command) setObservationName("");
+  };
+
+  const applyGripperOutput = async () => {
+    setSubmitting(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await configureRobotGripper(Number(gripperOutput));
+      setNotice(`Gripper output set to CO${gripperOutput}`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const scanEstimatedLocation = async () => {
@@ -650,6 +674,34 @@ export default function Robot({ robot, wsUp }) {
                          : gripper.command === "open" ? "Open" : "Unknown"}</strong>
                 </div>
               </div>
+            )}
+            {gripper?.kind === "cgpio" && (
+              <div className="robot-output-config">
+                <Field label="Controller output"
+                       help="Which CO pin on the control box drives the jaws.">
+                  <select value={gripperOutput}
+                          onChange={(event) => setGripperOutput(event.target.value)}>
+                    {Array.from({ length: gripper.output_count ?? 8 },
+                                (_, index) => (
+                      <option key={index} value={index}>CO{index}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Button busy={submitting}
+                        disabled={!robot?.available || busy || submitting ||
+                                  gripperOutput === "" ||
+                                  Number(gripperOutput) === gripper.ionum}
+                        onClick={applyGripperOutput}>
+                  Apply output
+                </Button>
+              </div>
+            )}
+            {gripper?.kind === "cgpio" && gripper.command === "close" && (
+              <p className="robot-help">
+                The output cannot be changed while the gripper is commanded
+                closed — the current pin stays latched, and switching would
+                leave it holding with nothing tracking it. Open first.
+              </p>
             )}
             {gripperMissing && (
               <div className="state-warn robot-notice">

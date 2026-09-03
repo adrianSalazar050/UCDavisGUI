@@ -79,6 +79,14 @@ PHYSICAL_ONLY_ACTIONS = {
 # scatter typos through a file an operator has to read back later.
 MARKER_ROLES = {"printer", "box", "scrape", "other"}
 
+# Configurable digital outputs on the xArm control box. Both the AC and the DC
+# box expose "8xCO+8xDO" (UFACTORY technical specifications), and it is the CO
+# block a gripper is wired into -- so a selectable output is CO0..CO7.
+# Widening this to reach the DO block is a one-line change here, but only make
+# it against a measured pin-out: driving the wrong output on a live cell is not
+# a mistake the software can detect.
+XARM_CO_COUNT = 8
+
 
 class RobotBusy(RuntimeError):
     pass
@@ -239,7 +247,8 @@ def _jsonable(value: Any) -> Any:
 class RobotManager:
     """Own one backend and serialize all potentially dangerous motion."""
 
-    def __init__(self, backend_factory: Callable[[], Any], camera_config=None):
+    def __init__(self, backend_factory: Callable[[], Any], camera_config=None,
+                 gripper_config=None):
         self._backend_factory = backend_factory
         self._backend = None
         self._lock = threading.Lock()
@@ -252,6 +261,28 @@ class RobotManager:
         self._last: dict | None = None
         self._cancel_requested = False
         self.camera_config = camera_config
+        self.gripper_config = gripper_config
+
+    def configure_gripper(self, output: int) -> None:
+        """Point the gripper at a different controller output (CO0..CO7)."""
+        if isinstance(output, bool) or not isinstance(output, int):
+            raise RobotCommandError("gripper output must be an integer")
+        if not 0 <= output < XARM_CO_COUNT:
+            raise RobotCommandError(
+                f"gripper output must be between CO0 and CO{XARM_CO_COUNT - 1}")
+        with self._lock:
+            backend = self._backend
+            if self._active is not None:
+                raise RobotBusy(
+                    "cannot change the gripper output while a command is active")
+        if backend is None:
+            raise RobotUnavailable("robot backend is not ready")
+        if not hasattr(backend, "configure_gripper"):
+            raise RobotUnavailable(
+                "this robot backend has no selectable gripper output")
+        backend.configure_gripper(output)
+        if self.gripper_config is not None:
+            self.gripper_config["output"] = output
 
     def configure_camera(self, index: int | None) -> None:
         if self.camera_config is None:
@@ -457,6 +488,7 @@ class MockRobotBackend:
         self.cancelled = False
         self.teaching = False
         self.gripper_command = None
+        self.gripper_output = 0
         self.vision = {
             "session_active": False,
             "sample_count": 0,
@@ -573,9 +605,20 @@ class MockRobotBackend:
             "markers": copy.deepcopy(MOCK_MARKERS),
             "teaching": self.teaching,
             "vision": {"available": True, **copy.deepcopy(self.vision)},
-            "gripper": {"kind": "cgpio", "output": "CO0", "disabled": False,
-                        "command": self.gripper_command, "sensed": False},
+            "gripper": {"kind": "cgpio", "disabled": False, "sensed": False,
+                        "output": f"CO{self.gripper_output}",
+                        "ionum": self.gripper_output,
+                        "output_count": XARM_CO_COUNT,
+                        "command": self.gripper_command},
         }
+
+    def configure_gripper(self, output: int) -> None:
+        if self.gripper_command == "close":
+            raise RobotCommandError(
+                "open the gripper before changing its output; the current one "
+                "stays latched and would be left holding")
+        self.gripper_output = int(output)
+        self.gripper_command = None
 
     def close(self) -> None:
         pass
@@ -585,7 +628,8 @@ class RosRobotBackend:
     """Adapter from the command contract to printerAutomation methods."""
 
     def __init__(self, repo_path: pathlib.Path, robot: str = "ar4",
-                 sim: bool = False, camera_mode=None, camera_index=None):
+                 sim: bool = False, camera_mode=None, camera_index=None,
+                 gripper_output=None):
         repo_path = repo_path.expanduser().resolve()
         if not (repo_path / "ar4_automation").is_dir():
             raise RuntimeError(
@@ -617,6 +661,10 @@ class RosRobotBackend:
             sim=sim, robot=robot, joint_state_timeout=2.0, **overrides)
         self.robot = robot
         self.sim = sim
+        if gripper_output is not None:
+            # Apply the seeded output before anything can command the gripper,
+            # so the first close of the session already goes to the right pin.
+            self.configure_gripper(int(gripper_output))
         # Commissioning is optional: it pulls cv2.aruco's ChArUco surface and
         # the calibration/ package, and neither is worth losing plate handling
         # over. A failure here is reported through telemetry, not raised.
@@ -897,15 +945,25 @@ class RosRobotBackend:
         node = self.node
         status = getattr(node, "gripper_status", None)
         if callable(status):
-            return _jsonable(status())
-        # Automation checkout predating gripper_status(); report what is still
-        # knowable rather than dropping the key and making the page think this
-        # backend has no gripper at all.
-        kind = getattr(node, "gripper", None)
-        if kind is not None and not isinstance(kind, str):
-            kind = "moveit_action"
-        return {"kind": kind, "command": None, "sensed": False,
-                "disabled": bool(getattr(node, "gripper_disabled", False))}
+            snapshot = _jsonable(status())
+        else:
+            # Automation checkout predating gripper_status(); report what is
+            # still knowable rather than dropping the key and making the page
+            # think this backend has no gripper at all.
+            kind = getattr(node, "gripper", None)
+            if kind is not None and not isinstance(kind, str):
+                kind = "moveit_action"
+            snapshot = {"kind": kind, "command": None, "sensed": False,
+                        "disabled": bool(getattr(node, "gripper_disabled",
+                                                 False))}
+        # Read the selected output out of the same dict _call_cgpio_gripper
+        # reads at call time, rather than parsing it back out of the "CO0"
+        # label: the number here is then always the pin that will be driven.
+        cfg = node.robot_config.get("gripper")
+        if isinstance(cfg, dict) and cfg.get("type") == "cgpio":
+            snapshot["ionum"] = int(cfg.get("ionum", 0))
+            snapshot["output_count"] = XARM_CO_COUNT
+        return snapshot
 
     def _vision_snapshot(self) -> dict:
         if self.vision is None:
@@ -941,6 +999,32 @@ class RosRobotBackend:
         ok, encoded = cv2.imencode('.jpg', frame,
                                    [cv2.IMWRITE_JPEG_QUALITY, 75])
         return encoded.tobytes() if ok else None
+
+    def configure_gripper(self, output: int) -> None:
+        """Select which controller output drives the gripper.
+
+        `_call_cgpio_gripper` reads `robot_config['gripper']` fresh on every
+        call, so writing the index back into that dict takes effect on the next
+        open/close with no restart and no second copy of the setting.
+
+        Refused while the gripper is commanded closed: the old output stays
+        latched high after the switch, so re-pointing mid-grip would strand a
+        live pin holding a plate that nothing is tracking any more.
+        """
+        cfg = self.node.robot_config.get("gripper")
+        if not isinstance(cfg, dict) or cfg.get("type") != "cgpio":
+            raise RobotCommandError(
+                f"{self.robot} does not drive its gripper from a controller "
+                "output, so there is nothing to select")
+        if getattr(self.node, "gripper_command", None) == "close":
+            raise RobotCommandError(
+                "open the gripper before changing its output; the current one "
+                "stays latched and would be left holding")
+        cfg["ionum"] = int(output)
+        # The new pin's state is genuinely unknown -- it was never driven by
+        # this process. Saying "open" here would be a guess presented as fact.
+        self.node.gripper_command = None
+        self.node.get_logger().info(f"Gripper output set to CO{output}")
 
     def configure_camera(self, index: int | None) -> None:
         if self.sim:

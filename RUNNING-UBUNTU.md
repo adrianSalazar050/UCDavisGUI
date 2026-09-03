@@ -288,16 +288,19 @@ ros2 topic echo /camera/color/camera_info --once
 ros2 action list -t | grep -E 'move_action|execute_trajectory'
 ```
 
-**Check the gripper polarity once, with the jaws empty and the arm clear.**
-`value: 1` must *grip*:
+**Check the gripper output and polarity once, with the jaws empty and the arm
+clear.** `ionum` is the CO number the gripper is wired to (CO0–CO7 on the
+control box), and `value: 1` must *grip*:
 
 ```bash
 ros2 service call /xarm/set_cgpio_digital xarm_msgs/srv/SetDigitalIO "{ionum: 0, value: 1}"
 ros2 service call /xarm/set_cgpio_digital xarm_msgs/srv/SetDigitalIO "{ionum: 0, value: 0}"
 ```
 
-If those come out backwards, swap `closed_value` and `open_value` in the
-automation repo's `ar4_automation/robot_config.py`. Do not edit the driver.
+If nothing moves, try the other CO numbers until one does, then set that in
+the Gripper card (or `XARM_GRIPPER_OUTPUT`). If the jaws move the *wrong way*,
+swap `closed_value` and `open_value` in the automation repo's
+`ar4_automation/robot_config.py`. Do not edit the driver for either.
 
 ### Terminal 2 — the dashboard
 
@@ -366,6 +369,7 @@ Open the URL Vite prints (5173 by default), **not** 8000. When you are done,
 | `AR4_AUTOMATION_REPO` | dashboard | `~/ar4Automating3DPrinter` | Same as `--robot-repo` |
 | `XARM_CAMERA_MODE` | dashboard | `webcam` | `webcam` with no index degrades to `disabled`, which means "use the RealSense ROS topics" |
 | `XARM_CAMERA_INDEX` | dashboard | — | `/dev/videoN` number, for a USB camera instead of the RealSense |
+| `XARM_GRIPPER_OUTPUT` | dashboard | whatever `robot_config.py` says | Which controller output drives the gripper, `0`–`7` (CO0–CO7). `--robot-mode ros` only; the Robot page can change it at runtime either way. A bad value refuses to start rather than driving the wrong pin |
 | `ROBOT_IP` | launch script | — | Required; the control box's IP |
 | `XARM_WS` | launch script | `~/dev_ws` | Where `xarm_ros2` is built |
 
@@ -386,6 +390,8 @@ runtime without a restart.
 | Safety preflight red otherwise | Stale `/joint_states`, a controller error, or the profile failed to apply | Read the `detail` on the red row; check terminal 1 |
 | Gripper command fails at `wait_for_service` | `set_cgpio_digital` not enabled in `xarm_user_params.yaml` | Redo [setup step 4](#4-enable-the-xarm_api-services-scenario-d) |
 | Gripper opens when you press close | Inverted wiring | Swap `closed_value`/`open_value` in the automation repo's `robot_config.py` |
+| Nothing happens on open/close, no error | The gripper is on a different CO than the one selected | Pick the right one in the Gripper card, or set `XARM_GRIPPER_OUTPUT` |
+| "open the gripper before changing its output" | You tried to re-point the output mid-grip | Open it first — the old pin stays latched otherwise |
 | Pick/place refused: "requires a configured physical gripper" | `'gripper': None` for that robot | Configure the tool in the automation repo's `robot_config.py` |
 | `--lan` refuses to start | No password | Create `.bambu-password` |
 | Dashboard loads but has no styling / old UI | `frontend/dist` is stale or missing | `cd frontend && npm run build` |

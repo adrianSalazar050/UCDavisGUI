@@ -32,7 +32,8 @@ from .printer import MockPrinter, PrinterService
 from .runlog import RunRecorder
 from .queue import MemoryQueueStore, PrintQueue, QueueStore
 from .registry import PrinterRegistry
-from .robot import MockRobotBackend, RobotManager, RosRobotBackend
+from .robot import (XARM_CO_COUNT, MockRobotBackend, RobotManager,
+                    RosRobotBackend)
 from . import slicer as slicer_mod
 from .slicejobs import SliceCoordinator
 from .store import MemoryStore, PrinterStore
@@ -404,6 +405,21 @@ def main() -> int:
         }
         if robot_camera["mode"] == "webcam" and robot_camera["index"] is None:
             robot_camera["mode"] = "disabled"
+        # Which controller output drives the gripper (CO0..CO7). Unset keeps
+        # whatever robot_config.py declares; the Robot page can change it at
+        # runtime either way. A bad value is fatal here on purpose -- silently
+        # falling back would drive the wrong pin on a live cell.
+        raw_output = os.environ.get("XARM_GRIPPER_OUTPUT", "").strip()
+        robot_gripper = {"output": None}
+        if raw_output:
+            try:
+                robot_gripper["output"] = int(raw_output)
+            except ValueError:
+                p.error(f"XARM_GRIPPER_OUTPUT must be a number, got "
+                        f"{raw_output!r}")
+            if not 0 <= robot_gripper["output"] < XARM_CO_COUNT:
+                p.error("XARM_GRIPPER_OUTPUT must be between 0 and "
+                        f"{XARM_CO_COUNT - 1} (CO0..CO{XARM_CO_COUNT - 1})")
         log.info("robot control enabled (ROS backend, %s%s, repo %s)",
                  a.robot_type, ", sim" if a.robot_sim else "", a.robot_repo)
         robot = RobotManager(
@@ -412,8 +428,10 @@ def main() -> int:
                 robot=a.robot_type,
                 sim=a.robot_sim,
                 camera_mode=robot_camera["mode"],
-                camera_index=robot_camera["index"]),
-            camera_config=robot_camera)
+                camera_index=robot_camera["index"],
+                gripper_output=robot_gripper["output"]),
+            camera_config=robot_camera,
+            gripper_config=robot_gripper)
 
     host = resolve_host(a.host, a.lan)
     env_password = os.environ.get("BAMBU_PASSWORD")

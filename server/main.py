@@ -282,6 +282,10 @@ class RobotCameraBody(BaseModel):
     index: int | None = None
 
 
+class RobotGripperBody(BaseModel):
+    output: int
+
+
 def _comparable(printers: list[dict]) -> list[dict]:
     """report_age_s ticks every sample; ignore it when deciding whether the
     state meaningfully changed."""
@@ -1309,6 +1313,20 @@ def create_app(registry, runs_dir: pathlib.Path,
         controller = _require_robot()
         try:
             controller.configure_camera(body.index)
+        except RobotCommandError as exc:
+            raise HTTPException(400, str(exc))
+        except RobotUnavailable as exc:
+            raise HTTPException(503, str(exc))
+        except RobotBusy as exc:
+            raise HTTPException(409, str(exc))
+        return controller.snapshot()
+
+    @app.put("/api/robot/gripper")
+    def configure_robot_gripper(body: RobotGripperBody):
+        """Point the gripper at a different controller output (CO0..CO7)."""
+        controller = _require_robot()
+        try:
+            controller.configure_gripper(body.output)
         except RobotCommandError as exc:
             raise HTTPException(400, str(exc))
         except RobotUnavailable as exc:

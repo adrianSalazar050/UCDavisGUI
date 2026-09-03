@@ -4,8 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.main import create_app
-from server.robot import (MockRobotBackend, RobotBusy, RobotCommandError,
-                          RobotManager, RobotUnavailable, RosRobotBackend,
+from server.robot import (XARM_CO_COUNT, MockRobotBackend, RobotBusy,
+                          RobotCommandError, RobotManager,
+                          RobotUnavailable, RosRobotBackend,
                           normalize_command)
 
 
@@ -367,11 +368,16 @@ def test_vision_commands_over_http(tmp_path):
 
 
 class GripperNode:
-    """Stand-in for the automation node, for the gripper telemetry contract."""
+    """Stand-in for the automation node, for the gripper telemetry contract.
 
-    def __init__(self, gripper, disabled=False, status=None):
+    `robot_config` is always present on a real node (PoseReader sets it), so
+    the stub carries one rather than the snapshot guarding for its absence.
+    """
+
+    def __init__(self, gripper, disabled=False, status=None, config=None):
         self.gripper = gripper
         self.gripper_disabled = disabled
+        self.robot_config = {"gripper": config}
         if status is not None:
             self.gripper_status = status
 
@@ -401,12 +407,28 @@ def test_mock_gripper_reports_the_last_commanded_action():
 
 
 def test_gripper_snapshot_prefers_the_automation_packages_status():
-    node = GripperNode("cgpio", status=lambda: {
-        "kind": "cgpio", "output": "CO0", "command": "close",
+    node = GripperNode("cgpio", config={"type": "cgpio", "ionum": 4},
+                       status=lambda: {
+        "kind": "cgpio", "output": "CO4", "command": "close",
         "sensed": False, "disabled": False})
     snapshot = RosRobotBackend._gripper_snapshot(NodeHolder(node))
-    assert snapshot["output"] == "CO0"
+    assert snapshot["output"] == "CO4"
     assert snapshot["command"] == "close"
+    # The selectable index comes from robot_config -- the same dict the driver
+    # reads at call time -- not from parsing the "CO4" label back apart.
+    assert snapshot["ionum"] == 4
+    assert snapshot["output_count"] == XARM_CO_COUNT
+
+
+def test_gripper_snapshot_omits_the_output_for_a_non_cgpio_gripper():
+    """A Lite 6 or AR4 gripper has no pin to point anywhere; no picker."""
+    node = GripperNode("lite6_service",
+                       config={"type": "lite6_service"},
+                       status=lambda: {"kind": "lite6_service",
+                                       "command": None, "sensed": False,
+                                       "disabled": False})
+    snapshot = RosRobotBackend._gripper_snapshot(NodeHolder(node))
+    assert "ionum" not in snapshot
 
 
 def test_gripper_snapshot_falls_back_on_an_older_automation_checkout():
@@ -424,3 +446,113 @@ def test_gripper_snapshot_falls_back_on_an_older_automation_checkout():
         NodeHolder(GripperNode(None, disabled=True)))
     assert none["kind"] is None
     assert none["disabled"] is True
+
+
+def test_gripper_output_is_selectable_across_the_co_block():
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.001),
+                           gripper_config={"output": None})
+    manager.start()
+    wait_for(manager, "idle")
+    assert manager.snapshot()["gripper"]["ionum"] == 0
+
+    for output in range(XARM_CO_COUNT):
+        manager.configure_gripper(output)
+        snapshot = manager.snapshot()
+        assert snapshot["gripper"]["ionum"] == output
+        assert snapshot["gripper"]["output"] == f"CO{output}"
+    # The manager mirrors the choice, the way it already does for the camera.
+    assert manager.gripper_config["output"] == XARM_CO_COUNT - 1
+    manager.stop()
+
+
+def test_gripper_output_rejects_anything_outside_the_co_block():
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.001))
+    manager.start()
+    wait_for(manager, "idle")
+    for bad in (-1, XARM_CO_COUNT, 99):
+        with pytest.raises(RobotCommandError, match="CO0 and CO"):
+            manager.configure_gripper(bad)
+    # bool is an int subclass; True would otherwise silently mean CO1.
+    for bad in (True, 1.5, "2", None):
+        with pytest.raises(RobotCommandError, match="must be an integer"):
+            manager.configure_gripper(bad)
+    manager.stop()
+
+
+def test_gripper_output_cannot_change_while_commanded_closed():
+    """Switching mid-grip strands the old pin latched, holding a plate."""
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.001))
+    manager.start()
+    wait_for(manager, "idle")
+    run_command(manager, "gripper_close")
+    with pytest.raises(RobotCommandError, match="open the gripper"):
+        manager.configure_gripper(3)
+    assert manager.snapshot()["gripper"]["ionum"] == 0
+
+    run_command(manager, "gripper_open")
+    manager.configure_gripper(3)
+    snapshot = manager.snapshot()
+    assert snapshot["gripper"]["ionum"] == 3
+    # The new pin was never driven by this process, so its state is unknown --
+    # carrying "open" over from the old one would be a guess stated as fact.
+    assert snapshot["gripper"]["command"] is None
+    manager.stop()
+
+
+def test_gripper_output_is_refused_while_a_command_is_running():
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.2))
+    manager.start()
+    wait_for(manager, "idle")
+    manager.submit("home")
+    with pytest.raises(RobotBusy, match="while a command is active"):
+        manager.configure_gripper(2)
+    manager.stop()
+
+
+def test_gripper_output_on_a_backend_without_one_is_not_attributeerror():
+    """MockRobotBackend gained configure_gripper; a bare backend has not."""
+    class Bare:
+        def execute(self, action, parameters):
+            return True
+
+        def cancel(self):
+            pass
+
+        def telemetry(self):
+            return {}
+
+        def close(self):
+            pass
+
+    manager = RobotManager(Bare)
+    manager.start()
+    wait_for(manager, "idle")
+    with pytest.raises(RobotUnavailable, match="selectable gripper output"):
+        manager.configure_gripper(1)
+    manager.stop()
+
+
+def test_gripper_route_reports_400_409_and_503(tmp_path):
+    manager = RobotManager(lambda: MockRobotBackend(delay_s=0.001))
+    app = create_app(Registry(), tmp_path, robot=manager)
+    with TestClient(app) as client:
+        wait_for(manager, "idle")
+        ok = client.put("/api/robot/gripper", json={"output": 5})
+        assert ok.status_code == 200
+        assert ok.json()["gripper"]["output"] == "CO5"
+
+        bad = client.put("/api/robot/gripper", json={"output": 9})
+        assert bad.status_code == 400
+        assert "CO0 and CO" in bad.json()["detail"]
+
+        run_command(manager, "gripper_close")
+        holding = client.put("/api/robot/gripper", json={"output": 1})
+        assert holding.status_code == 400
+        assert "open the gripper" in holding.json()["detail"]
+
+
+def test_gripper_route_is_inert_when_the_robot_is_disabled(tmp_path):
+    app = create_app(Registry(), tmp_path, robot=None)
+    with TestClient(app) as client:
+        assert client.put("/api/robot/gripper",
+                          json={"output": 0}).status_code == 404

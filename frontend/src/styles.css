@@ -1566,3 +1566,13 @@ p.muted { margin: 0; font-size: 13px; }
   max-height: 320px;
   object-fit: contain;
 }
+
+/* Gripper output picker: a labelled Field beside its Apply button, so align on
+   the bottom edge rather than centring the way .robot-camera-config does. */
+.robot-output-config {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.robot-output-config .ui-field { flex: 1; min-width: 0; }

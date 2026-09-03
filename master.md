@@ -2791,8 +2791,9 @@ dispatch order in `execute` is what it is:
 
 ### 16.3 Routes and the live payload
 
-All six sit under `/api/`, so the `_require_session` middleware (§2.1) already
-gates them when a password is configured — including the MJPEG frame route.
+All seven sit under `/api/`, so the `_require_session` middleware (§2.1)
+already gates them when a password is configured — including the MJPEG frame
+route.
 
 | Method | Path | Notes |
 |---|---|---|
@@ -2802,6 +2803,7 @@ gates them when a password is configured — including the MJPEG frame route.
 | GET | `/api/robot/cameras` | V4L2 devices; `[]` on Windows/macOS, not an error |
 | PUT | `/api/robot/camera` | select or disable the webcam |
 | GET | `/api/robot/camera/frame` | JPEG, `no-store`; 404 when there is none |
+| PUT | `/api/robot/gripper` | select the controller output (§16.6); 400 out of range or while gripping, 409 busy |
 
 `/ws` carries `{"printers": [...], "robot": {...}}`. **The `robot` key is
 present only when a robot is configured**, which is what lets the browser tell
@@ -2921,9 +2923,34 @@ older automation checkout, reporting what is still knowable from
 `node.gripper`. Dropping the key instead would make the page grey out the
 controls of a gripper that works.
 
-**Inverted wiring is configuration.** A normally-closed valve or an active-low
-relay board is a `closed_value` / `open_value` swap in `robot_config.py`. The
-service call itself never hard-codes a polarity.
+**Which output is selectable from the browser.** The control box — AC or DC —
+exposes `8×CO+8×DO` (UFACTORY technical specifications), and a gripper is wired
+into the **CO** block, so `XARM_CO_COUNT = 8` bounds the picker at CO0–CO7.
+`PUT /api/robot/gripper` writes the index straight into
+`node.robot_config['gripper']['ionum']`, which is the same dict
+`_call_cgpio_gripper` reads on *every* call — so the change lands on the next
+open/close with no restart and no second copy of the setting to drift.
+`XARM_GRIPPER_OUTPUT` seeds it at startup for `--robot-mode ros`, applied
+before the first command can run.
+
+Two refusals, both about not stranding a pin:
+
+- **Not while the gripper is commanded closed.** The old output stays latched
+  high after a switch, so re-pointing mid-grip would leave a live pin holding a
+  plate that nothing is tracking any more. Open first.
+- **Not on a non-`cgpio` gripper.** An AR4 MoveIt action and the Lite 6's
+  built-in services have no output to point anywhere, so `ionum` is absent from
+  telemetry and the page shows no picker at all.
+
+Switching **clears `command` back to `None`**. The new pin was never driven by
+this process, so its state is genuinely unknown; carrying "open" across would
+be a guess stated as fact — the same error the readout exists to avoid.
+
+**Inverted wiring is still configuration, not a picker.** A normally-closed
+valve or an active-low relay board is a `closed_value` / `open_value` swap in
+`robot_config.py`. Polarity is a property of how the tool is wired, not
+something to flip from a browser while the arm is live. The service call never
+hard-codes it either way.
 
 ### 16.7 What is verified, and what is not
 
