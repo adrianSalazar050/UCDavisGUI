@@ -41,6 +41,11 @@ ACTIONS = {
     "calibration_capture",
     "calibration_discard",
     "calibration_solve",
+    "intrinsic_start",
+    "intrinsic_stop",
+    "intrinsic_capture",
+    "intrinsic_discard",
+    "intrinsic_solve",
     "save_observation",
     "goto_observation",
     "confirm_marker",
@@ -57,6 +62,11 @@ VISION_STATE_ACTIONS = {
     "calibration_capture",
     "calibration_discard",
     "calibration_solve",
+    "intrinsic_start",
+    "intrinsic_stop",
+    "intrinsic_capture",
+    "intrinsic_discard",
+    "intrinsic_solve",
     "save_observation",
     "confirm_marker",
 }
@@ -73,6 +83,11 @@ PHYSICAL_ONLY_ACTIONS = {
     "calibration_capture",
     "calibration_discard",
     "calibration_solve",
+    "intrinsic_start",
+    "intrinsic_stop",
+    "intrinsic_capture",
+    "intrinsic_discard",
+    "intrinsic_solve",
 }
 
 # Free-form in the automation package; constrained here so the browser cannot
@@ -212,6 +227,8 @@ def normalize_command(action: str, parameters: dict | None) -> tuple[str, dict]:
             "scrape_id": _integer(p, "scrape_id"),
         }
     if action == "calibration_start":
+        return action, {"clear": _flag(p, "clear")}
+    if action == "intrinsic_start":
         return action, {"clear": _flag(p, "clear")}
     if action == "save_observation":
         # marker_id is optional: an observation pose may just be a good place
@@ -499,6 +516,13 @@ class MockRobotBackend:
             "marker_roles": {},
             "hand_eye": None,
             "last_solve": None,
+            "intrinsic": {
+                "session_active": False, "sample_count": 0,
+                "recommended_sample_count": 20,
+                "last_detection": {"valid": False, "corner_count": 0,
+                                   "error": "no camera on the mock backend"},
+                "last_solve": None,
+            },
             "state_path": "<mock>/data/vision_commissioning.json",
             "calibration_path": "<mock>/calibration/mock_hand_eye.json",
         }
@@ -562,6 +586,32 @@ class MockRobotBackend:
             if passed:
                 state["hand_eye"] = dict(state["last_solve"])
             return dict(state["last_solve"])
+        elif action == "intrinsic_start":
+            if p["clear"]:
+                state["intrinsic"]["sample_count"] = 0
+            state["intrinsic"]["session_active"] = True
+            state["intrinsic"]["last_detection"] = {
+                "valid": True, "corner_count": 42, "error": None}
+        elif action == "intrinsic_stop":
+            state["intrinsic"]["session_active"] = False
+        elif action == "intrinsic_capture":
+            if not state["intrinsic"]["session_active"]:
+                raise RobotCommandError("start an intrinsic calibration session first")
+            state["intrinsic"]["sample_count"] += 1
+        elif action == "intrinsic_discard":
+            if not state["intrinsic"]["sample_count"]:
+                raise RobotCommandError("there are no intrinsic calibration captures")
+            state["intrinsic"]["sample_count"] -= 1
+        elif action == "intrinsic_solve":
+            intrinsic = state["intrinsic"]
+            if intrinsic["sample_count"] < 12:
+                raise RobotCommandError("at least 12 intrinsic captures are required")
+            passed = intrinsic["sample_count"] >= 20
+            intrinsic["last_solve"] = {
+                "sample_count": intrinsic["sample_count"], "rms_px": 0.42 if passed else 1.37,
+                "max_rms_px": 1.0, "quality_passed": passed,
+            }
+            return dict(intrinsic["last_solve"])
         elif action == "save_observation":
             item = {"name": p["name"], "role": p["role"],
                     "marker_id": p["marker_id"], "robot": "mock",
@@ -873,6 +923,16 @@ class RosRobotBackend:
             # A rejected solve is still a successful command: its metrics are
             # the feedback that tells the operator which poses to add.
             return vision.solve()
+        if action == "intrinsic_start":
+            return vision.start_intrinsic(clear=p["clear"])
+        if action == "intrinsic_stop":
+            return vision.stop_intrinsic()
+        if action == "intrinsic_capture":
+            return vision.capture_intrinsic()
+        if action == "intrinsic_discard":
+            return vision.discard_intrinsic()
+        if action == "intrinsic_solve":
+            return vision.solve_intrinsic()
         if action == "save_observation":
             return vision.save_observation(
                 p["name"], marker_id=p["marker_id"], role=p["role"])

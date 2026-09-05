@@ -155,6 +155,23 @@ function SolveReadout({ title, solve }) {
   );
 }
 
+function IntrinsicReadout({ solve }) {
+  if (!solve) return null;
+  return (
+    <div className={solve.quality_passed ? "state-ok robot-notice"
+                                         : "state-warn robot-notice"}>
+      <strong>
+        Camera intrinsics · {solve.sample_count ?? 0} captures · {solve.quality_passed ? "accepted" : "rejected"}
+      </strong>
+      <div>
+        Reprojection RMS {formatNumber(solve.rms_px, 3)} px
+        {Number.isFinite(Number(solve.max_rms_px)) && ` (limit ${formatNumber(solve.max_rms_px, 1)} px)`}
+      </div>
+      {solve.image_size && <div>Resolution {solve.image_size.join(" × ")} px</div>}
+    </div>
+  );
+}
+
 
 export default function Robot({ robot, wsUp }) {
   const [armed, setArmed] = useState(false);
@@ -303,6 +320,7 @@ export default function Robot({ robot, wsUp }) {
   const gripperMissing = Boolean(
     gripper && (!gripper.kind || gripper.disabled));
   const vision = robot?.vision;
+  const intrinsic = vision?.intrinsic;
   // Commissioning reads the camera and the current TF but never plans a goal,
   // so it deliberately does NOT require the movement interlock: the operator
   // captures samples while hand-guiding the wrist in teach mode, which is
@@ -387,7 +405,10 @@ export default function Robot({ robot, wsUp }) {
   useEffect(() => {
     if (robot?.camera?.color_age_s == null) return undefined;
     const timer = window.setInterval(
-      () => setCameraFrameKey((value) => value + 1), 500);
+      // The backend serves the latest JPEG, so this does not increase camera
+      // capture load. Five FPS is responsive enough for aiming a board while
+      // avoiding a needless JPEG encode on every 30 FPS capture frame.
+      () => setCameraFrameKey((value) => value + 1), 200);
     return () => window.clearInterval(timer);
   }, [robot?.camera?.color_age_s == null]);
 
@@ -759,6 +780,14 @@ export default function Robot({ robot, wsUp }) {
                 <strong>{robot?.camera?.camera_frame ?? "—"}</strong>
               </div>
               <div>
+                <span>Effective resolution</span>
+                <strong>{robot?.camera?.image_size_px?.join(" × ") ?? "—"} px</strong>
+              </div>
+              <div>
+                <span>Camera source rate</span>
+                <strong>{robot?.camera?.effective_fps == null ? "Measuring…" : `${formatNumber(robot.camera.effective_fps, 1)} FPS`}</strong>
+              </div>
+              <div>
                 <span>Visible / known</span>
                 <strong>{robot?.camera ?
                   `${robot.camera.visible_marker_count} / ${robot.camera.known_marker_count}` : "—"}</strong>
@@ -841,6 +870,58 @@ export default function Robot({ robot, wsUp }) {
                      alt="Robot camera with ArUco overlay" />
               )}
             </div>
+          </Card>
+
+          <Card title="1. Camera intrinsic calibration">
+            {!vision?.available ? (
+              <div className="state-warn robot-notice">
+                Start the robot vision backend before calibrating the camera.
+              </div>
+            ) : (
+              <>
+                <p className="robot-help">
+                  Do this once for the selected wrist camera before hand–eye.
+                  Between captures, move the wrist camera/robot or the board
+                  so the board covers the center, edges, and corners; keep
+                  both still for each capture. Collect 20+ sharp views. Do
+                  not mix cameras, resolutions, or zoom/focus settings in one
+                  session.
+                </p>
+                <div className="robot-readout">
+                  <div><span>Session</span><strong>{intrinsic?.session_active ? "Active" : "Stopped"}</strong></div>
+                  <div><span>Captures</span><strong>{intrinsic?.sample_count ?? 0} / {intrinsic?.recommended_sample_count ?? 20}</strong></div>
+                  <div><span>Board in view</span><strong>{intrinsic?.last_detection?.valid ? `${intrinsic.last_detection.corner_count} corners` : "Not detected"}</strong></div>
+                </div>
+                {intrinsic?.session_active && intrinsic?.last_detection?.error && (
+                  <div className="state-warn robot-notice">{intrinsic.last_detection.error}</div>
+                )}
+                <div className="robot-goal-buttons">
+                  {intrinsic?.session_active ? <>
+                    <Button variant="primary" disabled={visionDisabled}
+                            onClick={goal("intrinsic_capture")}>Capture camera view</Button>
+                    <Button disabled={visionDisabled || !(intrinsic?.sample_count)}
+                            onClick={goal("intrinsic_discard")}>Discard last</Button>
+                    <Button disabled={visionDisabled || (intrinsic?.sample_count ?? 0) < 12}
+                            onClick={goal("intrinsic_solve")}>Solve and apply intrinsics</Button>
+                    <Button disabled={visionDisabled}
+                            onClick={goal("intrinsic_stop")}>End session</Button>
+                  </> : <>
+                    <Button variant="primary" disabled={visionDisabled}
+                            onClick={goal("intrinsic_start", { clear: false })}>
+                      {(intrinsic?.sample_count ?? 0) ? "Resume captures" : "Start intrinsic calibration"}
+                    </Button>
+                    <Button disabled={visionDisabled || !(intrinsic?.sample_count)}
+                            onClick={goal("intrinsic_start", { clear: true })}>Start over</Button>
+                  </>}
+                </div>
+                <IntrinsicReadout solve={intrinsic?.last_solve} />
+                <p className="robot-help">
+                  Only an accepted result replaces <code>camera_matrix.npz</code>;
+                  the prior file is kept as <code>camera_matrix.previous.npz</code>.
+                  Then start a fresh hand–eye session — do not reuse its old samples.
+                </p>
+              </>
+            )}
           </Card>
 
           <Card title="Manual guidance">
