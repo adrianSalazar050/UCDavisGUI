@@ -34,6 +34,7 @@ ACTIONS = {
     "scan_location",
     "teach_enable",
     "teach_disable",
+    "prepare_motion",
     # Vision commissioning (ar4_automation.vision_commissioning). These read
     # the camera and the current TF; only goto_observation moves the arm.
     "calibration_start",
@@ -78,6 +79,7 @@ VISION_STATE_ACTIONS = {
 PHYSICAL_ONLY_ACTIONS = {
     "teach_enable",
     "teach_disable",
+    "prepare_motion",
     "calibration_start",
     "calibration_stop",
     "calibration_capture",
@@ -545,6 +547,8 @@ class MockRobotBackend:
             self.pose[axes.index(parameters["axis"])] += parameters["delta"]
         elif action in {"teach_enable", "teach_disable"}:
             self.teaching = action == "teach_enable"
+        elif action == "prepare_motion":
+            self.teaching = False
         elif action in {"gripper_open", "gripper_close"}:
             self.gripper_command = action.removeprefix("gripper_")
         elif action in VISION_STATE_ACTIONS or action == "goto_observation":
@@ -784,6 +788,43 @@ class RosRobotBackend:
             return self._teach(node, "enter_teach_mode")
         if action == "teach_disable":
             return self._teach(node, "exit_teach_mode")
+        if action == "prepare_motion":
+            if self.sim:
+                raise RobotCommandError("prepare_motion is physical-only")
+            state = getattr(node, "_xarm_state", None)
+            if state is not None and int(state.get("error_code", 0)) != 0:
+                raise RobotCommandError(
+                    "robot reports a controller error; inspect and clear it "
+                    "with the UFACTORY controller before preparing motion")
+            if not node.configure_xarm_safety():
+                raise RobotCommandError(
+                    "could not apply controller safety profile: "
+                    f"{node._xarm_safety_error}")
+            try:
+                # configure_xarm_safety is idempotent after its first success;
+                # always restore ROS trajectory mode because an operator may
+                # have used the UFACTORY panel since the previous preparation.
+                node.set_xarm_mode(1)
+                node.set_trajectory_controller_active(True)
+            except Exception as exc:
+                raise RobotCommandError(
+                    f"could not activate trajectory controller: {exc}")
+            # Driver state notifications are asynchronous.  Waiting briefly
+            # avoids reporting a false failure while UFACTORY transitions from
+            # CONFIG_CHANGED/mode 0 to ready/mode 1.
+            deadline = time.monotonic() + 4.0
+            snapshot = node.safety_snapshot()
+            while time.monotonic() < deadline:
+                snapshot = node.safety_snapshot()
+                if snapshot.get("ready", False):
+                    return snapshot
+                time.sleep(0.10)
+            failed = "; ".join(
+                f"{item['name']}: {item['detail']}"
+                for item in snapshot.get("checks", []) if not item.get("ok"))
+            raise RobotCommandError(
+                "robot is not ready after preparation" +
+                (f" ({failed})" if failed else ""))
         if action in VISION_STATE_ACTIONS:
             return self._vision_state(action, p)
         # The automation package owns the authoritative interlocks.  Checking
@@ -849,11 +890,26 @@ class RosRobotBackend:
                 target[:3], target[3:], max_retries=0, timeout=6.0)
         if action == "scan_marker":
             self._require_camera_ready(action)
+            marker_id = p["marker_id"]
+            # Scan goals require a live, enriched pose.  A marker role may be
+            # persisted by the GUI, but it is not a substitute for a current
+            # camera detection in this process.
+            if node._find_marker_entry(marker_id) is None:
+                raise RobotCommandError(
+                    f"marker {marker_id} is not currently detected; show the "
+                    "physical marker to the camera and use its printed ID")
             move_ok, spotted = node.scanToMarker(
-                marker_id=p["marker_id"],
+                marker_id=marker_id,
                 viewing_distance=p["viewing_distance"])
             if not move_ok:
-                return False
+                raise RobotCommandError(
+                    f"MoveIt could not plan or execute the scan approach for "
+                    f"marker {marker_id}; inspect the target and safety "
+                    "message in the backend terminal")
+            if not spotted:
+                raise RobotCommandError(
+                    f"robot reached the scan approach, but marker {marker_id} "
+                    "was not detected afterward")
             return {"move_ok": bool(move_ok), "marker_spotted": bool(spotted)}
         if action == "pickup":
             self._require_camera_ready(action)

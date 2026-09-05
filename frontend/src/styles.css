@@ -1566,6 +1566,12 @@ p.muted { margin: 0; font-size: 13px; }
   max-height: 320px;
   object-fit: contain;
 }
+.robot-camera-detection {
+  margin: var(--sp-2) 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
 
 /* Gripper output picker: a labelled Field beside its Apply button, so align on
    the bottom edge rather than centring the way .robot-camera-config does. */

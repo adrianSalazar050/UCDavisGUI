@@ -506,6 +506,14 @@ export default function Robot({ robot, wsUp }) {
               </div>
             </div>
           )}
+          {!robot?.sim && robot?.available && !safetyReady && (
+            <div className="robot-actions">
+              <Button variant="primary" disabled={busy || submitting}
+                      busy={submitting} onClick={() => run("prepare_motion")}>
+                Prepare robot for GUI control
+              </Button>
+            </div>
+          )}
           <div className="robot-actions">
             <Button variant="primary" disabled={!controlsEnabled}
                     busy={submitting} onClick={() => run("home")}>
@@ -864,6 +872,11 @@ export default function Robot({ robot, wsUp }) {
                      alt="Robot camera with ArUco overlay" />
               )}
             </div>
+            <p className="robot-camera-detection" aria-live="polite">
+              {(robot?.camera?.visible_marker_ids ?? []).length > 0
+                ? `ArUco in view: ID ${(robot.camera.visible_marker_ids ?? []).join(", ")}`
+                : "No ArUco detected in view"}
+            </p>
           </Card>
 
           <Card title="1. Camera intrinsic calibration">
