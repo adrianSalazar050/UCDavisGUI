@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   cancelRobotCommand,
+  configureRobotGripper,
   fetchRobotStatus,
   sendRobotCommand,
 } from "./robot.js";
@@ -59,6 +60,33 @@ describe("robot API", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/robot/commands/id%2Fwith%20space/cancel",
       { method: "POST" });
+  });
+
+  it("points the gripper at a controller output", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ output: 5 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect((await configureRobotGripper(5)).output).toBe(5);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/robot/gripper",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ output: 5 }),
+      }),
+    );
+  });
+
+  it("surfaces the mid-grip refusal from the gripper route", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ detail: "open the gripper before changing its output" }),
+    }));
+    await expect(configureRobotGripper(2)).rejects.toThrow(
+      "open the gripper before changing its output");
   });
 
   it("surfaces FastAPI errors", async () => {

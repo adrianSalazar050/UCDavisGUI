@@ -7,6 +7,8 @@ import {
   fetchRobotCameras,
   sendRobotCommand,
 } from "../api/robot.js";
+import { blockerText, gripperLabel, gripperOutputView }
+  from "../components/robot/gripperOutput.js";
 import Button from "../components/ui/Button.jsx";
 import Card from "../components/ui/Card.jsx";
 import Field from "../components/ui/Field.jsx";
@@ -68,17 +70,6 @@ function VectorFields({ values, setValues, labels, step }) {
 
 function formatNumber(value, digits = 3) {
   return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "—";
-}
-
-
-function gripperLabel(gripper) {
-  if (!gripper?.kind) return "Not configured";
-  if (gripper.kind === "cgpio") {
-    return `Controller output ${gripper.output ?? "CO0"}`;
-  }
-  if (gripper.kind === "lite6_service") return "Lite 6 built-in";
-  if (gripper.kind === "moveit_action") return "MoveIt gripper action";
-  return gripper.kind;
 }
 
 
@@ -319,6 +310,12 @@ export default function Robot({ robot, wsUp }) {
   // hide a working gripper behind a telemetry gap.
   const gripperMissing = Boolean(
     gripper && (!gripper.kind || gripper.disabled));
+  // The controller-output picker. `gripperOutput` holds only what the operator
+  // has picked; an untouched picker follows the live setting from telemetry,
+  // and shows CO0 when there is no arm to ask. Null means this gripper has no
+  // output to select at all (Lite 6 service, MoveIt action).
+  const outputView = gripperOutputView(
+    { robot, gripper, selection: gripperOutput, busy });
   const vision = robot?.vision;
   const intrinsic = vision?.intrinsic;
   // Commissioning reads the camera and the current TF but never plans a goal,
@@ -381,14 +378,6 @@ export default function Robot({ robot, wsUp }) {
     }
   }, [robot]);
 
-  // Seed the picker from telemetry once. Re-syncing on every frame would
-  // yank the dropdown back under an operator part-way through choosing.
-  useEffect(() => {
-    if (gripperOutput === "" && gripper?.ionum != null) {
-      setGripperOutput(String(gripper.ionum));
-    }
-  }, [gripper?.ionum, gripperOutput]);
-
   const last = robot?.last_command;
   const pose = robot?.eef_pose?.xyz_rpy ?? [];
 
@@ -448,8 +437,11 @@ export default function Robot({ robot, wsUp }) {
     setError(null);
     setNotice(null);
     try {
-      await configureRobotGripper(Number(gripperOutput));
-      setNotice(`Gripper output set to CO${gripperOutput}`);
+      const output = Number(outputView.value);
+      await configureRobotGripper(output);
+      setNotice(`Gripper output set to CO${output}`);
+      // Hand the picker back to telemetry, which now carries the new pin.
+      setGripperOutput("");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -696,32 +688,34 @@ export default function Robot({ robot, wsUp }) {
                 </div>
               </div>
             )}
-            {gripper?.kind === "cgpio" && (
+            {outputView ? (
               <div className="robot-output-config">
-                <Field label="Controller output"
-                       help="Which CO pin on the control box drives the jaws.">
-                  <select value={gripperOutput}
+                <Field label="Controller output">
+                  <select value={outputView.value}
                           onChange={(event) => setGripperOutput(event.target.value)}>
-                    {Array.from({ length: gripper.output_count ?? 8 },
-                                (_, index) => (
+                    {outputView.outputs.map((index) => (
                       <option key={index} value={index}>CO{index}</option>
                     ))}
                   </select>
                 </Field>
                 <Button busy={submitting}
-                        disabled={!robot?.available || busy || submitting ||
-                                  gripperOutput === "" ||
-                                  Number(gripperOutput) === gripper.ionum}
+                        disabled={outputView.blocker !== null || submitting}
                         onClick={applyGripperOutput}>
                   Apply output
                 </Button>
               </div>
-            )}
-            {gripper?.kind === "cgpio" && gripper.command === "close" && (
+            ) : (
               <p className="robot-help">
-                The output cannot be changed while the gripper is commanded
-                closed — the current pin stays latched, and switching would
-                leave it holding with nothing tracking it. Open first.
+                {gripperLabel(gripper)} has no controller output to select.
+              </p>
+            )}
+            {outputView && (
+              <p className="robot-help">
+                Which CO pin on the control box the gripper is wired to
+                (CO0–CO{outputView.outputs.length - 1}). Applies on the next
+                open/close, no restart.
+                {blockerText(outputView.blocker) &&
+                  ` ${blockerText(outputView.blocker)}`}
               </p>
             )}
             {gripperMissing && (

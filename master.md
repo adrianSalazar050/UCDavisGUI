@@ -533,7 +533,7 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 | `store.py` | `printers.json` persistence + the `PrinterConfig` dataclass | `PrinterConfig`, `PrinterStore`, `MemoryStore`, `DETECTION_CLASSES`, `CAMERA_SOURCES`, `MODEL_NAMES`, `guess_model_id`, `model_mismatch`, `NOZZLES`, `DEFAULT_NOZZLE` |
 | `printer.py` | One live printer's state | `PrinterService`, `MockPrinter`, `build_summary`, `SUMMARY_FIELDS`, `STALE_S` |
 | `registry.py` | The set of printers, keyed by serial | `PrinterRegistry`, `DuplicateSerial`, `.reconnect()`, `.printer_model()`, `.printer_nozzle()` |
-| `main.py` | The FastAPI app + all routes | `create_app`, `AddPrinter`, `EditPrinter`, `DetectionUpdate`, `ArmBody`, `AddQueueJob`, `ReorderQueueJobs`, `RobotCommandBody`, `RobotCameraBody` |
+| `main.py` | The FastAPI app + all routes | `create_app`, `AddPrinter`, `EditPrinter`, `DetectionUpdate`, `ArmBody`, `AddQueueJob`, `ReorderQueueJobs`, `RobotCommandBody`, `RobotCameraBody`, `RobotGripperBody` |
 | `detection.py` | Reading detector status, deciding, actuating | `StatusReader`, `AutoStopController`, `DetectorSupervisor`, `DetectionCoordinator`, `MockDetectorRunner` |
 | `queue.py` | Per-printer job list + `queues.json` | `PrintQueue`, `QueueStore`, `MemoryQueueStore` |
 | `sdcard.py` | microSD over FTPS (read + upload) | `list_dir`, `fetch_file`, `upload_file`, `normalize_path`, `ImplicitFTP_TLS`, `SdError`, `parse_mlsd`, `parse_list_lines` |
@@ -544,7 +544,7 @@ There is **no `server/summary.py`** — `build_summary()` lives in
 | `runs.py` | Finding the newest captured frame | `find_active_run`, `newest_frame`, `ACTIVE_WINDOW_S` |
 | `ledger.py` | `ledger.db` only — schema, forward-only migrations, row helpers (§13–§15) | `Ledger`, `MIGRATIONS`, `SCHEMA_VERSION`, `END_STATES`, `PIECE_STATUSES`, `RUN_WRITABLE`, `SPOOL_WRITABLE`, `SPOOL_FREE_STATUSES`, `set_default_recipe`, `set_loaded_spool`, `unload_spool`, `add_consumption` |
 | `runlog.py` | Turning `registry.summaries()` diffs into run/event rows (§13) | `RunRecorder`, `RECONCILE_DEADLINE_S` |
-| `robot.py` | Serialized robot motion and vision commissioning; mock + ROS backends (§16) | `RobotManager`, `MockRobotBackend`, `RosRobotBackend`, `normalize_command`, `list_video_devices`, `ACTIONS`, `VISION_STATE_ACTIONS`, `PHYSICAL_ONLY_ACTIONS`, `MARKER_ROLES`, `RobotBusy`, `RobotUnavailable`, `RobotCommandError` |
+| `robot.py` | Serialized robot motion and vision commissioning; mock + ROS backends (§16) | `RobotManager`, `MockRobotBackend`, `RosRobotBackend`, `normalize_command`, `list_video_devices`, `ACTIONS`, `VISION_STATE_ACTIONS`, `PHYSICAL_ONLY_ACTIONS`, `MARKER_ROLES`, `XARM_CO_COUNT`, `RobotBusy`, `RobotUnavailable`, `RobotCommandError` |
 | `partstore.py` | Part model bytes on disk, pure of the DB (§14) | `PartStore` |
 | `auth.py` | Shared-password auth for LAN serving (§2.1) | `Auth`, `is_loopback`, `LOOPBACK_HOSTS` — `build_auth` (the fail-closed rule) lives in `__main__.py`, not here |
 | `__main__.py` | CLI entry, wiring, `--mock` seeding, `--host`/`--lan`/`build_auth` (§2.1, §8) | `main`, `real_factory`, `mock_factory`, `MOCK_SEED`, `build_auth`, `resolve_host`, `resolve_password`, `read_password_file`, `local_ipv4s`, `lan_url_lines`, `DEFAULT_HOST`, `LAN_HOST`, `PASSWORD_FILE` |
@@ -1540,7 +1540,7 @@ it will enable a control that moves hardware.
 | `parts` | Library | `Parts.jsx` | Parts catalogue: `PartList`, `PartForm`, `RecipeEditor`, per-recipe "Slice for &lt;printer&gt;" (§14) |
 | `inventory` | Library | `Inventory.jsx` | Filament spools: `SpoolList` with derived remaining grams + low-stock highlight, `SpoolForm`, and the per-printer `LoadedSpool` control (§15) |
 | `printers` | Setup | `Printers.jsx` | Printer grid (`PrinterCard`, with inline `EditPrinterForm`) + `AddPrinterForm` behind a disclosure |
-| `robot` | Control | `Robot.jsx` | The plate-handling arm (§16): arm-to-enable interlock, home/stop, joint and Cartesian goals, jog pad, ArUco pick/place/transfer/scrape, gripper, live joint + pose readouts, per-marker pose detail, camera selection and preview, teach mode, and the ChArUco hand-eye / observation-pose / marker-role commissioning workflow (§16.5) |
+| `robot` | Control | `Robot.jsx` | The plate-handling arm (§16): arm-to-enable interlock, home/stop, joint and Cartesian goals, jog pad, ArUco pick/place/transfer/scrape, gripper open/close with its controller-output (CO0–CO7) picker, live joint + pose readouts, per-marker pose detail, camera selection and preview, teach mode, and the ChArUco hand-eye / observation-pose / marker-role commissioning workflow (§16.5) |
 
 The key `printers` is a registry key; the `printers` **prop** every page
 receives is the live summary list. They are unrelated.
@@ -2933,6 +2933,21 @@ open/close with no restart and no second copy of the setting to drift.
 `XARM_GRIPPER_OUTPUT` seeds it at startup for `--robot-mode ros`, applied
 before the first command can run.
 
+**The picker is always on the card.** It hides only when telemetry
+*positively* reports a gripper with no output to point anywhere
+(`lite6_service`, `moveit_action`) — the same rule the open/close buttons
+already follow for a missing gripper block. With no arm configured (a server
+started without `--robot-mode`, which is how the card was first seen showing
+nothing but Open and Close), or against an older automation checkout whose
+telemetry carries no `ionum`, the dropdown still renders so the setting is
+discoverable; **Apply** is disabled with the reason spelled out underneath (no
+arm, arm unavailable, command running, gripper commanded closed) and, when the
+live setting is unknown, left to the server to accept or refuse. An untouched
+picker follows the live `ionum`; once the operator picks another value it holds
+that until Apply succeeds, then hands back to telemetry. Those rules are pure
+functions in `frontend/src/components/robot/gripperOutput.js`, tested without a
+DOM, the way `printerStatus.js` is.
+
 Two refusals, both about not stranding a pin:
 
 - **Not while the gripper is commanded closed.** The old output stays latched
@@ -2940,7 +2955,8 @@ Two refusals, both about not stranding a pin:
   plate that nothing is tracking any more. Open first.
 - **Not on a non-`cgpio` gripper.** An AR4 MoveIt action and the Lite 6's
   built-in services have no output to point anywhere, so `ionum` is absent from
-  telemetry and the page shows no picker at all.
+  telemetry, the route answers **400**, and the card replaces the picker with a
+  line saying that gripper has no controller output to select.
 
 Switching **clears `command` back to `None`**. The new pin was never driven by
 this process, so its state is genuinely unknown; carrying "open" across would
@@ -2990,6 +3006,17 @@ inverts the output with no code change. Then in a browser against
 `--robot-mode mock`: the buttons disabled until the workspace-clear interlock
 is ticked, and Close → Open landing as `gripper_close succeeded` /
 `gripper_open succeeded` with the card following.
+
+**Verified on the Windows dev box (2026-09-05), in a headless browser against
+the built bundle.** Against `--robot-mode mock`: the picker seeded at CO0 with
+Apply disabled, enabled on picking CO3, and the click landing on the server
+(`ionum: 3`) with the Hardware readout following; after `gripper_close`, Apply
+disabled with the mid-grip note under it, and `PUT /api/robot/gripper`
+answering **400** with the same reason; Apply live again after `gripper_open`.
+Against a server started with **no** `--robot-mode` — the state in which the
+card had shown only Open and Close — the picker present, Apply disabled, and the
+line underneath saying no arm is configured. No console errors on either page.
+Plus `python -m pytest -q` and `npm test`.
 
 **Ported but NOT verified anywhere — no ROS on this machine:** everything
 `RosRobotBackend` does. Backend startup, MoveIt planning, ArUco detection,
