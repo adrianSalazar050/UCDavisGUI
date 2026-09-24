@@ -35,6 +35,7 @@ ACTIONS = {
     "teach_enable",
     "teach_disable",
     "prepare_motion",
+    "clear_fault",
     # Vision commissioning (ar4_automation.vision_commissioning). These read
     # the camera and the current TF; only goto_observation moves the arm.
     "calibration_start",
@@ -80,6 +81,7 @@ PHYSICAL_ONLY_ACTIONS = {
     "teach_enable",
     "teach_disable",
     "prepare_motion",
+    "clear_fault",
     "calibration_start",
     "calibration_stop",
     "calibration_capture",
@@ -232,6 +234,19 @@ def normalize_command(action: str, parameters: dict | None) -> tuple[str, dict]:
         return action, {"clear": _flag(p, "clear")}
     if action == "intrinsic_start":
         return action, {"clear": _flag(p, "clear")}
+    if action == "clear_fault":
+        acknowledgements = {
+            "area_clear": _flag(p, "area_clear"),
+            "cause_inspected": _flag(p, "cause_inspected"),
+            "e_stop_released": _flag(p, "e_stop_released"),
+        }
+        missing = [name.replace("_", " ") for name, ok
+                   in acknowledgements.items() if not ok]
+        if missing:
+            raise RobotCommandError(
+                "fault clear requires operator confirmation: " +
+                ", ".join(missing))
+        return action, acknowledgements
     if action == "save_observation":
         # marker_id is optional: an observation pose may just be a good place
         # to look from, with no marker chosen for it yet.
@@ -549,6 +564,8 @@ class MockRobotBackend:
             self.teaching = action == "teach_enable"
         elif action == "prepare_motion":
             self.teaching = False
+        elif action == "clear_fault":
+            return {"mock": True, "fault_cleared": True}
         elif action in {"gripper_open", "gripper_close"}:
             self.gripper_command = action.removeprefix("gripper_")
         elif action in VISION_STATE_ACTIONS or action == "goto_observation":
@@ -707,10 +724,11 @@ class RosRobotBackend:
         overrides = {}
         if not sim and robot == "xarm6" and camera_mode is not None:
             if camera_mode == "disabled":
-                overrides["stream_source"] = "ros"
+                overrides["stream_source"] = "disabled"
             elif camera_mode == "webcam":
-                overrides.update(stream_source="webcam",
-                                 camera_index=int(camera_index))
+                overrides["stream_source"] = "webcam"
+                if camera_index is not None:
+                    overrides["camera_index"] = int(camera_index)
         self.node = start_node(
             sim=sim, robot=robot, joint_state_timeout=2.0, **overrides)
         self.robot = robot
@@ -825,6 +843,14 @@ class RosRobotBackend:
             raise RobotCommandError(
                 "robot is not ready after preparation" +
                 (f" ({failed})" if failed else ""))
+        if action == "clear_fault":
+            if self.sim:
+                raise RobotCommandError("clear_fault is physical-only")
+            try:
+                node.clear_xarm_error()
+            except Exception as exc:
+                raise RobotCommandError(f"could not clear robot fault: {exc}")
+            return node.recovery_snapshot()
         if action in VISION_STATE_ACTIONS:
             return self._vision_state(action, p)
         # The automation package owns the authoritative interlocks.  Checking
@@ -997,11 +1023,18 @@ class RosRobotBackend:
         raise RobotCommandError(f"unsupported action {action}")
 
     def _require_manipulation_hardware(self, action: str) -> None:
-        """Never report a physical pick/place success with a no-op gripper."""
+        """Block uncommissioned physical plate routines before motion starts."""
         if not self.sim and self.node.gripper is None:
             raise RobotCommandError(
                 f"{action} requires a configured physical {self.robot} gripper; "
                 "motion was blocked before the first waypoint")
+        cfg = self.node.robot_config.get("gripper") or {}
+        if (not self.sim and action in {"pickup", "place", "transfer", "scrape"}
+                and not cfg.get("plate_routines_enabled", False)):
+            raise RobotCommandError(
+                f"{action} is blocked until the CO0 gripper is physically commissioned; "
+                "manual open/close remains available")
+
 
     def _require_camera_ready(self, action: str) -> None:
         """Block vision-dependent physical motion on stale camera input."""
@@ -1046,6 +1079,7 @@ class RosRobotBackend:
             "markers": _jsonable(self.node.marker_poses),
             "camera": _jsonable(self.node.stream.diagnostics()),
             "safety": _jsonable(self.node.safety_snapshot()),
+            "recovery": _jsonable(self.node.recovery_snapshot()),
             "vision": self._vision_snapshot(),
             "gripper": self._gripper_snapshot(),
         }
@@ -1079,6 +1113,8 @@ class RosRobotBackend:
         if isinstance(cfg, dict) and cfg.get("type") == "cgpio":
             snapshot["ionum"] = int(cfg.get("ionum", 0))
             snapshot["output_count"] = XARM_CO_COUNT
+            snapshot["plate_routines_enabled"] = bool(cfg.get("plate_routines_enabled", False))
+            snapshot["output_locked"] = bool(cfg.get("fixed_output", False))
         return snapshot
 
     def _vision_snapshot(self) -> dict:
@@ -1132,6 +1168,9 @@ class RosRobotBackend:
             raise RobotCommandError(
                 f"{self.robot} does not drive its gripper from a controller "
                 "output, so there is nothing to select")
+        if cfg.get("fixed_output") and int(output) != int(cfg.get("ionum", 0)):
+            raise RobotCommandError(
+                f"gripper output is fixed to CO{int(cfg.get('ionum', 0))} by the cell configuration")
         if getattr(self.node, "gripper_command", None) == "close":
             raise RobotCommandError(
                 "open the gripper before changing its output; the current one "
@@ -1170,6 +1209,17 @@ def list_video_devices() -> list[dict]:
             index = int(path.name[5:])
         except (OSError, ValueError):
             continue
+        stable_path = None
+        by_id = pathlib.Path('/dev/v4l/by-id')
+        if by_id.is_dir():
+            for candidate in sorted(by_id.iterdir()):
+                try:
+                    if candidate.resolve() == path.resolve():
+                        stable_path = str(candidate)
+                        break
+                except OSError:
+                    continue
         devices.append({"index": index, "name": name,
-                        "path": f"/dev/{path.name}"})
+                        "path": f"/dev/{path.name}",
+                        "stable_path": stable_path})
     return devices

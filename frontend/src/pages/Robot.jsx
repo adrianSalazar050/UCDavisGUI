@@ -7,6 +7,7 @@ import {
   fetchRobotCameras,
   sendRobotCommand,
 } from "../api/robot.js";
+import { acknowledgeCellIncident } from "../api/cell.js";
 import { blockerText, gripperLabel, gripperOutputView }
   from "../components/robot/gripperOutput.js";
 import Button from "../components/ui/Button.jsx";
@@ -164,7 +165,7 @@ function IntrinsicReadout({ solve }) {
 }
 
 
-export default function Robot({ robot, wsUp }) {
+export default function Robot({ robot, cell, selected, wsUp }) {
   const [armed, setArmed] = useState(false);
   const [jointValues, setJointValues] = useState(DEFAULT_JOINTS_DEG);
   const [poseValues, setPoseValues] = useState(EMPTY_POSE);
@@ -185,6 +186,12 @@ export default function Robot({ robot, wsUp }) {
   const [observationRole, setObservationRole] = useState("printer");
   const [confirmRole, setConfirmRole] = useState("printer");
   const [gripperOutput, setGripperOutput] = useState("");
+  const [faultChecks, setFaultChecks] = useState({
+    area_clear: false,
+    cause_inspected: false,
+    e_stop_released: false,
+  });
+  const [incidentNote, setIncidentNote] = useState("");
   const jogDispatching = useRef(false);
   // The id of the jog the server has accepted but not yet reported finished.
   // See the release effect below for why 202 is not good enough.
@@ -198,6 +205,14 @@ export default function Robot({ robot, wsUp }) {
   const controlsEnabled = Boolean(
     wsUp && robot?.available && safetyReady && armed && !busy);
   const pill = robotPill(robot);
+  const selectedCell = useMemo(
+    () => (cell?.cells ?? []).find((item) => item.printer_serial === selected),
+    [cell, selected],
+  );
+  const canRequestFaultClear = Boolean(
+    robot?.recovery?.can_request_fault_clear
+    && Object.values(faultChecks).every(Boolean),
+  );
   const jointsDeg = useMemo(
     () => (robot?.joints ?? []).map((value) => Number(value) / RAD),
     [robot?.joints],
@@ -418,6 +433,20 @@ export default function Robot({ robot, wsUp }) {
     }
   };
 
+  const acknowledgeIncident = async () => {
+    if (!selectedCell) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await acknowledgeCellIncident(selectedCell.printer_serial, incidentNote);
+      setNotice("Printer incident acknowledged. This does not clear the printer fault or start robot motion.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const saveObservation = async () => {
     const name = observationName.trim();
     if (!name) {
@@ -514,6 +543,31 @@ export default function Robot({ robot, wsUp }) {
               </Button>
             </div>
           )}
+          {!robot?.sim && robot?.recovery?.can_request_fault_clear && (
+            <div className="state-error robot-notice">
+              <strong>Controller fault recovery</strong>
+              <div>Clear a fault only after physically inspecting the cell. This does not start motion.</div>
+              {[
+                ["area_clear", "The robot workspace is clear of people and obstructions"],
+                ["cause_inspected", "I inspected and corrected the cause of the fault"],
+                ["e_stop_released", "Emergency stop and protective devices are released"],
+              ].map(([key, label]) => (
+                <label className="robot-enable" key={key}>
+                  <input type="checkbox" checked={faultChecks[key]}
+                    onChange={(event) => setFaultChecks((current) => ({
+                      ...current, [key]: event.target.checked,
+                    }))} />
+                  {label}
+                </label>
+              ))}
+              <div className="robot-actions">
+                <Button variant="danger" disabled={!canRequestFaultClear || busy || submitting}
+                        busy={submitting} onClick={() => run("clear_fault", faultChecks)}>
+                  Request fault clear
+                </Button>
+              </div>
+            </div>
+          )}
           <div className="robot-actions">
             <Button variant="primary" disabled={!controlsEnabled}
                     busy={submitting} onClick={() => run("home")}>
@@ -528,6 +582,50 @@ export default function Robot({ robot, wsUp }) {
           {error && <div className="state-error robot-notice">{error}</div>}
         </Card>
       </Section>
+
+      {selectedCell && (
+        <Section title="Printer-to-robot readiness">
+          <Card>
+            <div className="robot-status">
+              <div>
+                <div className="robot-status__name">{selectedCell.printer_name}</div>
+                <div className="robot-status__meta">
+                  Printer state: {selectedCell.state.replaceAll("_", " ")}
+                </div>
+              </div>
+              <StatusPill status={selectedCell.ready_for_plate_removal ? "ok" : "warn"}>
+                {selectedCell.ready_for_plate_removal ? "Eligible" : "Not eligible"}
+              </StatusPill>
+            </div>
+            <div className="robot-status__meta">{selectedCell.recommended_action}</div>
+            {(selectedCell.blockers ?? []).length > 0 && (
+              <div className="state-warn robot-notice">
+                {selectedCell.blockers.map((blocker) => <div key={blocker}>• {blocker}</div>)}
+              </div>
+            )}
+            {selectedCell.state === "operator_review" && !selectedCell.incident && (
+              <div className="robot-form">
+                <Field label="Incident review note (optional)" value={incidentNote}
+                       onChange={(event) => setIncidentNote(event.target.value)} />
+                <div className="robot-actions">
+                  <Button variant="danger" disabled={submitting || busy}
+                          onClick={acknowledgeIncident}>
+                    Acknowledge incident review
+                  </Button>
+                </div>
+              </div>
+            )}
+            {selectedCell.incident && (
+              <div className="state-warn robot-notice">
+                Incident review recorded. The printer fault remains active until it is resolved at the printer.
+              </div>
+            )}
+            <div className="robot-status__meta">
+              Monitoring only: automatic plate removal is intentionally disabled.
+            </div>
+          </Card>
+        </Section>
+      )}
 
       <Section title="Movement goals">
         <div className="robot-grid">
@@ -700,7 +798,7 @@ export default function Robot({ robot, wsUp }) {
               <div className="robot-output-config">
                 <Field label="Controller output">
                   <select value={outputView.value}
-                          onChange={(event) => setGripperOutput(event.target.value)}>
+                          disabled={outputView.locked} onChange={(event) => setGripperOutput(event.target.value)}>
                     {outputView.outputs.map((index) => (
                       <option key={index} value={index}>CO{index}</option>
                     ))}
@@ -719,9 +817,7 @@ export default function Robot({ robot, wsUp }) {
             )}
             {outputView && (
               <p className="robot-help">
-                Which CO pin on the control box the gripper is wired to
-                (CO0–CO{outputView.outputs.length - 1}). Applies on the next
-                open/close, no restart.
+                {outputView.locked ? "This gripper is permanently wired to CO0: LOW opens and HIGH closes." : `Which CO pin on the control box the gripper is wired to (CO0–CO${outputView.outputs.length - 1}). Applies on the next open/close, no restart.`}
                 {blockerText(outputView.blocker) &&
                   ` ${blockerText(outputView.blocker)}`}
               </p>
@@ -731,6 +827,12 @@ export default function Robot({ robot, wsUp }) {
                 No gripper is configured for this arm, so pick, place, transfer
                 and scrape are blocked before their first waypoint rather than
                 reporting a grasp that never happened.
+              </div>
+            )}
+            {gripper && !gripper.plate_routines_enabled && !gripperMissing && (
+              <div className="state-warn robot-notice">
+                CO0 is configured for manual commissioning only. Pick, place,
+                transfer and scrape remain blocked until physical gripper tests pass.
               </div>
             )}
             {gripper && !gripper.sensed && !gripperMissing && (
@@ -803,6 +905,11 @@ export default function Robot({ robot, wsUp }) {
             {robot?.camera?.last_error && (
               <div className="state-error robot-notice">{robot.camera.last_error}</div>
             )}
+            {robot?.camera?.frame_stalled && (
+              <div className="state-warn robot-notice">
+                Camera frames are stale. The backend is retrying the selected USB device; it will not switch cameras automatically.
+              </div>
+            )}
             {robot?.camera && (
               <p className="robot-help">
                 Dictionaries: {(robot.camera.marker_dictionaries ?? []).join(", ")} ·
@@ -858,6 +965,7 @@ export default function Robot({ robot, wsUp }) {
                 {cameraDevices.map((device) => (
                   <option key={device.index} value={device.index}>
                     {device.path} · {device.name}
+                    {device.stable_path ? " · stable USB identity" : ""}
                   </option>
                 ))}
               </select>
