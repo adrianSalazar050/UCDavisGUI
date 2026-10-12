@@ -1374,6 +1374,23 @@ p.muted { margin: 0; font-size: 13px; }
 .robot-goal-fields--three {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
+.cell-layout__views { display: grid; grid-template-columns: minmax(0, 3fr) minmax(150px, 1fr); gap: var(--sp-4); align-items: start; }
+.cell-layout__map, .cell-layout__side { width: 100%; display: block; border: 1px solid var(--line-strong); border-radius: var(--r-control); cursor: crosshair; background: var(--surface-2); }
+.cell-layout__side { cursor: default; }
+.cell-layout__floor { fill: var(--surface-2); }
+.cell-layout__label { fill: var(--text); font: 12px sans-serif; pointer-events: none; }
+.cell-layout__axis { fill: var(--text-muted); font: 11px sans-serif; pointer-events: none; }
+.cell-layout__origin { fill: var(--text); stroke: var(--surface); stroke-width: 2; }
+.cell-layout__preview { fill: rgb(37 99 235 / 14%); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 4; pointer-events: none; }
+.cell-layout__legend { display: flex; flex-direction: column; gap: var(--sp-2); font-size: 12px; color: var(--text-muted); }
+.cell-layout__legend span, .cell-layout__zone { display: flex; align-items: center; gap: var(--sp-2); }
+.cell-layout__legend i, .cell-layout__zone i { width: 12px; height: 12px; border-radius: 50%; flex: 0 0 auto; }
+.cell-layout__workspace { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 3fr); gap: var(--sp-5); }
+.cell-layout__zones { display: flex; flex-direction: column; gap: var(--sp-2); }
+.cell-layout__zone { width: 100%; border: 1px solid var(--line); padding: var(--sp-2); border-radius: var(--r-control); background: var(--surface-2); color: var(--text); text-align: left; cursor: pointer; }
+.cell-layout__zone--selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.cell-layout__zone small { margin-left: auto; color: var(--text-muted); }
+.cell-layout__side-empty { padding: var(--sp-5); color: var(--text-muted); background: var(--surface-2); border-radius: var(--r-control); }
 .robot-goal-buttons {
   display: flex;
   flex-wrap: wrap;
@@ -1530,6 +1547,7 @@ p.muted { margin: 0; font-size: 13px; }
   .robot-readout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .robot-marker__pose { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .robot-form__actions { align-items: flex-start; flex-direction: column; }
+  .cell-layout__views, .cell-layout__workspace { grid-template-columns: 1fr; }
   .robot-goal-fields--three { grid-template-columns: 1fr; }
   .jog-layout { gap: var(--sp-3); }
   .jog-pad { width: 168px; height: 168px; }

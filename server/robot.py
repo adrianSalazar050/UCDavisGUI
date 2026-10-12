@@ -25,6 +25,7 @@ ACTIONS = {
     "move_pose",
     "jog_pose",
     "scan_marker",
+    "remove_plate",
     "pickup",
     "place",
     "transfer",
@@ -36,6 +37,7 @@ ACTIONS = {
     "teach_disable",
     "prepare_motion",
     "clear_fault",
+    "enable_robot",
     # Vision commissioning (ar4_automation.vision_commissioning). These read
     # the camera and the current TF; only goto_observation moves the arm.
     "calibration_start",
@@ -51,6 +53,8 @@ ACTIONS = {
     "save_observation",
     "goto_observation",
     "confirm_marker",
+    "profile_dry_run",
+    "profile_execute",
 }
 
 # Vision actions that read the camera and the current TF but never move the
@@ -105,6 +109,10 @@ MARKER_ROLES = {"printer", "box", "scrape", "other"}
 # it against a measured pin-out: driving the wrong output on a live cell is not
 # a mistake the software can detect.
 XARM_CO_COUNT = 8
+# Contact has no force feedback. Keep the first physical workflow bounded to a
+# short, slow MoveIt goal; the configured value can never make it travel more.
+CONTACT_MAX_TRAVEL_M = 0.010
+CONTACT_MAX_SPEED_MM_S = 5.0
 
 
 class RobotBusy(RuntimeError):
@@ -207,6 +215,11 @@ def normalize_command(action: str, parameters: dict | None) -> tuple[str, dict]:
             "euler": _number_list(p.get("euler"), "euler", 3),
             "viewing_distance": viewing_distance,
         }
+    if action == "remove_plate":
+        return action, {
+            "source_marker_id": _integer(p, "source_marker_id"),
+            "dropoff_marker_id": _integer(p, "dropoff_marker_id"),
+        }
     if action in {"scan_marker", "pickup", "place"}:
         out = {"marker_id": _integer(p, "marker_id")}
         if action == "scan_marker":
@@ -234,7 +247,7 @@ def normalize_command(action: str, parameters: dict | None) -> tuple[str, dict]:
         return action, {"clear": _flag(p, "clear")}
     if action == "intrinsic_start":
         return action, {"clear": _flag(p, "clear")}
-    if action == "clear_fault":
+    if action in {"clear_fault", "enable_robot"}:
         acknowledgements = {
             "area_clear": _flag(p, "area_clear"),
             "cause_inspected": _flag(p, "cause_inspected"),
@@ -262,6 +275,25 @@ def normalize_command(action: str, parameters: dict | None) -> tuple[str, dict]:
     if action == "confirm_marker":
         return action, {"marker_id": _integer(p, "marker_id"),
                         "role": _role(p)}
+    if action in {"profile_dry_run", "profile_execute"}:
+        profile = p.get("profile")
+        if not isinstance(profile, dict) or not isinstance(profile.get("id"), str):
+            raise RobotCommandError(f"{action} requires a saved profile")
+        result = {"profile": copy.deepcopy(profile)}
+        if action == "profile_execute":
+            acknowledgements = {
+                "area_clear": _flag(p, "area_clear"),
+                "supervised": _flag(p, "supervised"),
+                "contact_fixture_confirmed": _flag(p, "contact_fixture_confirmed"),
+            }
+            missing = [name.replace("_", " ") for name, ok in acknowledgements.items()
+                       if not ok]
+            if missing:
+                raise RobotCommandError(
+                    "physical profile execution requires operator confirmation: " +
+                    ", ".join(missing))
+            result.update(acknowledgements)
+        return action, result
     return action, {}
 
 
@@ -352,6 +384,59 @@ class RobotManager:
         if backend is None or not hasattr(backend, "camera_frame"):
             return None
         return backend.camera_frame()
+
+    def capture_profile_pose(self, marker_id: int, target_frame="tcp",
+                             translation_frame="marker", orientation_frame="marker") -> dict:
+        """Read the current TCP transform relative to a visible ArUco.
+
+        This deliberately bypasses the command queue: it sends no trajectory,
+        gripper, or controller request.  It is rejected while a command is
+        active so a profile cannot accidentally capture a changing pose.
+        """
+        with self._lock:
+            backend = self._backend
+            active = self._active
+            state = self._state
+        if state in {"starting", "error", "stopped"} or backend is None:
+            raise RobotUnavailable(self._error or "robot is unavailable")
+        if active is not None:
+            raise RobotBusy("wait for the active robot command before capturing a pose")
+        if not hasattr(backend, "capture_profile_pose"):
+            raise RobotUnavailable("this robot backend cannot capture marker-relative poses")
+        return backend.capture_profile_pose(marker_id, target_frame,
+                                            translation_frame, orientation_frame)
+
+    def capture_previous_tcp_offset(self, profile: dict, step_index: int) -> dict:
+        """Read current TCP as a draft step's offset from its prior target.
+
+        Like marker-relative capture, this bypasses the command queue because
+        it is read-only, but it must never sample while the arm is moving.
+        """
+        with self._lock:
+            backend = self._backend
+            active = self._active
+            state = self._state
+        if state in {"starting", "error", "stopped"} or backend is None:
+            raise RobotUnavailable(self._error or "robot is unavailable")
+        if active is not None:
+            raise RobotBusy("wait for the active robot command before capturing an offset")
+        if not hasattr(backend, "capture_previous_tcp_offset"):
+            raise RobotUnavailable("this robot backend cannot capture previous-TCP offsets")
+        return backend.capture_previous_tcp_offset(profile, step_index)
+
+    def capture_absolute_tcp_pose(self) -> dict:
+        """Read a fixed link_base TCP target while the arm is stationary."""
+        with self._lock:
+            backend = self._backend
+            active = self._active
+            state = self._state
+        if state in {"starting", "error", "stopped"} or backend is None:
+            raise RobotUnavailable(self._error or "robot is unavailable")
+        if active is not None:
+            raise RobotBusy("wait for the active robot command before capturing a pose")
+        if not hasattr(backend, "capture_absolute_tcp_pose"):
+            raise RobotUnavailable("this robot backend cannot capture TCP poses")
+        return backend.capture_absolute_tcp_pose()
 
     def start(self) -> None:
         with self._lock:
@@ -733,6 +818,8 @@ class RosRobotBackend:
             sim=sim, robot=robot, joint_state_timeout=2.0, **overrides)
         self.robot = robot
         self.sim = sim
+        self._profile_dry_run = None
+        self._profile_cancelled = False
         if gripper_output is not None:
             # Apply the seeded output before anything can command the gripper,
             # so the first close of the session already goes to the right pin.
@@ -794,6 +881,147 @@ class RosRobotBackend:
                 daemon=True,
             ).start()
 
+    def capture_profile_pose(self, marker_id: int, target_frame="tcp",
+                             translation_frame="marker", orientation_frame="marker") -> dict:
+        """Return the current TCP pose in the selected marker frame.
+
+        A marker must be visible *now*, rather than merely retained in the
+        historical marker list. This prevents a profile being based on an old
+        estimate after a fixture has moved. The result is informative only;
+        it never plans or commands the robot.
+        """
+        from scipy.spatial.transform import Rotation
+
+        node = self.node
+        diagnostics = node.stream.diagnostics()
+        visible = {int(value) for value in diagnostics.get("visible_marker_ids", [])}
+        if marker_id not in visible:
+            raise RobotCommandError(
+                f"marker {marker_id} is not visible; show it to the camera before capturing")
+        marker = node._find_marker_entry(marker_id)
+        if marker is None:
+            raise RobotCommandError(f"no base-frame pose is available for marker {marker_id}")
+        marker_position = marker.get("positionInBase")
+        marker_euler = marker.get("eulerInBase")
+        tcp_position, tcp_quaternion = node._eef_pose_truth()
+        if marker_position is None or marker_euler is None:
+            raise RobotCommandError(
+                f"marker {marker_id} has no calibrated base-frame transform")
+        if tcp_position is None or tcp_quaternion is None:
+            raise RobotCommandError("current TCP transform is unavailable")
+        if (target_frame not in {"tcp", "camera"}
+                or translation_frame not in {"marker", "base"}
+                or orientation_frame not in {"marker", "base"}):
+            raise RobotCommandError(
+                "target frame must be tcp/camera; translation and orientation frames must be marker/base")
+        marker_rotation = Rotation.from_euler("XYZ", marker_euler, degrees=False)
+        target_position = tcp_position
+        target_rotation = Rotation.from_quat(tcp_quaternion)
+        if target_frame == "camera":
+            hand_eye = getattr(node, "hand_eye_transform", None)
+            if hand_eye is None:
+                raise RobotCommandError("camera-target capture requires an accepted hand-eye calibration")
+            camera_in_base = target_rotation.as_matrix() @ hand_eye[:3, :3]
+            target_rotation = Rotation.from_matrix(camera_in_base)
+            target_position = tcp_position + Rotation.from_quat(tcp_quaternion).apply(hand_eye[:3, 3])
+        offset = (marker_rotation.inv().apply(target_position - marker_position)
+                  if translation_frame == "marker"
+                  else target_position - marker_position)
+        orientation = ((marker_rotation.inv() * target_rotation)
+                       if orientation_frame == "marker" else target_rotation).as_euler(
+            "XYZ", degrees=False)
+        return {
+            "marker_id": marker_id,
+            "offset": [float(value) for value in offset],
+            "orientation": [float(value) for value in orientation],
+            "frame": translation_frame,
+            "orientation_frame": orientation_frame,
+            "target_frame": target_frame,
+            "tcp_frame": node.end_effector_name,
+        }
+
+    def capture_previous_tcp_offset(self, profile: dict, step_index: int) -> dict:
+        """Capture current TCP as an offset from a draft's prior target.
+
+        A previous-TCP step is not a world pose by itself. To capture it we
+        resolve every preceding motion step against the *currently visible*
+        reference marker, then calculate the delta from that resolved target
+        to the current wrist. This never plans or commands motion.
+        """
+        import numpy as np
+        from scipy.spatial.transform import Rotation
+
+        if not isinstance(profile, dict) or not isinstance(profile.get("steps"), list):
+            raise RobotCommandError("previous-TCP capture requires the current profile draft")
+        try:
+            index = int(step_index)
+        except (TypeError, ValueError) as exc:
+            raise RobotCommandError("previous-TCP capture requires a step index") from exc
+        steps = profile["steps"]
+        if index <= 0 or index >= len(steps):
+            raise RobotCommandError("previous-TCP capture needs a preceding profile step")
+        step = steps[index]
+        if (not isinstance(step, dict) or step.get("kind") != "pose" or
+                step.get("reference") != "previous_tcp"):
+            raise RobotCommandError(
+                "previous-TCP capture is only available for a previous-TCP pose step")
+        try:
+            marker_id = int(profile["marker_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RobotCommandError("choose a whole-number reference ArUco ID first") from exc
+
+        prefix = dict(profile)
+        prefix["marker_id"] = marker_id
+        # Include a prior bounded-contact step in the geometric chain if one
+        # exists; this read-only calculation does not execute it.
+        prefix["steps"] = copy.deepcopy(steps[:index])
+        _marker_id, resolved = self._profile_targets(
+            prefix, include_contact=True, action="previous-TCP capture")
+        if not resolved:
+            raise RobotCommandError(
+                "previous-TCP capture needs a preceding pose or contact target")
+        _previous_index, _previous_step, (previous_position, previous_euler) = resolved[-1]
+        current_position, current_quaternion = self.node._eef_pose_truth()
+        if current_position is None or current_quaternion is None:
+            raise RobotCommandError("current TCP transform is unavailable")
+        current_good_position, current_good_euler = self.node.to_good_frame(
+            current_position,
+            Rotation.from_quat(current_quaternion).as_euler("XYZ", degrees=False))
+        previous_position = np.asarray(previous_position, dtype=float)
+        previous_rotation = Rotation.from_euler("XYZ", previous_euler, degrees=False)
+        current_rotation = Rotation.from_euler("XYZ", current_good_euler, degrees=False)
+
+        translation = np.asarray(current_good_position) - previous_position
+        if step.get("translation_frame", "base") == "tool":
+            translation = previous_rotation.inv().apply(translation)
+        if step.get("orientation_frame", "tool") == "base":
+            delta_rotation = current_rotation * previous_rotation.inv()
+        else:
+            delta_rotation = previous_rotation.inv() * current_rotation
+        orientation = delta_rotation.as_euler("XYZ", degrees=False)
+        return {
+            "marker_id": marker_id,
+            "offset": [float(value) for value in translation],
+            "orientation": [float(value) for value in orientation],
+            "translation_frame": step.get("translation_frame", "base"),
+            "orientation_frame": step.get("orientation_frame", "tool"),
+            "previous_step": int(_previous_index),
+            "tcp_frame": self.node.end_effector_name,
+        }
+
+    def capture_absolute_tcp_pose(self) -> dict:
+        """Return the current TCP position/orientation in link_base axes."""
+        from scipy.spatial.transform import Rotation
+        position, quaternion = self.node._eef_pose_truth()
+        if position is None or quaternion is None:
+            raise RobotCommandError("current TCP transform is unavailable")
+        good_position, good_euler = self.node.to_good_frame(
+            position, Rotation.from_quat(quaternion).as_euler("XYZ", degrees=False))
+        return {"position": [float(value) for value in good_position],
+                "orientation": [float(value) for value in good_euler],
+                "frame": self.node.base_link_name,
+                "tcp_frame": self.node.end_effector_name}
+
     def execute(self, action: str, p: dict) -> Any:
         node = self.node
         if self.sim and action in PHYSICAL_ONLY_ACTIONS:
@@ -809,6 +1037,13 @@ class RosRobotBackend:
         if action == "prepare_motion":
             if self.sim:
                 raise RobotCommandError("prepare_motion is physical-only")
+            safety = node.safety_snapshot()
+            state_stream = next((item for item in safety.get("checks", [])
+                                 if item.get("name") == "xarm_state_stream"), None)
+            if state_stream is not None and not state_stream.get("ok"):
+                raise RobotCommandError(
+                    "xArm ROS state stream is stale; Prepare cannot restore a missing "
+                    "driver. Restart the xArm MoveIt/driver launch, then use Enable.")
             state = getattr(node, "_xarm_state", None)
             if state is not None and int(state.get("error_code", 0)) != 0:
                 raise RobotCommandError(
@@ -851,8 +1086,34 @@ class RosRobotBackend:
             except Exception as exc:
                 raise RobotCommandError(f"could not clear robot fault: {exc}")
             return node.recovery_snapshot()
+        if action == "enable_robot":
+            if self.sim:
+                raise RobotCommandError("enable_robot is physical-only")
+            try:
+                node.enable_xarm_motion()
+                node.set_xarm_mode(1)
+                node.set_trajectory_controller_active(True)
+            except Exception as exc:
+                raise RobotCommandError(f"could not enable robot motion: {exc}")
+            deadline = time.monotonic() + 4.0
+            while time.monotonic() < deadline:
+                snapshot = node.safety_snapshot()
+                if snapshot.get("ready"):
+                    return snapshot
+                time.sleep(0.1)
+            snapshot = node.safety_snapshot()
+            failed = "; ".join(
+                f"{check['name']}: {check['detail']}"
+                for check in snapshot.get("checks", []) if not check.get("ok"))
+            raise RobotCommandError(
+                "robot enable was requested but readiness did not return" +
+                (f" ({failed})" if failed else ""))
         if action in VISION_STATE_ACTIONS:
             return self._vision_state(action, p)
+        if action == "profile_dry_run":
+            return self._dry_run_profile(p["profile"])
+        if action == "profile_execute":
+            return self._execute_profile(p["profile"])
         # The automation package owns the authoritative interlocks.  Checking
         # here gives the GUI an immediate, readable failure before any MoveIt
         # goal is submitted; every low-level move checks again.
@@ -937,6 +1198,19 @@ class RosRobotBackend:
                     f"robot reached the scan approach, but marker {marker_id} "
                     "was not detected afterward")
             return {"move_ok": bool(move_ok), "marker_spotted": bool(spotted)}
+        if action == "remove_plate":
+            self._require_camera_ready(action)
+            self._require_manipulation_hardware(action)
+            source = p["source_marker_id"]
+            dropoff = p["dropoff_marker_id"]
+            if not node.pickupPlate(markerID=source):
+                raise RobotCommandError(
+                    f"pickup failed at source marker {source}; the cycle stopped")
+            if not node.placePlate(markerID=dropoff):
+                raise RobotCommandError(
+                    f"place failed at drop-off marker {dropoff}; plate may still be held")
+            return {"source_marker_id": source, "dropoff_marker_id": dropoff,
+                    "pickup": "completed", "place": "completed"}
         if action == "pickup":
             self._require_camera_ready(action)
             self._require_manipulation_hardware(action)
@@ -1029,7 +1303,7 @@ class RosRobotBackend:
                 f"{action} requires a configured physical {self.robot} gripper; "
                 "motion was blocked before the first waypoint")
         cfg = self.node.robot_config.get("gripper") or {}
-        if (not self.sim and action in {"pickup", "place", "transfer", "scrape"}
+        if (not self.sim and action in {"remove_plate", "pickup", "place", "transfer", "scrape"}
                 and not cfg.get("plate_routines_enabled", False)):
             raise RobotCommandError(
                 f"{action} is blocked until the CO0 gripper is physically commissioned; "
@@ -1057,7 +1331,323 @@ class RosRobotBackend:
             raise RobotCommandError(
                 f"{action} blocked by camera preflight: " + "; ".join(problems))
 
+    def _profile_marker(self, profile: dict, action: str = "profile"):
+        marker_id = int(profile["marker_id"])
+        diagnostics = self.node.stream.diagnostics()
+        visible = {int(value) for value in diagnostics.get("visible_marker_ids", [])}
+        if not self.sim and marker_id not in visible:
+            raise RobotCommandError(
+                f"{action} requires reference marker {marker_id} to be visible before it starts")
+        marker = self.node._find_marker_entry(marker_id)
+        if marker is None or marker.get("positionInBase") is None:
+            raise RobotCommandError(
+                f"{action} has no base-frame pose for reference marker {marker_id}")
+        if not self.sim and marker.get("estimated", False):
+            raise RobotCommandError(
+                f"reference marker {marker_id} has not been measured by the camera")
+        return marker_id, marker
+
+    @staticmethod
+    def _profile_requires_camera(profile: dict) -> bool:
+        """True only when a profile actually uses vision as a reference."""
+        return any(
+            step.get("kind") == "scan" or
+            (step.get("kind") == "pose" and
+             step.get("reference", "marker") == "marker")
+            for step in profile.get("steps", []))
+
+    def _profile_targets(self, profile: dict, *, include_contact: bool = False,
+                         action: str = "profile"):
+        """Resolve every movable dry-run step before the first trajectory.
+
+        Returns base-frame targets converted to the project's "good" frame
+        because move_to_pose() expects that frame. Gripper and hold steps do
+        not reach here. A physical run may opt into bounded contact targets.
+        """
+        import numpy as np
+        from scipy.spatial.transform import Rotation
+
+        node = self.node
+        marker_id = int(profile["marker_id"])
+        marker = marker_pos = marker_rot = None
+        def require_marker():
+            nonlocal marker, marker_pos, marker_rot
+            if marker is None:
+                _id, marker = self._profile_marker(profile, action)
+                marker_pos = np.asarray(marker["positionInBase"], dtype=float)
+                marker_rot = Rotation.from_euler(
+                    "XYZ", marker["eulerInBase"], degrees=False)
+            return marker_pos, marker_rot
+        tcp_position, tcp_quaternion = node._eef_pose_truth()
+        if tcp_position is None or tcp_quaternion is None:
+            raise RobotCommandError(f"{action} requires a current TCP transform")
+        tcp_euler = Rotation.from_quat(tcp_quaternion).as_euler("XYZ", degrees=False)
+        current_good_pos, current_good_euler = node.to_good_frame(tcp_position, tcp_euler)
+        previous = (np.asarray(current_good_pos), np.asarray(current_good_euler))
+        resolved = []
+        for index, step in enumerate(profile["steps"], 1):
+            kind = step["kind"]
+            if kind == "scan":
+                # Profile scan is a gate, not the legacy Scan ArUco motion.
+                # The operator defines any observation pose explicitly with a
+                # marker-relative pose step, so profile execution remains
+                # faithful to its saved geometry.
+                continue
+            elif kind == "pose":
+                offset = np.asarray(step["offset"], dtype=float)
+                reference = step.get("reference", "marker")
+                if reference == "marker":
+                    marker_pos, marker_rot = require_marker()
+                    translation_frame = step.get("translation_frame", "marker")
+                    orientation_frame = step.get("orientation_frame", "marker")
+                    target_pos = (marker_pos + marker_rot.apply(offset[:3])
+                                  if translation_frame == "marker"
+                                  else marker_pos + offset[:3])
+                    target_rot = ((marker_rot * Rotation.from_euler("XYZ", offset[3:]))
+                                  if orientation_frame == "marker"
+                                  else Rotation.from_euler("XYZ", offset[3:]))
+                    if step.get("target_frame", "tcp") == "camera":
+                        hand_eye = getattr(node, "hand_eye_transform", None)
+                        if hand_eye is None:
+                            raise RobotCommandError(
+                                f"step {index} targets the camera but hand-eye calibration is unavailable")
+                        hand_eye_rot = Rotation.from_matrix(hand_eye[:3, :3])
+                        bad_rot = target_rot * hand_eye_rot.inv()
+                        bad_pos = target_pos - bad_rot.apply(hand_eye[:3, 3])
+                    else:
+                        bad_pos, bad_rot = target_pos, target_rot
+                    good_pos, good_euler = node.to_good_frame(
+                        bad_pos, bad_rot.as_euler("XYZ", degrees=False))
+                    previous = (np.asarray(good_pos), np.asarray(good_euler))
+                elif reference == "previous_tcp":
+                    if previous is None:
+                        raise RobotCommandError(
+                            f"step {index} is relative to a previous TCP pose that does not exist")
+                    previous_pos, previous_euler = previous
+                    previous_rot = Rotation.from_euler("XYZ", previous_euler)
+                    translation = (offset[:3] if step.get("translation_frame", "base") == "base"
+                                   else previous_rot.apply(offset[:3]))
+                    delta_rot = Rotation.from_euler("XYZ", offset[3:])
+                    orientation = ((delta_rot * previous_rot)
+                                   if step.get("orientation_frame", "tool") == "base"
+                                   else (previous_rot * delta_rot))
+                    previous = (previous_pos + translation,
+                                orientation.as_euler("XYZ", degrees=False))
+                elif reference == "base":
+                    previous = (np.asarray(offset[:3]), np.asarray(offset[3:]))
+                else:
+                    raise RobotCommandError(
+                        f"step {index} has an unsupported pose reference")
+                resolved.append((index, step, previous))
+            elif kind == "contact" and include_contact:
+                direction = step["direction"]
+                axis = {"+x": (1, 0, 0), "-x": (-1, 0, 0),
+                        "+y": (0, 1, 0), "-y": (0, -1, 0),
+                        "+z": (0, 0, 1), "-z": (0, 0, -1)}[direction]
+                delta = np.asarray(axis, dtype=float) * float(step["travel_m"])
+                if step.get("frame", "base") == "tool":
+                    delta = Rotation.from_euler("XYZ", previous[1]).apply(delta)
+                previous = (previous[0] + delta, previous[1])
+                resolved.append((index, step, previous))
+        return marker_id, resolved
+
+    def _validate_profile_targets(self, resolved, *, execution: bool = False,
+                                  action: str = "profile"):
+        """Check workspace, IK, and joint limits before the first profile move."""
+        import numpy as np
+        from scipy.spatial.transform import Rotation
+        node = self.node
+        for index, step, (position, euler) in resolved:
+            try:
+                if step["kind"] == "contact":
+                    if not execution:
+                        continue
+                    if not step.get("physically_validated", False):
+                        raise ValueError(
+                            "contact has not been physically validated in this profile")
+                    if float(step["travel_m"]) > CONTACT_MAX_TRAVEL_M:
+                        raise ValueError(
+                            f"contact travel exceeds the {CONTACT_MAX_TRAVEL_M * 1000:.0f} mm physical-run limit")
+                    if float(step["speed_mm_s"]) > CONTACT_MAX_SPEED_MM_S:
+                        raise ValueError(
+                            f"contact speed exceeds the {CONTACT_MAX_SPEED_MM_S:g} mm/s physical-run limit")
+                # An ArUco is only a localization reference. Its distance is
+                # not a universal safety boundary: the safe standoff depends
+                # on whether it is attached to a printer, fixture, or open
+                # workspace. Enforce the real workspace, IK, joint limits and
+                # MoveIt collision scene below, while leaving each profile to
+                # define its own measured approach distance.
+                node.validate_pose_target(position)
+                bad_position, bad_euler = node.to_bad_frame(position, euler)
+                joints = node._solve_pose_ik(
+                    bad_position,
+                    Rotation.from_euler("XYZ", bad_euler).as_quat(),
+                    timeout=5.0)
+                if joints is None:
+                    raise ValueError("no IK solution")
+                node.validate_joint_target(joints)
+            except Exception as exc:
+                raise RobotCommandError(
+                    f"{action} preflight failed at step {index}: {exc}") from exc
+
+    def _dry_run_profile(self, profile: dict) -> dict:
+        """Execute only safe profile primitives under the normal MoveIt path."""
+        node = self.node
+        if self._profile_requires_camera(profile):
+            self._require_camera_ready("profile_dry_run")
+        node.assert_motion_safe()
+        self._profile_cancelled = False
+        self._profile_dry_run = {"profile_id": profile["id"], "status": "validating",
+                                 "current_step": None, "completed_steps": [],
+                                 "skipped_steps": []}
+        marker_id, resolved = self._profile_targets(profile, action="dry run")
+        self._validate_profile_targets(resolved, action="dry run")
+        target_by_step = {index: target for index, _step, target in resolved}
+        self._profile_dry_run["status"] = "running"
+        previous_velocity = node.moveit2.max_velocity
+        previous_acceleration = node.moveit2.max_acceleration
+        try:
+            for index, step in enumerate(profile["steps"], 1):
+                if self._profile_cancelled:
+                    raise RobotCommandError("dry run cancelled by operator")
+                self._profile_dry_run["current_step"] = index
+                kind = step["kind"]
+                if kind in {"gripper", "contact"}:
+                    self._profile_dry_run["skipped_steps"].append(
+                        {"index": index, "kind": kind, "reason": "dry run"})
+                    continue
+                if kind == "hold":
+                    deadline = time.monotonic() + float(step["duration_s"])
+                    while time.monotonic() < deadline:
+                        if self._profile_cancelled:
+                            raise RobotCommandError("dry run cancelled by operator")
+                        time.sleep(0.05)
+                    self._profile_dry_run["completed_steps"].append(index)
+                    continue
+                if kind == "scan":
+                    deadline = time.monotonic() + float(step["timeout_s"])
+                    while time.monotonic() < deadline:
+                        visible = {int(value) for value in node.stream.diagnostics().get(
+                            "visible_marker_ids", [])}
+                        if marker_id in visible:
+                            break
+                        if self._profile_cancelled:
+                            raise RobotCommandError("dry run cancelled by operator")
+                        time.sleep(0.05)
+                    else:
+                        raise RobotCommandError(
+                            f"dry run stopped at scan step {index}: marker {marker_id} is not visible")
+                    self._profile_dry_run["completed_steps"].append(index)
+                    continue
+                position, euler = target_by_step[index]
+                # A profile can only lower the physical motion limits already
+                # selected by runner_common; it cannot speed the cell up.
+                node.moveit2.max_velocity = min(previous_velocity, float(step.get("speed_scale", previous_velocity)))
+                node.moveit2.max_acceleration = min(previous_acceleration, float(step.get("acceleration_scale", previous_acceleration)))
+                if not node.move_to_pose(position, euler, max_retries=0, timeout=12.0):
+                    raise RobotCommandError(
+                        f"dry run failed while executing step {index} ({step['label']})")
+                self._profile_dry_run["completed_steps"].append(index)
+            self._profile_dry_run["status"] = "succeeded"
+            self._profile_dry_run["current_step"] = None
+            return {"profile_id": profile["id"], "marker_id": marker_id,
+                    "completed_steps": list(self._profile_dry_run["completed_steps"]),
+                    "skipped_steps": list(self._profile_dry_run["skipped_steps"])}
+        except Exception:
+            self._profile_dry_run["status"] = "cancelled" if self._profile_cancelled else "failed"
+            raise
+        finally:
+            node.moveit2.max_velocity = previous_velocity
+            node.moveit2.max_acceleration = previous_acceleration
+
+    def _execute_profile(self, profile: dict) -> dict:
+        """Run a saved physical profile, including CO0 and validated contact.
+
+        This is intentionally distinct from dry-run. Contact is a small MoveIt
+        displacement only; it has no force/part feedback and must be watched
+        by an operator who can stop the robot immediately.
+        """
+        if self.sim:
+            raise RobotCommandError("physical profile execution is unavailable in simulation")
+        node = self.node
+        if self._profile_requires_camera(profile):
+            self._require_camera_ready("profile execution")
+        node.assert_motion_safe()
+        if any(step["kind"] == "gripper" for step in profile["steps"]):
+            self._require_manipulation_hardware("profile execution")
+        self._profile_cancelled = False
+        self._profile_dry_run = {"profile_id": profile["id"], "status": "validating",
+                                 "mode": "physical", "current_step": None,
+                                 "completed_steps": [], "skipped_steps": []}
+        marker_id, resolved = self._profile_targets(
+            profile, include_contact=True, action="physical profile execution")
+        self._validate_profile_targets(
+            resolved, execution=True, action="physical profile")
+        target_by_step = {index: target for index, _step, target in resolved}
+        previous_velocity = node.moveit2.max_velocity
+        previous_acceleration = node.moveit2.max_acceleration
+        self._profile_dry_run["status"] = "running"
+        try:
+            for index, step in enumerate(profile["steps"], 1):
+                if self._profile_cancelled:
+                    raise RobotCommandError("physical profile cancelled by operator")
+                self._profile_dry_run["current_step"] = index
+                kind = step["kind"]
+                if kind == "scan":
+                    deadline = time.monotonic() + float(step["timeout_s"])
+                    while time.monotonic() < deadline:
+                        visible = {int(value) for value in node.stream.diagnostics().get(
+                            "visible_marker_ids", [])}
+                        if marker_id in visible:
+                            break
+                        if self._profile_cancelled:
+                            raise RobotCommandError("physical profile cancelled by operator")
+                        time.sleep(0.05)
+                    else:
+                        raise RobotCommandError(
+                            f"physical profile stopped at scan step {index}: marker {marker_id} is not visible")
+                elif kind == "hold":
+                    deadline = time.monotonic() + float(step["duration_s"])
+                    while time.monotonic() < deadline:
+                        if self._profile_cancelled:
+                            raise RobotCommandError("physical profile cancelled by operator")
+                        time.sleep(0.05)
+                elif kind == "gripper":
+                    if step["action"] == "open":
+                        node.open_gripper()
+                    else:
+                        node.close_gripper()
+                    time.sleep(float(step["settle_s"]))
+                else:
+                    position, euler = target_by_step[index]
+                    if kind == "contact":
+                        node.moveit2.max_velocity = min(previous_velocity, 0.05)
+                        node.moveit2.max_acceleration = min(previous_acceleration, 0.03)
+                    else:
+                        node.moveit2.max_velocity = min(
+                            previous_velocity, float(step.get("speed_scale", previous_velocity)))
+                        node.moveit2.max_acceleration = min(
+                            previous_acceleration, float(step.get("acceleration_scale", previous_acceleration)))
+                    if not node.move_to_pose(position, euler, max_retries=0, timeout=12.0):
+                        raise RobotCommandError(
+                            f"physical profile failed while executing step {index} ({step['label']})")
+                    if kind == "contact" and float(step["duration_s"]) > 0:
+                        time.sleep(float(step["duration_s"]))
+                self._profile_dry_run["completed_steps"].append(index)
+            self._profile_dry_run["status"] = "succeeded"
+            self._profile_dry_run["current_step"] = None
+            return {"profile_id": profile["id"], "marker_id": marker_id,
+                    "completed_steps": list(self._profile_dry_run["completed_steps"]),
+                    "contact_note": "Contact was a bounded MoveIt approach; no force or grasp feedback is available."}
+        except Exception:
+            self._profile_dry_run["status"] = "cancelled" if self._profile_cancelled else "failed"
+            raise
+        finally:
+            node.moveit2.max_velocity = previous_velocity
+            node.moveit2.max_acceleration = previous_acceleration
+
     def cancel(self) -> None:
+        self._profile_cancelled = True
         from std_msgs.msg import String
         msg = String()
         msg.data = "stop"
@@ -1082,6 +1672,7 @@ class RosRobotBackend:
             "recovery": _jsonable(self.node.recovery_snapshot()),
             "vision": self._vision_snapshot(),
             "gripper": self._gripper_snapshot(),
+            "profile_dry_run": _jsonable(self._profile_dry_run),
         }
 
     def _gripper_snapshot(self) -> dict:

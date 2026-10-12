@@ -37,9 +37,9 @@ export function gripperOutputView({ robot, gripper, selection, busy }) {
   const reported = Number(gripper?.output_count);
   const count = Number.isInteger(reported) && reported > 0
     ? reported : DEFAULT_CO_COUNT;
-  const outputs = Array.from({ length: count }, (_, index) => index);
-
   const current = Number.isInteger(gripper?.ionum) ? gripper.ionum : null;
+  const locked = Boolean(gripper?.output_locked);
+  const outputs = locked ? [current ?? 0] : Array.from({ length: count }, (_, index) => index);
   const picked = selection == null ? "" : String(selection);
   const value = picked !== "" ? picked : String(current ?? 0);
 
@@ -50,11 +50,12 @@ export function gripperOutputView({ robot, gripper, selection, busy }) {
   // current command, and the one the operator has to act on.
   else if (gripper?.command === "close") blocker = "closed";
   else if (busy) blocker = "busy";
+  else if (locked) blocker = "locked";
   // With no live setting to compare against, let the server decide -- it
   // answers 400/503 with a readable reason if this backend truly has none.
   else if (current !== null && Number(value) === current) blocker = "unchanged";
 
-  return { outputs, value, current, blocker };
+  return { outputs, value, current, blocker, locked };
 }
 
 
@@ -76,6 +77,8 @@ export function blockerText(blocker) {
     case "busy":
       return "Wait for the running command to finish before changing the " +
         "output.";
+    case "locked":
+      return "This cell is wired and locked to CO0; changing controller outputs is disabled.";
     default:
       return null;
   }

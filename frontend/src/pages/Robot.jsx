@@ -8,6 +8,7 @@ import {
   sendRobotCommand,
 } from "../api/robot.js";
 import { acknowledgeCellIncident } from "../api/cell.js";
+import CellProfileEditor from "../components/robot/CellProfileEditor.jsx";
 import { blockerText, gripperLabel, gripperOutputView }
   from "../components/robot/gripperOutput.js";
 import Button from "../components/ui/Button.jsx";
@@ -177,7 +178,16 @@ export default function Robot({ robot, cell, selected, wsUp }) {
   const [jogStepMm, setJogStepMm] = useState("5");
   const [pendingJog, setPendingJog] = useState({ x: 0, y: 0, z: 0 });
   const [cameraDevices, setCameraDevices] = useState([]);
-  const [cameraIndex, setCameraIndex] = useState("");
+  // null means the selector has not yet been hydrated from backend telemetry.
+  // "" is an operator's explicit request for movement-only mode.
+  const [cameraIndex, setCameraIndex] = useState(() => {
+    // Keep the chosen USB device across a page remount or a brief WebSocket
+    // gap. This is UI state only: the backend remains authoritative and no
+    // device is opened or changed merely by restoring this value.
+    try { return window.localStorage.getItem("robot-camera-index"); }
+    catch { return null; }
+  });
+  const [cameraSelectionTouched, setCameraSelectionTouched] = useState(false);
   const [cameraFrameKey, setCameraFrameKey] = useState(0);
   const [scanPosition, setScanPosition] = useState(["0.30", "0.00", "0.30"]);
   const [scanEuler, setScanEuler] = useState(["0", "0", "0"]);
@@ -213,10 +223,18 @@ export default function Robot({ robot, cell, selected, wsUp }) {
     robot?.recovery?.can_request_fault_clear
     && Object.values(faultChecks).every(Boolean),
   );
+  const canRequestEnable = Boolean(
+    robot?.recovery?.can_request_enable
+    && Object.values(faultChecks).every(Boolean),
+  );
   const jointsDeg = useMemo(
     () => (robot?.joints ?? []).map((value) => Number(value) / RAD),
     [robot?.joints],
   );
+  const activeCameraIndex = Number.isInteger(robot?.camera?.camera_index)
+    ? String(robot.camera.camera_index) : null;
+  const shownCameraIndex = cameraSelectionTouched
+    ? (cameraIndex ?? "") : (activeCameraIndex ?? cameraIndex ?? "");
 
   const run = async (action, parameters = {}) => {
     setSubmitting(true);
@@ -416,16 +434,32 @@ export default function Robot({ robot, cell, selected, wsUp }) {
     return () => window.clearInterval(timer);
   }, [robot?.camera?.color_age_s == null]);
 
+
+  // Backend telemetry, not V4L enumeration, is authoritative. A USB camera
+  // may briefly disappear from /sys while UVC reconnects, but the capture can
+  // still be alive. Never turn that transient into a movement-only selection.
+  useEffect(() => {
+    const activeIndex = robot?.camera?.camera_index;
+    if (!cameraSelectionTouched && Number.isInteger(activeIndex)) {
+      const next = String(activeIndex);
+      setCameraIndex(next);
+      try { window.localStorage.setItem("robot-camera-index", next); } catch { /* unavailable */ }
+    }
+  }, [cameraSelectionTouched, robot?.camera?.camera_index]);
   const applyCamera = async () => {
     setSubmitting(true);
     setError(null);
     try {
-      await configureRobotCamera(cameraIndex === "" ? null : Number(cameraIndex));
+      const selectedIndex = shownCameraIndex;
+      await configureRobotCamera(selectedIndex === "" ? null : Number(selectedIndex));
       // configure_camera reopens the capture in place -- it does NOT restart
       // the backend, and saying so sent operators looking for a reconnect
       // that never happens.
-      setNotice(cameraIndex === "" ? "Robot camera disabled" :
-        `Camera /dev/video${cameraIndex} selected`);
+      setCameraSelectionTouched(false);
+      setCameraIndex(selectedIndex);
+      try { window.localStorage.setItem("robot-camera-index", selectedIndex); } catch { /* unavailable */ }
+      setNotice(selectedIndex === "" ? "Robot camera disabled" :
+        `Camera /dev/video${selectedIndex} selected`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -543,10 +577,10 @@ export default function Robot({ robot, cell, selected, wsUp }) {
               </Button>
             </div>
           )}
-          {!robot?.sim && robot?.recovery?.can_request_fault_clear && (
+          {!robot?.sim && (robot?.recovery?.can_request_fault_clear || robot?.recovery?.can_request_enable) && (
             <div className="state-error robot-notice">
-              <strong>Controller fault recovery</strong>
-              <div>Clear a fault only after physically inspecting the cell. This does not start motion.</div>
+              <strong>Controller recovery and Enable</strong>
+              <div>Enable never overrides a physical E-stop or a fault. Inspect the cell and release protective devices first.</div>
               {[
                 ["area_clear", "The robot workspace is clear of people and obstructions"],
                 ["cause_inspected", "I inspected and corrected the cause of the fault"],
@@ -561,10 +595,14 @@ export default function Robot({ robot, cell, selected, wsUp }) {
                 </label>
               ))}
               <div className="robot-actions">
-                <Button variant="danger" disabled={!canRequestFaultClear || busy || submitting}
+                {robot?.recovery?.can_request_fault_clear && <Button variant="danger" disabled={!canRequestFaultClear || busy || submitting}
                         busy={submitting} onClick={() => run("clear_fault", faultChecks)}>
                   Request fault clear
-                </Button>
+                </Button>}
+                {robot?.recovery?.can_request_enable && <Button variant="primary" disabled={!canRequestEnable || busy || submitting}
+                        busy={submitting} onClick={() => run("enable_robot", faultChecks)}>
+                  Enable robot after stop / E-stop
+                </Button>}
               </div>
             </div>
           )}
@@ -715,6 +753,12 @@ export default function Robot({ robot, cell, selected, wsUp }) {
             )}
           </Card>
         </div>
+      </Section>
+
+      <Section title="Cell profile editor">
+        <Card>
+          <CellProfileEditor />
+        </Card>
       </Section>
 
       <Section title="Automation goals">
@@ -959,9 +1003,20 @@ export default function Robot({ robot, cell, selected, wsUp }) {
         <div className="robot-grid">
           <Card title="USB camera">
             <div className="robot-camera-config">
-              <select value={cameraIndex}
-                      onChange={(event) => setCameraIndex(event.target.value)}>
+              <select value={shownCameraIndex}
+                      onChange={(event) => {
+                        setCameraSelectionTouched(true);
+                        setCameraIndex(event.target.value);
+                        try { window.localStorage.setItem("robot-camera-index", event.target.value); } catch { /* unavailable */ }
+                      }}>
                 <option value="">Disabled (movement only)</option>
+                {shownCameraIndex !== "" && !cameraDevices.some(
+                  (device) => String(device.index) === shownCameraIndex,
+                ) && (
+                  <option value={shownCameraIndex}>
+                    /dev/video{shownCameraIndex} · {activeCameraIndex === shownCameraIndex ? "active camera" : "last selected camera"} (temporarily unavailable in device list)
+                  </option>
+                )}
                 {cameraDevices.map((device) => (
                   <option key={device.index} value={device.index}>
                     {device.path} · {device.name}
@@ -972,6 +1027,11 @@ export default function Robot({ robot, cell, selected, wsUp }) {
               <Button onClick={loadCameras}>Refresh cameras</Button>
               <Button onClick={applyCamera} busy={submitting}>Apply camera</Button>
             </div>
+            <p className="robot-help">
+              {robot?.camera?.source === "webcam" && activeCameraIndex !== null
+                ? `Active camera: /dev/video${activeCameraIndex}${robot.camera.frame_stalled ? " · reconnecting" : ""}`
+                : "Camera is disabled; robot movement remains available."}
+            </p>
             <div className="robot-camera-preview">
               {robot?.camera?.color_age_s == null ? (
                 <span>No camera frames</span>

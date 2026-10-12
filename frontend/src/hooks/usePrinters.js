@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 const MAX_BACKOFF_MS = 10000;
 
 // Live list of every registered printer over /ws with auto-reconnect.
-// Returns { printers, robot, wsUp }: printers is the last received list (empty
+// Returns { printers, robot, cell, wsUp }: printers is the last received list (empty
 // until the first message), wsUp is whether the socket is currently open.
 //
 // `robot` stays null on a server with no arm configured, because the server
@@ -16,6 +16,7 @@ const MAX_BACKOFF_MS = 10000;
 export function usePrinters() {
   const [printers, setPrinters] = useState([]);
   const [robot, setRobot] = useState(null);
+  const [cell, setCell] = useState(null);
   const [wsUp, setWsUp] = useState(false);
 
   useEffect(() => {
@@ -41,6 +42,7 @@ export function usePrinters() {
           const payload = JSON.parse(e.data);
           setPrinters(payload.printers ?? []);
           if ("robot" in payload) setRobot(payload.robot);
+          if ("cell" in payload) setCell(payload.cell);
         } catch (err) {
           console.error("usePrinters: malformed WS message", err);
         }
@@ -64,5 +66,5 @@ export function usePrinters() {
     };
   }, []);
 
-  return { printers, robot, wsUp };
+  return { printers, robot, cell, wsUp };
 }

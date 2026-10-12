@@ -23,6 +23,9 @@ import sys
 import uvicorn
 
 from .auth import Auth, is_loopback
+from .cell import CellCoordinator
+from .cell_profiles import CellProfileStore
+from .cell_layout import CellLayoutStore
 from .detection import (DEFAULT_INTERVAL_S, DetectionCoordinator,
                         DetectorSupervisor, MockDetectorRunner)
 from .ledger import Ledger
@@ -394,17 +397,15 @@ def main() -> int:
         log.info("robot control enabled (mock backend, no hardware)")
         robot = RobotManager(MockRobotBackend)
     elif a.robot_mode == "ros":
-        # A camera mode of "webcam" with no index is a misconfiguration, not a
-        # fatal one: degrade to disabled so the server still starts and the
-        # Robot page can offer the picker, rather than dying at boot.
+        # A missing index means automatic V4L2 discovery.  It must not silently
+        # become a ROS-camera source: physical xArm deployments commonly use a
+        # USB webcam and have no /camera topics.
         initial_mode = os.environ.get("XARM_CAMERA_MODE", "webcam").lower()
         initial_index = os.environ.get("XARM_CAMERA_INDEX", "").strip()
         robot_camera = {
             "mode": initial_mode,
             "index": int(initial_index) if initial_index else None,
         }
-        if robot_camera["mode"] == "webcam" and robot_camera["index"] is None:
-            robot_camera["mode"] = "disabled"
         # Which controller output drives the gripper (CO0..CO7). Unset keeps
         # whatever robot_config.py declares; the Robot page can change it at
         # runtime either way. A bad value is fatal here on purpose -- silently
@@ -463,9 +464,14 @@ def main() -> int:
         print("  Ctrl+C to stop.\n")
 
     dist = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "dist"
+    cell = CellCoordinator(registry, robot=robot,
+                           state_path=runs_dir / "cell_state.json")
+    profiles = CellProfileStore(runs_dir / "cell_profiles.json")
+    layout = CellLayoutStore(runs_dir / "cell_layout.json")
     app = create_app(registry, runs_dir, dist, detection=coordinator,
                      queue=queue, slicer=slicer, auth=auth, ledger=ledger,
-                     recorder=recorder, partstore=partstore, robot=robot)
+                     recorder=recorder, partstore=partstore, robot=robot,
+                     cell=cell, profiles=profiles, layout=layout)
     # uvicorn re-raises the signal it caught using whatever handler was
     # installed beforehand. SIGBREAK's OS default kills the process outright
     # (skipping `finally`), so map it to KeyboardInterrupt like SIGINT gets.

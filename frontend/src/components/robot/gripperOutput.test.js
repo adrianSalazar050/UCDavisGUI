@@ -47,6 +47,16 @@ describe("gripperOutputView", () => {
     expect(changed.blocker).toBeNull();
   });
 
+  it("locks a fixed wiring configuration to its declared output", () => {
+    const view = gripperOutputView({
+      robot: idle, gripper: cgpio({ ionum: 0, output_locked: true }),
+      selection: "5", busy: false,
+    });
+    expect(view.outputs).toEqual([0]);
+    expect(view.locked).toBe(true);
+    expect(view.blocker).toBe("locked");
+    expect(blockerText(view.blocker)).toMatch(/CO0/);
+  });
   it("bounds the options by the controller's reported CO count", () => {
     const view = gripperOutputView({
       robot: idle, gripper: cgpio({ output_count: 4 }), selection: "",

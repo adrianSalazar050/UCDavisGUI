@@ -8,6 +8,7 @@ import Queue from "../pages/Queue.jsx";
 import Robot from "../pages/Robot.jsx";
 import SdFiles from "../pages/SdFiles.jsx";
 import Slice from "../pages/Slice.jsx";
+import CellLayoutSafety from "../pages/CellLayoutSafety.jsx";
 
 // Every page: key -> { title, description, group, scope, component }. The
 // sidebar, the topbar and each page's one-line description are all derived
@@ -135,6 +136,13 @@ export const pages = {
     group: "Setup",
     scope: "fleet",
     component: Printers,
+  },
+  cellLayout: {
+    title: "Cell Layout & Safety",
+    description: "Map the physical work envelope, keep-out volumes and controlled access zones in link_base.",
+    group: "Setup",
+    scope: "fleet",
+    component: CellLayoutSafety,
   },
 };
 

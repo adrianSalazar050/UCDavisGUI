@@ -78,6 +78,20 @@ def test_normalize_scan_location():
         })
 
 
+def test_fault_clear_requires_explicit_operator_acknowledgements():
+    with pytest.raises(RobotCommandError, match="operator confirmation"):
+        normalize_command("clear_fault", {"area_clear": True})
+    assert normalize_command("clear_fault", {
+        "area_clear": True,
+        "cause_inspected": True,
+        "e_stop_released": True,
+    }) == ("clear_fault", {
+        "area_clear": True,
+        "cause_inspected": True,
+        "e_stop_released": True,
+    })
+
+
 def test_manager_executes_one_command_and_reports_telemetry():
     manager = RobotManager(lambda: MockRobotBackend(delay_s=0.01))
     manager.start()

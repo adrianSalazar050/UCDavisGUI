@@ -26,6 +26,8 @@ from .sdcard import SdError
 from .ledger import END_STATES, PIECE_STATUSES
 from .robot import (RobotBusy, RobotCommandError, RobotUnavailable,
                     list_video_devices)
+from .cell_profiles import ProfileError
+from .cell_layout import LayoutError
 from .store import CAMERA_SOURCES, model_mismatch
 
 # How long to wait for a started print to show up in gcode_state before
@@ -282,8 +284,38 @@ class RobotCameraBody(BaseModel):
     index: int | None = None
 
 
+class RobotMarkerBody(BaseModel):
+    marker_id: int
+    target_frame: str = "tcp"
+    translation_frame: str = "marker"
+    orientation_frame: str = "marker"
+
+
+class RobotPreviousTcpOffsetBody(BaseModel):
+    profile: dict
+    step_index: int
+
+
 class RobotGripperBody(BaseModel):
     output: int
+
+
+class CellIncidentBody(BaseModel):
+    operator_note: str = ""
+
+
+class CellProfileBody(BaseModel):
+    profile: dict
+
+
+class CellProfileDryRunBody(BaseModel):
+    area_clear: bool = False
+
+
+class CellProfileExecuteBody(BaseModel):
+    area_clear: bool = False
+    supervised: bool = False
+    contact_fixture_confirmed: bool = False
 
 
 def _comparable(printers: list[dict]) -> list[dict]:
@@ -366,7 +398,7 @@ def create_app(registry, runs_dir: pathlib.Path,
                frontend_dist: pathlib.Path | None = None,
                detection=None, queue=None, slicer=None, auth=None,
                ledger=None, recorder=None, partstore=None,
-               robot=None) -> FastAPI:
+               robot=None, cell=None, profiles=None, layout=None) -> FastAPI:
     """`registry` is anything with summaries() -> list[dict], get(serial),
     add(...), remove(serial) (PrinterRegistry, or a test fake). `queue` is
     anything with add(serial, job), remove(serial, id) -> bool,
@@ -1343,6 +1375,154 @@ def create_app(registry, runs_dir: pathlib.Path,
         return Response(content=data, media_type="image/jpeg",
                         headers={"Cache-Control": "no-store"})
 
+    @app.post("/api/robot/profile-pose")
+    def robot_profile_pose(body: RobotMarkerBody):
+        """Capture a marker-relative TCP pose without commanding motion."""
+        try:
+            return _require_robot().capture_profile_pose(
+                body.marker_id, body.target_frame, body.translation_frame,
+                body.orientation_frame)
+        except RobotUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except RobotBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except RobotCommandError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/robot/profile-previous-tcp-offset")
+    def robot_profile_previous_tcp_offset(body: RobotPreviousTcpOffsetBody):
+        """Capture a draft step's current TCP delta from its prior target.
+
+        This is a read-only editor helper. It resolves the previous saved
+        profile target against the live reference marker, then expresses the
+        current wrist pose in the selected base/tool delta frame.
+        """
+        try:
+            return _require_robot().capture_previous_tcp_offset(
+                body.profile, body.step_index)
+        except RobotUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except RobotBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except RobotCommandError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/robot/profile-absolute-tcp")
+    def robot_profile_absolute_tcp():
+        """Read the current TCP target in link_base; never commands motion."""
+        try:
+            return _require_robot().capture_absolute_tcp_pose()
+        except RobotUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except RobotBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except RobotCommandError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/cell/status")
+    def cell_status():
+        if cell is None:
+            raise HTTPException(404, "cell coordination is not configured")
+        return cell.snapshot()
+
+    @app.get("/api/cell/profiles")
+    def cell_profiles():
+        if profiles is None:
+            raise HTTPException(404, "cell profile editor is not configured")
+        return profiles.snapshot()
+
+    @app.get("/api/cell/layout")
+    def cell_layout():
+        if layout is None:
+            raise HTTPException(404, "cell layout editor is not configured")
+        return layout.snapshot()
+
+    @app.put("/api/cell/layout")
+    def save_cell_layout(body: dict):
+        if layout is None:
+            raise HTTPException(404, "cell layout editor is not configured")
+        try:
+            return layout.save(body)
+        except LayoutError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.put("/api/cell/profiles")
+    def save_cell_profile(body: CellProfileBody):
+        if profiles is None:
+            raise HTTPException(404, "cell profile editor is not configured")
+        try:
+            return profiles.save(body.profile)
+        except ProfileError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.delete("/api/cell/profiles/{profile_id}")
+    def delete_cell_profile(profile_id: str):
+        if profiles is None:
+            raise HTTPException(404, "cell profile editor is not configured")
+        try:
+            profiles.delete(profile_id)
+        except ProfileError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return Response(status_code=204)
+
+    @app.post("/api/cell/profiles/{profile_id}/dry-run", status_code=202)
+    def dry_run_cell_profile(profile_id: str, body: CellProfileDryRunBody):
+        if profiles is None:
+            raise HTTPException(404, "cell profile editor is not configured")
+        if not body.area_clear:
+            raise HTTPException(400, "dry run requires confirmation that the area is clear")
+        try:
+            profile = profiles.get(profile_id)
+            return _require_robot().submit("profile_dry_run", {"profile": profile})
+        except ProfileError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RobotUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except RobotBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except RobotCommandError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/cell/profiles/{profile_id}/execute", status_code=202)
+    def execute_cell_profile(profile_id: str, body: CellProfileExecuteBody):
+        if profiles is None:
+            raise HTTPException(404, "cell profile editor is not configured")
+        if not body.area_clear or not body.supervised:
+            raise HTTPException(
+                400, "physical profile execution requires area-clear and supervised-run confirmation")
+        try:
+            profile = profiles.get(profile_id)
+            has_contact = any(step.get("kind") == "contact"
+                              for step in profile.get("steps", []))
+            if has_contact and not body.contact_fixture_confirmed:
+                raise HTTPException(
+                    400, "profile contains contact; confirm the fixture and exact contact step")
+            return _require_robot().submit("profile_execute", {
+                "profile": profile,
+                "area_clear": body.area_clear,
+                "supervised": body.supervised,
+                "contact_fixture_confirmed": body.contact_fixture_confirmed,
+            })
+        except ProfileError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RobotUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except RobotBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except RobotCommandError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/cell/printers/{serial}/acknowledge-incident")
+    def acknowledge_cell_incident(serial: str, body: CellIncidentBody):
+        if cell is None:
+            raise HTTPException(404, "cell coordination is not configured")
+        try:
+            return cell.acknowledge_incident(serial, body.operator_note)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
     @app.post("/api/robot/commands", status_code=202)
     def robot_command(body: RobotCommandBody):
         controller = _require_robot()
@@ -1373,6 +1553,8 @@ def create_app(registry, runs_dir: pathlib.Path,
         payload = {"printers": printers}
         if robot is not None:
             payload["robot"] = robot.snapshot()
+        if cell is not None:
+            payload["cell"] = cell.snapshot()
         return payload
 
     def _live_comparable(payload):
@@ -1382,6 +1564,8 @@ def create_app(registry, runs_dir: pathlib.Path,
         value = {"printers": _comparable(payload["printers"])}
         if "robot" in payload:
             value["robot"] = payload["robot"]
+        if "cell" in payload:
+            value["cell"] = payload["cell"]
         return value
 
     @app.websocket("/ws")
